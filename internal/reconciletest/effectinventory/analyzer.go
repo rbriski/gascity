@@ -21,9 +21,10 @@ import (
 )
 
 type analysisConfig struct {
-	RepoRoot   string
-	ModulePath string
-	Patterns   []string
+	RepoRoot    string
+	ModulePath  string
+	Patterns    []string
+	closedWorld bool
 }
 
 type analysisProfile struct {
@@ -50,6 +51,7 @@ type loadedAnalysis struct {
 	program           *ssa.Program
 	packages          map[string]*packages.Package
 	sourceFuncs       map[*ssa.Function]bool
+	effectFuncs       map[*ssa.Function]bool
 	callGraph         *callgraph.Graph
 	selectOps         map[token.Pos]OperationKind
 	receivers         map[token.Pos]types.Type
@@ -93,7 +95,7 @@ func discoverLoadedProfile(analysis *loadedAnalysis, definitions []BoundaryDefin
 
 	var observed []observedCall
 	problems := append([]string(nil), inputProblems...)
-	for function := range analysis.sourceFuncs {
+	for function := range analysis.effectFuncs {
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
 				if call, ok := instruction.(ssa.CallInstruction); ok {
@@ -240,8 +242,12 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 	}
 
 	resolvedGraph := vta.CallGraph(graphFunctions, chaGraph)
+	effectFuncs := sourceFuncs
+	if config.closedWorld {
+		effectFuncs = executionReachableSourceFunctions(roots, program, resolvedGraph, sourceFuncs)
+	}
 	return &loadedAnalysis{
-		config:            analysisConfig{RepoRoot: repoRoot, ModulePath: config.ModulePath, Patterns: append([]string(nil), config.Patterns...)},
+		config:            analysisConfig{RepoRoot: repoRoot, ModulePath: config.ModulePath, Patterns: append([]string(nil), config.Patterns...), closedWorld: config.closedWorld},
 		profile:           profile,
 		roots:             roots,
 		sourcePackages:    sourcePackages,
@@ -249,12 +255,51 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 		program:           program,
 		packages:          packageIndex,
 		sourceFuncs:       sourceFuncs,
+		effectFuncs:       effectFuncs,
 		globalUses:        collectSourceGlobalUses(sourceFuncs),
 		callGraph:         resolvedGraph,
 		selectOps:         collectSelectOperations(sourcePackages),
 		receivers:         collectSelectionReceivers(sourcePackages),
 		initReachable:     functionsReachableFromInitializers(ssaSourcePackages, resolvedGraph),
 	}, nil
+}
+
+func executionReachableSourceFunctions(roots []*packages.Package, program *ssa.Program, graph *callgraph.Graph, sourceFuncs map[*ssa.Function]bool) map[*ssa.Function]bool {
+	reachable := make(map[*ssa.Function]bool)
+	visited := make(map[*ssa.Function]bool)
+	var visit func(*ssa.Function)
+	visit = func(function *ssa.Function) {
+		if function == nil || visited[function] {
+			return
+		}
+		visited[function] = true
+		origin := function
+		if genericOrigin := function.Origin(); genericOrigin != nil {
+			origin = genericOrigin
+		}
+		if sourceFuncs[origin] {
+			reachable[origin] = true
+		}
+		if node := graph.Nodes[function]; node != nil {
+			for _, edge := range node.Out {
+				if edge != nil && edge.Callee != nil {
+					visit(edge.Callee.Func)
+				}
+			}
+		}
+	}
+	for _, root := range roots {
+		if root == nil || root.Types == nil {
+			continue
+		}
+		pkg := program.Package(root.Types)
+		if pkg == nil {
+			continue
+		}
+		visit(pkg.Func("init"))
+		visit(pkg.Func("main"))
+	}
+	return reachable
 }
 
 func functionsReachableFromInitializers(packages []*ssa.Package, graph *callgraph.Graph) map[*ssa.Function]bool {

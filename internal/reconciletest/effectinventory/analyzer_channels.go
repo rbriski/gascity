@@ -723,8 +723,11 @@ func (tracer *channelTracer) traceChannelField(base ssa.Value, field int, bindin
 	provenance := newChannelProvenance()
 	allocation, local := base.(*ssa.Alloc)
 	if !local {
-		if load, ok := base.(*ssa.UnOp); ok {
-			allocation, local = load.X.(*ssa.Alloc)
+		if load, ok := base.(*ssa.UnOp); ok && load.Op == token.MUL {
+			_, loadsStructValue := types.Unalias(load.Type()).Underlying().(*types.Struct)
+			if loadsStructValue {
+				allocation, local = load.X.(*ssa.Alloc)
+			}
 		}
 	}
 	if !local {
@@ -777,7 +780,15 @@ func (tracer *channelTracer) traceChannelField(base ssa.Value, field int, bindin
 	if !foundStore {
 		// A zero-valued local field is a closed-world nil channel.
 		provenance.grounded = true
-		return provenance
+	}
+	if provenance.openWorld && tracer.analysis.config.closedWorld {
+		// Returning or otherwise aliasing the containing value does not make an
+		// unexported module field mutable by an unanalyzed package. When the
+		// complete reachable field-address census is direct, its store union is
+		// a conservative closed-world fallback for the local instance.
+		if stored, closed := tracer.tracePrivateChannelField(base.Type(), field, bindings); closed {
+			return stored
+		}
 	}
 	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
 		provenance.openWorld = true

@@ -232,6 +232,7 @@ var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
+	_ AtomicReadWriteStore          = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
@@ -1364,6 +1365,98 @@ func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 // AtomicTx reports that Tx is backed by a native Dolt transaction that rolls
 // back every write when the callback returns an error.
 func (s *NativeDoltStore) AtomicTx() bool { return true }
+
+// AtomicReadWrite runs fn in one NativeDolt history transaction. Its adapter
+// exposes exact read-your-writes record access and durable store metadata but
+// rejects ephemeral and no-history records, which upstream commits through a
+// separate ignored-table transaction.
+func (s *NativeDoltStore) AtomicReadWrite(parent context.Context, commitMsg string, fn func(AtomicReadWriteTx) error) error {
+	if parent == nil {
+		return errors.New("beads atomic read/write: nil context")
+	}
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	if fn == nil {
+		return errors.New("beads atomic read/write: nil callback")
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(parent)
+	defer cancel()
+	if strings.TrimSpace(commitMsg) == "" {
+		commitMsg = "gc: atomic read/write"
+	}
+	return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		return fn(&nativeDoltAtomicReadWriteTx{store: s, ctx: ctx, tx: tx})
+	})
+}
+
+type nativeDoltAtomicReadWriteTx struct {
+	store *NativeDoltStore
+	ctx   context.Context
+	tx    beadslib.Transaction
+}
+
+func (t *nativeDoltAtomicReadWriteTx) GetIssue(id string) (Bead, error) {
+	issue, err := t.tx.GetIssue(t.ctx, id)
+	if err != nil {
+		return Bead{}, nativeStoreError(id, err)
+	}
+	if issue == nil {
+		return Bead{}, fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	bead, err := beadFromNativeIssue(issue)
+	if err != nil {
+		return Bead{}, err
+	}
+	if err := requireAtomicReadWriteHistory(bead); err != nil {
+		return Bead{}, err
+	}
+	return bead, nil
+}
+
+func (t *nativeDoltAtomicReadWriteTx) Create(b Bead) (Bead, error) {
+	if err := requireAtomicReadWriteHistory(b); err != nil {
+		return Bead{}, err
+	}
+	return t.store.applyCreateInTx(t.ctx, t.tx, b)
+}
+
+func (t *nativeDoltAtomicReadWriteTx) Update(id string, opts UpdateOpts) error {
+	if _, err := t.GetIssue(id); err != nil {
+		return err
+	}
+	if err := t.store.applyUpdateInTx(t.ctx, t.tx, id, opts); err != nil {
+		return nativeStoreError(id, err)
+	}
+	return nil
+}
+
+func (t *nativeDoltAtomicReadWriteTx) GetMetadata(key string) (string, error) {
+	value, err := t.tx.GetMetadata(t.ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("getting durable metadata %q: %w", key, err)
+	}
+	return value, nil
+}
+
+func (t *nativeDoltAtomicReadWriteTx) SetMetadata(key, value string) error {
+	if err := t.tx.SetMetadata(t.ctx, key, value); err != nil {
+		return fmt.Errorf("setting durable metadata %q: %w", key, err)
+	}
+	return nil
+}
+
+func requireAtomicReadWriteHistory(b Bead) error {
+	if !b.Ephemeral && !b.NoHistory {
+		return nil
+	}
+	return fmt.Errorf("bead %q uses ephemeral=%t no_history=%t: %w", b.ID, b.Ephemeral, b.NoHistory, ErrAtomicReadWriteStorageClass)
+}
 
 // nativeDoltTx adapts the Store.Tx write surface onto an open beadslib
 // transaction. Every method routes through the store's applyXInTx helpers so

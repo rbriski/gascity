@@ -44,6 +44,12 @@ func resolveBoundaries(packageIndex map[string]*packages.Package, definitions []
 				problems = append(problems, fmt.Sprintf("boundary %q: %v", definition.ID, channelErr))
 				continue
 			}
+			release, releaseErr := resolveChannelRelease(packageIndex, definition.Release, boundary.channel)
+			if releaseErr != nil {
+				problems = append(problems, fmt.Sprintf("boundary %q: %v", definition.ID, releaseErr))
+				continue
+			}
+			boundary.release = release
 			resolved = append(resolved, boundary)
 			continue
 		}
@@ -79,6 +85,39 @@ func resolveBoundaries(packageIndex map[string]*packages.Package, definitions []
 		return resolved[i].definition.ID < resolved[j].definition.ID
 	})
 	return resolved, nil
+}
+
+func resolveChannelRelease(packageIndex map[string]*packages.Package, definition ChannelRelease, channelType types.Type) (*resolvedChannelRelease, error) {
+	if definition.zero() {
+		return nil, nil
+	}
+	if definition.Object.zero() || definition.Input.zero() {
+		return nil, fmt.Errorf("channel release requires both an object and input slot")
+	}
+	if definition.Object.Receiver != "" {
+		return nil, fmt.Errorf("channel release must name a package function")
+	}
+	pkg := packageIndex[definition.Object.Package]
+	if pkg == nil || pkg.Types == nil {
+		return nil, fmt.Errorf("channel release package %q was not loaded", definition.Object.Package)
+	}
+	function, err := resolveFunctionObject(pkg.Types, definition.Object)
+	if err != nil {
+		return nil, fmt.Errorf("channel release: %w", err)
+	}
+	signature, _ := function.Type().(*types.Signature)
+	index := definition.Input.Index - 1
+	if definition.Input.Kind != SlotParameter || signature == nil || index < 0 || index >= signature.Params().Len() {
+		return nil, fmt.Errorf("channel release object %s has no parameter slot %d", definition.Object.key(), definition.Input.Index)
+	}
+	parameterType := signature.Params().At(index).Type()
+	if _, ok := types.Unalias(parameterType).Underlying().(*types.Chan); !ok {
+		return nil, fmt.Errorf("channel release object %s parameter %d does not have channel type", definition.Object.key(), definition.Input.Index)
+	}
+	if !channelTypesCompatible(parameterType, channelType) {
+		return nil, fmt.Errorf("channel release object %s parameter %d is incompatible with source channel type", definition.Object.key(), definition.Input.Index)
+	}
+	return &resolvedChannelRelease{function: function, input: definition.Input}, nil
 }
 
 func resolveFunctionObject(pkg *types.Package, reference ObjectRef) (*types.Func, error) {

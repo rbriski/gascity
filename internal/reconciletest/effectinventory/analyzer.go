@@ -70,6 +70,12 @@ type resolvedBoundary struct {
 	function      *types.Func
 	interfaceType *types.Interface
 	channel       types.Type
+	release       *resolvedChannelRelease
+}
+
+type resolvedChannelRelease struct {
+	function *types.Func
+	input    ValueSlot
 }
 
 type observedCall struct {

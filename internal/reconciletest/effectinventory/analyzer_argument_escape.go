@@ -17,7 +17,11 @@ func (analysis *loadedAnalysis) unanalyzedBoundaryArgumentProblems(ref FunctionR
 	var problems []string
 	for argumentIndex, argument := range call.Common().Args {
 		matches := analysis.escapedArgumentBoundaries(argument, boundaries)
-		matches = removeBoundaryIDs(matches, analysis.consumedChannelInputBoundaries(call, callees, argumentIndex, boundaries))
+		consumed := analysis.consumedChannelInputBoundaries(call, callees, argumentIndex, boundaries)
+		for boundaryID := range analysis.releasedChannelBoundaries(call, argumentIndex, boundaries) {
+			consumed[boundaryID] = true
+		}
+		matches = removeBoundaryIDs(matches, consumed)
 		if len(matches) == 0 {
 			continue
 		}
@@ -46,6 +50,47 @@ func (analysis *loadedAnalysis) unanalyzedBoundaryArgumentProblems(ref FunctionR
 		))
 	}
 	return problems
+}
+
+func (analysis *loadedAnalysis) releasedChannelBoundaries(call ssa.CallInstruction, argumentIndex int, boundaries []resolvedBoundary) map[string]bool {
+	released := make(map[string]bool)
+	common := call.Common()
+	if common == nil || argumentIndex < 0 || argumentIndex >= len(common.Args) {
+		return released
+	}
+	for _, boundary := range boundaries {
+		if boundary.release == nil || !callDirectlyMatchesFunction(common, boundary.release.function) {
+			continue
+		}
+		releaseArgumentIndex, ok := channelReleaseArgumentIndex(common, boundary.release)
+		if ok && releaseArgumentIndex == argumentIndex {
+			released[boundary.definition.ID] = true
+		}
+	}
+	return released
+}
+
+func callDirectlyMatchesFunction(common *ssa.CallCommon, function *types.Func) bool {
+	if common == nil || function == nil {
+		return false
+	}
+	static := common.StaticCallee()
+	if static == nil {
+		return false
+	}
+	object, _ := static.Object().(*types.Func)
+	return object != nil && object.Origin() == function.Origin()
+}
+
+func channelReleaseArgumentIndex(common *ssa.CallCommon, release *resolvedChannelRelease) (int, bool) {
+	if common == nil || release == nil || release.function == nil {
+		return 0, false
+	}
+	index := release.input.Index - 1
+	if index < 0 || index >= len(common.Args) {
+		return 0, false
+	}
+	return index, true
 }
 
 func (analysis *loadedAnalysis) consumedChannelInputBoundaries(call ssa.CallInstruction, callees []*ssa.Function, argumentIndex int, boundaries []resolvedBoundary) map[string]bool {

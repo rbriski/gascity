@@ -57,16 +57,6 @@ func canonicalBoundaries() []BoundaryDefinition {
 			Output: ValueSlot{Kind: SlotResult, Index: result},
 		})
 	}
-	addChannelInput := func(id, packagePath, receiver, name string, parameter int) {
-		definitions = append(definitions, BoundaryDefinition{
-			ID:     id,
-			Kind:   KindWakeSource,
-			Object: ObjectRef{Package: packagePath, Receiver: receiver, Name: name},
-			Match:  ObjectMatchChannel,
-			Input:  ValueSlot{Kind: SlotParameter, Index: parameter},
-		})
-	}
-
 	// Writer is the narrow canonical mutation handle. Store implements Writer,
 	// so registering Store's duplicate method set would classify one typed call
 	// against two boundaries and miss direct StoreHandles.Writer calls.
@@ -137,7 +127,17 @@ func canonicalBoundaries() []BoundaryDefinition {
 	addChannelField("wake.time.timer", "time", "Timer", "C")
 	addChannelResult("wake.time.after", "time", "", "After", 1)
 	addChannelResult("wake.context.done", "context", "Context", "Done", 1)
-	addChannelInput("wake.signal.notify", "os/signal", "", "Notify", 1)
+	definitions = append(definitions, BoundaryDefinition{
+		ID:     "wake.signal.notify",
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: "os/signal", Name: "Notify"},
+		Match:  ObjectMatchChannel,
+		Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+		Release: ChannelRelease{
+			Object: ObjectRef{Package: "os/signal", Name: "Stop"},
+			Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+		},
+	})
 	definitions = append(definitions, BoundaryDefinition{
 		ID:     "wake.signal.notify-context",
 		Kind:   KindWakeSource,

@@ -11,6 +11,7 @@ var notify = signal.Notify
 func run() {
 	channel := make(chan os.Signal, 1)
 	notify(channel, os.Interrupt)
+	defer signal.Stop(channel)
 	select {
 	case <-channel:
 	default:

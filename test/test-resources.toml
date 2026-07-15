@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 443
-baseline_files = 159
+baseline_calls = 444
+baseline_files = 160
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 289
-baseline_files = 114
+baseline_calls = 290
+baseline_files = 115
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4358
-baseline_files = 200
+baseline_calls = 4364
+baseline_files = 201
 reported_calls = 3960
 reported_files = 184
 owner_bead = "ga-80po0c.2.3"
@@ -220,8 +220,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 289
-baseline_files = 114
+baseline_calls = 290
+baseline_files = 115
 reported_calls = 289
 reported_files = 114
 owner_bead = "ga-80po0c.2.1"
@@ -233,8 +233,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4352
-baseline_files = 200
+baseline_calls = 4358
+baseline_files = 201
 reported_calls = 4339
 reported_files = 199
 owner_bead = "ga-80po0c.2.1"

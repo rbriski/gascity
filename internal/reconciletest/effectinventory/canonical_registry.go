@@ -1,14 +1,15 @@
 package effectinventory
 
 // CanonicalRegistry assembles the closed production boundary vocabulary and
-// every classified store, provider, process, and event site. It is the sole
-// registry accepted by the owning reconciler inventory gate.
+// every classified store, provider, process, event, and wake site. It is the
+// sole registry accepted by the owning reconciler inventory gate.
 func CanonicalRegistry() (Registry, error) {
 	partitions := []func() ([]SiteRegistration, error){
 		storeInventoryRegistrations,
 		providerInventoryRegistrations,
 		processInventoryRegistrations,
 		eventInventoryRegistrations,
+		wakeInventoryRegistrations,
 	}
 	var registrations []SiteRegistration
 	for _, partition := range partitions {

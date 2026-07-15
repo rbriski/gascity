@@ -3,16 +3,17 @@ package effectinventory
 // The process catalog is explicit authored data. Discovery verifies these rows;
 // it never infers their classifications at runtime.
 const (
-	processClassBoundarySignalCLIOne          catalogRouteClassID = "process-boundary/signal/cli/one"
-	processClassBoundarySignalCLISet          catalogRouteClassID = "process-boundary/signal/cli/set"
-	processClassBoundarySignalControllerOne   catalogRouteClassID = "process-boundary/signal/controller/one"
-	processClassBoundarySignalControllerSet   catalogRouteClassID = "process-boundary/signal/controller/set"
-	processClassDirectSignalCLIOne            catalogRouteClassID = "direct-process-bypass/signal/cli/one"
-	processClassDirectSignalControllerOne     catalogRouteClassID = "direct-process-bypass/signal/controller/one"
-	processClassWorkspaceLiveConfigController catalogRouteClassID = "process-boundary/workspace/live-config/controller/set"
-	processClassWorkspaceProvisionController  catalogRouteClassID = "process-boundary/workspace/runtime-provision/controller/set"
-	processClassWorkspaceTeardownController   catalogRouteClassID = "process-boundary/workspace/server-teardown/controller/set"
-	processClassWorkspaceRestartAPI           catalogRouteClassID = "process-boundary/workspace/runtime-launch/api/one"
+	processClassBoundarySignalCLIOne           catalogRouteClassID = "process-boundary/signal/cli/one"
+	processClassBoundarySignalCLISet           catalogRouteClassID = "process-boundary/signal/cli/set"
+	processClassBoundarySignalControllerOne    catalogRouteClassID = "process-boundary/signal/controller/one"
+	processClassBoundarySignalControllerSet    catalogRouteClassID = "process-boundary/signal/controller/set"
+	processClassBoundarySignalProviderChildOne catalogRouteClassID = "process-boundary/signal/provider-child/one"
+	processClassDirectSignalCLIOne             catalogRouteClassID = "direct-process-bypass/signal/cli/one"
+	processClassDirectSignalControllerOne      catalogRouteClassID = "direct-process-bypass/signal/controller/one"
+	processClassWorkspaceLiveConfigController  catalogRouteClassID = "process-boundary/workspace/live-config/controller/set"
+	processClassWorkspaceProvisionController   catalogRouteClassID = "process-boundary/workspace/runtime-provision/controller/set"
+	processClassWorkspaceTeardownController    catalogRouteClassID = "process-boundary/workspace/server-teardown/controller/set"
+	processClassWorkspaceRestartAPI            catalogRouteClassID = "process-boundary/workspace/runtime-launch/api/one"
 )
 
 func knownProcessCatalogClassID(id catalogRouteClassID) bool {
@@ -21,6 +22,7 @@ func knownProcessCatalogClassID(id catalogRouteClassID) bool {
 		processClassBoundarySignalCLISet,
 		processClassBoundarySignalControllerOne,
 		processClassBoundarySignalControllerSet,
+		processClassBoundarySignalProviderChildOne,
 		processClassDirectSignalCLIOne,
 		processClassDirectSignalControllerOne,
 		processClassWorkspaceLiveConfigController,
@@ -38,6 +40,7 @@ var processCatalogRouteClassSpecs = []processCatalogRouteClassSpec{
 	{ID: processClassBoundarySignalCLISet, ActionFamily: FamilyProcessSignal, ExecutingProcess: ProcessForegroundCLI, AccessPath: AccessProcessBoundary, TargetShape: processTargetSetParameter},
 	{ID: processClassBoundarySignalControllerOne, ActionFamily: FamilyProcessSignal, ExecutingProcess: ProcessController, AccessPath: AccessProcessBoundary, TargetShape: processTargetSingleParameter},
 	{ID: processClassBoundarySignalControllerSet, ActionFamily: FamilyProcessSignal, ExecutingProcess: ProcessController, AccessPath: AccessProcessBoundary, TargetShape: processTargetSetParameter},
+	{ID: processClassBoundarySignalProviderChildOne, ActionFamily: FamilyProcessSignal, ExecutingProcess: ProcessProviderChild, AccessPath: AccessProcessBoundary, TargetShape: processTargetSingleParameter},
 	{ID: processClassDirectSignalCLIOne, ActionFamily: FamilyProcessSignal, ExecutingProcess: ProcessForegroundCLI, AccessPath: AccessDirectProcessBypass, TargetShape: processTargetSingleReceiver, ReplacementGate: "P3.3"},
 	{ID: processClassDirectSignalControllerOne, ActionFamily: FamilyProcessSignal, ExecutingProcess: ProcessController, AccessPath: AccessDirectProcessBypass, TargetShape: processTargetSingleReceiver, ReplacementGate: "P3.3"},
 	{ID: processClassWorkspaceLiveConfigController, ActionFamily: FamilyLiveConfig, ExecutingProcess: ProcessController, AccessPath: AccessProcessBoundary, TargetShape: processTargetServerSetReceiver},
@@ -65,6 +68,8 @@ var processCatalogSiteSpecs = []processCatalogSiteSpec{
 	{BoundaryID: "os.process.Kill", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/processgroup", Receiver: "", Function: "TerminateCommand", File: "internal/processgroup/processgroup_windows.go", ClosurePath: nil, Ordinal: 1, ProfileSet: processProfileSetWindows, Class: processClassDirectSignalControllerOne},
 	{BoundaryID: "os.process.Kill", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/orders", Receiver: "", Function: "prepareConditionCommand", File: "internal/orders/trigger_exec_windows.go", ClosurePath: []int{1, 1}, Ordinal: 1, ProfileSet: processProfileSetWindows, Class: processClassDirectSignalControllerOne},
 	{BoundaryID: "pidutil.SignalProcess", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/pidutil", Receiver: "", Function: "Signal", File: "internal/pidutil/pidutil.go", ClosurePath: nil, Ordinal: 1, ProfileSet: processProfileSetAll, Class: processClassBoundarySignalControllerOne},
+	{BoundaryID: "pidutil.SignalProcess", Operation: OperationCall, Package: gcCommandPackage, Function: "terminateManagedDoltPIDGuarded", File: "cmd/gc/dolt_start_managed.go", Ordinal: 1, ProfileSet: processProfileSetAll, ExplicitManagedDoltGuardRoutes: true},
+	{BoundaryID: "pidutil.SignalProcess", Operation: OperationCall, Package: gcCommandPackage, Function: "terminateManagedDoltPIDGuarded", File: "cmd/gc/dolt_start_managed.go", Ordinal: 2, ProfileSet: processProfileSetAll, ExplicitManagedDoltGuardRoutes: true},
 	{BoundaryID: "processgroup.Terminate", Operation: OperationCall, Package: "github.com/gastownhall/gascity/cmd/gc", Receiver: "", Function: "terminateProcessGroup", File: "cmd/gc/cmd_supervisor_lifecycle.go", ClosurePath: nil, Ordinal: 1, ProfileSet: processProfileSetAll, Class: processClassBoundarySignalCLISet},
 	{BoundaryID: "processgroup.Terminate", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/processgroup", Receiver: "", Function: "TerminateCommand", File: "internal/processgroup/processgroup_unix.go", ClosurePath: nil, Ordinal: 1, ProfileSet: processProfileSetUnix, Class: processClassBoundarySignalControllerSet},
 	{BoundaryID: "processgroup.SignalGroup", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/beads", Receiver: "", Function: "killCommandTree", File: "internal/beads/exec_timeout_unix.go", ClosurePath: nil, Ordinal: 1, ProfileSet: processProfileSetUnix, Class: processClassBoundarySignalControllerSet},
@@ -101,4 +106,4 @@ var processCatalogSiteSpecs = []processCatalogSiteSpec{
 	{BoundaryID: "runtime.process.TerminateManagedProcess", Operation: OperationCall, Package: "github.com/gastownhall/gascity/internal/runtime/subprocess", Receiver: "", Function: "terminateSessionConn", File: "internal/runtime/subprocess/subprocess.go", ClosurePath: nil, Ordinal: 1, ProfileSet: processProfileSetAll, Class: processClassBoundarySignalControllerSet},
 }
 
-// generated counts: 52 process sites, 10 semantic classes
+// generated counts: 54 process sites, 11 semantic classes

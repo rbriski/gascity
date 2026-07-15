@@ -120,8 +120,12 @@ func startNudgeWakeListenerWithHints(ctx context.Context, cityPath string, wakeC
 		_ = lis.Close()
 	}()
 	readerSlots := make(chan struct{}, maxConcurrentNudgeWakeHintReaders)
-	readConnection := func(conn net.Conn) {
-		readNudgeWakeHintConnection(ctx, conn, onExact, stderr, logPrefix)
+	warnings := newNudgeWakeIngressWarnings(stderr)
+	readConnection := func(conn net.Conn) nudgeWakeIngressDisposition {
+		return readNudgeWakeHintConnection(ctx, conn, onExact, stderr, logPrefix)
+	}
+	observeIngress := func(disposition nudgeWakeIngressDisposition) {
+		observeNudgeWakeIngress(context.Background(), disposition, warnings)
 	}
 	go func() {
 		for {
@@ -135,13 +139,20 @@ func startNudgeWakeListenerWithHints(ctx context.Context, cityPath string, wakeC
 				}
 				continue
 			}
-			dispatchAcceptedNudgeWake(conn, wakeCh, readerSlots, readConnection)
+			dispatchAcceptedNudgeWakeObserved(conn, wakeCh, readerSlots, readConnection, observeIngress)
 		}
 	}()
 	return lis, nil
 }
 
 func dispatchAcceptedNudgeWake(conn net.Conn, wakeCh chan<- struct{}, readerSlots chan struct{}, readConnection func(net.Conn)) {
+	dispatchAcceptedNudgeWakeObserved(conn, wakeCh, readerSlots, func(conn net.Conn) nudgeWakeIngressDisposition {
+		readConnection(conn)
+		return nudgeWakeIngressFallback
+	}, nil)
+}
+
+func dispatchAcceptedNudgeWakeObserved(conn net.Conn, wakeCh chan<- struct{}, readerSlots chan struct{}, readConnection func(net.Conn) nudgeWakeIngressDisposition, observe func(nudgeWakeIngressDisposition)) {
 	// Acceptance itself is the legacy signal. Never wait for an exact frame
 	// before waking the established global dispatcher.
 	select {
@@ -153,17 +164,41 @@ func dispatchAcceptedNudgeWake(conn net.Conn, wakeCh chan<- struct{}, readerSlot
 	case readerSlots <- struct{}{}:
 		go func() {
 			defer func() { <-readerSlots }()
-			readConnection(conn)
+			disposition := invokeNudgeWakeReader(conn, readConnection)
+			invokeNudgeWakeIngressObserver(observe, disposition)
 		}()
 	default:
 		_ = conn.Close()
+		invokeNudgeWakeIngressObserver(observe, nudgeWakeIngressSaturated)
 	}
 }
 
-func readNudgeWakeHintConnection(ctx context.Context, conn net.Conn, onExact func(nudgeWakeHint), stderr io.Writer, logPrefix string) {
+func invokeNudgeWakeReader(conn net.Conn, readConnection func(net.Conn) nudgeWakeIngressDisposition) (disposition nudgeWakeIngressDisposition) {
+	disposition = nudgeWakeIngressFallback
+	defer func() {
+		if recover() != nil {
+			_ = conn.Close()
+			disposition = nudgeWakeIngressFallback
+		}
+	}()
+	if readConnection == nil {
+		_ = conn.Close()
+		return disposition
+	}
+	return readConnection(conn)
+}
+
+func invokeNudgeWakeIngressObserver(observe func(nudgeWakeIngressDisposition), disposition nudgeWakeIngressDisposition) {
+	defer func() { _ = recover() }()
+	if observe != nil {
+		observe(disposition)
+	}
+}
+
+func readNudgeWakeHintConnection(ctx context.Context, conn net.Conn, onExact func(nudgeWakeHint), stderr io.Writer, logPrefix string) nudgeWakeIngressDisposition {
 	defer conn.Close() //nolint:errcheck // best-effort advisory connection
 	if onExact == nil {
-		return
+		return nudgeWakeIngressFallback
 	}
 	// One connection is one frame. The limit and EOF framing handle fragmented
 	// stream writes without allowing an untrusted local client to allocate an
@@ -171,11 +206,16 @@ func readNudgeWakeHintConnection(ctx context.Context, conn net.Conn, onExact fun
 	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	payload, err := io.ReadAll(io.LimitReader(conn, nudgeWakeHintMaxPayloadBytes+1))
 	if err != nil || ctx.Err() != nil {
-		return
+		return nudgeWakeIngressFallback
 	}
 	if hint, ok := nudgequeue.DecodeSessionWakeHint(payload); ok {
 		invokeNudgeWakeHint(onExact, hint, stderr, logPrefix)
+		return nudgeWakeIngressValid
 	}
+	if len(payload) == 1 && payload[0] == 1 {
+		return nudgeWakeIngressFallback
+	}
+	return nudgeWakeIngressMalformed
 }
 
 func invokeNudgeWakeHint(onExact func(nudgeWakeHint), hint nudgeWakeHint, stderr io.Writer, logPrefix string) {

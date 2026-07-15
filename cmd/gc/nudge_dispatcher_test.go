@@ -181,6 +181,93 @@ func TestInvokeNudgeWakeHintContainsExactCallbackPanic(t *testing.T) {
 	}
 }
 
+func TestReadNudgeWakeHintConnectionClassifiesBoundedIngressDispositions(t *testing.T) {
+	valid, err := nudgequeue.EncodeSessionWakeHint(nudgeWakeHint{
+		Version:   nudgequeue.SessionWakeHintVersion1,
+		CommandID: "command-valid",
+		SessionID: "session-valid",
+	})
+	if err != nil {
+		t.Fatalf("EncodeSessionWakeHint: %v", err)
+	}
+	tests := []struct {
+		name            string
+		payload         []byte
+		panicCallback   bool
+		wantDisposition nudgeWakeIngressDisposition
+	}{
+		{name: "valid", payload: valid, wantDisposition: nudgeWakeIngressValid},
+		{name: "legacy fallback", payload: []byte{1}, wantDisposition: nudgeWakeIngressFallback},
+		{name: "malformed", payload: []byte("not-a-frame"), wantDisposition: nudgeWakeIngressMalformed},
+		{name: "oversized", payload: bytes.Repeat([]byte("x"), nudgeWakeHintMaxPayloadBytes+1), wantDisposition: nudgeWakeIngressMalformed},
+		{name: "valid callback panic", payload: valid, panicCallback: true, wantDisposition: nudgeWakeIngressValid},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server, client := net.Pipe()
+			writeDone := make(chan error, 1)
+			go func() {
+				_, writeErr := client.Write(tc.payload)
+				closeErr := client.Close()
+				if writeErr == nil {
+					writeErr = closeErr
+				}
+				writeDone <- writeErr
+			}()
+			callback := func(nudgeWakeHint) {
+				if tc.panicCallback {
+					panic("untrusted callback detail")
+				}
+			}
+			var stderr bytes.Buffer
+			got := readNudgeWakeHintConnection(context.Background(), server, callback, &stderr, "test")
+			if err := receiveBeforeDeadline(t, writeDone); err != nil {
+				t.Fatalf("write framed payload: %v", err)
+			}
+			if got != tc.wantDisposition {
+				t.Fatalf("disposition = %v, want %v", got, tc.wantDisposition)
+			}
+		})
+	}
+}
+
+func TestDispatchAcceptedNudgeWakeConservesSaturatedAndCompletedIngress(t *testing.T) {
+	wakeCh := make(chan struct{}, 2)
+	readerSlots := make(chan struct{}, 1)
+	readerStarted := make(chan struct{})
+	releaseReader := make(chan struct{})
+	dispositions := make(chan nudgeWakeIngressDisposition, 2)
+	readConnection := func(conn net.Conn) nudgeWakeIngressDisposition {
+		close(readerStarted)
+		<-releaseReader
+		_ = conn.Close()
+		return nudgeWakeIngressValid
+	}
+
+	firstServer, firstClient := net.Pipe()
+	defer firstClient.Close() //nolint:errcheck
+	dispatchAcceptedNudgeWakeObserved(firstServer, wakeCh, readerSlots, readConnection, func(disposition nudgeWakeIngressDisposition) {
+		dispositions <- disposition
+	})
+	receiveBeforeDeadline(t, readerStarted)
+
+	secondServer, secondClient := net.Pipe()
+	defer secondClient.Close() //nolint:errcheck
+	dispatchAcceptedNudgeWakeObserved(secondServer, wakeCh, readerSlots, readConnection, func(disposition nudgeWakeIngressDisposition) {
+		dispositions <- disposition
+	})
+	if got := receiveBeforeDeadline(t, dispositions); got != nudgeWakeIngressSaturated {
+		t.Fatalf("first disposition = %v, want saturated", got)
+	}
+	close(releaseReader)
+	if got := receiveBeforeDeadline(t, dispositions); got != nudgeWakeIngressValid {
+		t.Fatalf("second disposition = %v, want valid", got)
+	}
+	if got := len(wakeCh); got != 2 {
+		t.Fatalf("legacy wakes = %d, want one per accepted connection", got)
+	}
+}
+
 func TestStartNudgeWakeListenerKeepsMalformedAndLegacyPayloadsGlobalOnly(t *testing.T) {
 	tests := []struct {
 		name    string

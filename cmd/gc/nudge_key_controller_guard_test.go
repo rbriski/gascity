@@ -578,7 +578,7 @@ func TestNudgeExactIngressCallGraphRemainsReadOnly(t *testing.T) {
 	assertASTCallsOnly(t, dispatchFSet, reader, "exact hint framed reader", map[string]bool{
 		"conn.Close": true, "conn.SetReadDeadline": true,
 		"time.Now": true, "Add": true, "io.ReadAll": true, "io.LimitReader": true,
-		"ctx.Err": true, "nudgequeue.DecodeSessionWakeHint": true, "invokeNudgeWakeHint": true,
+		"ctx.Err": true, "nudgequeue.DecodeSessionWakeHint": true, "invokeNudgeWakeHint": true, "len": true,
 	})
 	assertASTHasNoCapabilityEscape(t, dispatchFSet, reader, "exact hint framed reader", map[string]bool{
 		"_": true, "payload": true, "err": true, "hint": true, "ok": true,
@@ -588,6 +588,43 @@ func TestNudgeExactIngressCallGraphRemainsReadOnly(t *testing.T) {
 		"<func>": true, "recover": true, "fmt.Fprintf": true, "debug.Stack": true, "onExact": true,
 	})
 	assertASTHasNoCapabilityEscape(t, dispatchFSet, invoke, "exact hint callback wrapper", map[string]bool{"recovered": true})
+}
+
+func TestNudgeWakeIngressObservationIsWiredAtAcceptedConnectionBoundary(t *testing.T) {
+	fset, file := parseGCTestSource(t, "nudge_dispatcher.go")
+	listener := findGCFunction(t, file, "startNudgeWakeListenerWithHints")
+	observedDispatches := 0
+	recorders := 0
+	ast.Inspect(listener.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch calledFunction(call) {
+		case "dispatchAcceptedNudgeWakeObserved":
+			observedDispatches++
+		case "observeNudgeWakeIngress":
+			recorders++
+		}
+		return true
+	})
+	if observedDispatches != 1 || recorders != 1 {
+		t.Fatalf("accepted ingress wiring at %s has observed dispatches=%d recorders=%d, want one of each", fset.Position(listener.Pos()), observedDispatches, recorders)
+	}
+
+	dispatch := findGCFunction(t, file, "dispatchAcceptedNudgeWakeObserved")
+	dispositions := map[string]int{}
+	ast.Inspect(dispatch.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || calledFunction(call) != "invokeNudgeWakeIngressObserver" || len(call.Args) != 2 {
+			return true
+		}
+		dispositions[selectorPath(call.Args[1])]++
+		return true
+	})
+	if dispositions["disposition"] != 1 || dispositions["nudgeWakeIngressSaturated"] != 1 || len(dispositions) != 2 {
+		t.Fatalf("accepted ingress observation dispositions = %+v, want exactly completed-reader and saturated paths", dispositions)
+	}
 }
 
 func TestQueuedNudgeWakeIsStructurallyPostCommit(t *testing.T) {

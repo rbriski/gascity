@@ -8,10 +8,11 @@ Claude and Codex sessions, and receives a revised copy of a real design plus
 durable review evidence.
 
 The demo reviews a disposable copy of
-`engdocs/design/gc-reload-design.md`. Two independent reviewers run in
-parallel. A synthesis Agent consumes their artifacts and is the only Agent that
-edits the document. A final verification Agent re-reads the revised document
-and fails the run if the review artifacts or revision are not substantive.
+`engdocs/design/gc-reload-design.md` against a read-only snapshot of the same
+committed repository. Two independent reviewers run in parallel. A synthesis
+Agent consumes their artifacts and is the only Agent that edits the document.
+A final verification Agent re-reads the revised document and fails the run if
+the review artifacts or revision are not substantive.
 
 ## Runtime and commands
 
@@ -24,23 +25,27 @@ The operator-facing command, from the prepared demo City, is:
 ```bash
 /path/to/gc run review-quorum.lumen \
   --route synthesisAgent \
-  --input '{"document_path":"/absolute/path/design.md","artifact_dir":"/absolute/path/review-artifacts","objective":"Make the design implementation-ready","lane_one_id":"implementation-realism","lane_two_id":"test-operability"}'
+  --input '{"document_path":"/absolute/path/design.md","repository_path":"/absolute/path/read-only-repository-snapshot","artifact_dir":"/absolute/path/review-artifacts","objective":"Make the design implementation-ready","lane_one_id":"implementation-realism","lane_two_id":"test-operability"}'
 ```
 
 While it runs, another terminal can use:
 
 ```bash
-/path/to/gc session list
+/path/to/gc session list --state all
 /path/to/gc session peek <session-name> --lines 100
 ```
 
 The checked-in formula IR is regenerated with:
 
 ```bash
-cd /data/projects/formula-language
-npm run lumen:compile -- \
-  /data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/review-quorum.lumen \
-  > /data/projects/gascity/.claude/worktrees/graph-substrate/examples/lumen/review-quorum.lumen.json
+FORMULA_LANGUAGE=/absolute/path/to/formula-language
+REPO=/absolute/path/to/gascity
+npm --prefix "$FORMULA_LANGUAGE" -w @formula-language/core run check
+(
+  cd "$REPO/examples/lumen"
+  node "$FORMULA_LANGUAGE/scripts/compile-lumen.mjs" \
+    review-quorum.lumen > review-quorum.lumen.json
+)
 ```
 
 ## Project structure
@@ -48,8 +53,8 @@ npm run lumen:compile -- \
 ```text
 examples/lumen/review-quorum.lumen       Authored workflow
 examples/lumen/review-quorum.lumen.json  Compiler-generated sibling IR
-examples/lumen/prompts/                  Real inference worker contract
 examples/lumen/review-quorum-live/       Portable City config and demo guidance
+  prompts/lumen-worker.md                Real inference worker contract
 test/integration/                        Deterministic orchestration contract
 test/acceptance/                         Opt-in live-inference acceptance
 reports/lumen-demo/                      Local recording and run evidence
@@ -59,7 +64,8 @@ reports/lumen-demo/                      Local recording and run evidence
 
 1. `laneOneAgent` and `laneTwoAgent` claim distinct ordinary Lumen work beads
    and run concurrently through real provider CLIs.
-2. Each reviewer reads the document, does not edit it, atomically writes a
+2. Each reviewer reads the document, checks claims against the explicit
+   read-only repository snapshot, does not edit either input, atomically writes a
    distinct compact JSON artifact, stamps that JSON as `gc.output_json`, and
    closes its bead with an explicit `gc.outcome`.
 3. `synthesisAgent` starts only after both reviewer steps settle. It reads both
@@ -88,9 +94,10 @@ classification.
   CLIs and checks real session visibility, non-empty structured findings,
   provider provenance, document changes, synthesis evidence, final verification,
   terminal pass, and returned sessions.
-- Recording: capture the committed binary and isolated City with asciinema, then
-  render one uniform continuous speed-up. The recording visibly identifies real
-  inference and default managed bd+Dolt.
+- Recording: require a clean tracked tree and a binary built from that exact
+  commit, capture the isolated City with asciinema, then render one uniform
+  continuous speed-up. The recording visibly identifies real inference and
+  default managed bd+Dolt.
 
 ## Boundaries
 

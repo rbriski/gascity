@@ -868,6 +868,230 @@ func TestLocalNudgeAuthorityRejectsCorruptOrPartialSQLite(t *testing.T) {
 	})
 }
 
+func TestLocalNudgeAuthorityRejectsSameNameSchemaWeakening(t *testing.T) {
+	for _, scenario := range []string{"partial index predicate removed", "table constraints removed", "unexpected column added"} {
+		t.Run(scenario, func(t *testing.T) {
+			cityPath := t.TempDir()
+			authority, err := OpenLocalNudgeAuthority(t.Context(), cityPath, localAuthorityRepositoryState(), localAuthorityOptions())
+			if err != nil {
+				t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+			}
+			if err := authority.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			dsn := (&url.URL{Scheme: "file", Path: LocalNudgeAuthorityPath(cityPath)}).String()
+			db, err := sql.Open("sqlite", dsn)
+			if err != nil {
+				t.Fatalf("open weakened-schema fixture: %v", err)
+			}
+			switch scenario {
+			case "partial index predicate removed":
+				if _, err := db.Exec(`DROP INDEX memberships_partition_active`); err != nil {
+					_ = db.Close()
+					t.Fatalf("drop authority index: %v", err)
+				}
+				if _, err := db.Exec(`CREATE INDEX memberships_partition_active ON memberships(partition_id)`); err != nil {
+					_ = db.Close()
+					t.Fatalf("recreate weakened authority index: %v", err)
+				}
+			case "table constraints removed":
+				if _, err := db.Exec(`DROP TABLE terminal_preparations`); err != nil {
+					_ = db.Close()
+					t.Fatalf("drop authority table: %v", err)
+				}
+				if _, err := db.Exec(`CREATE TABLE terminal_preparations (
+					command_id TEXT PRIMARY KEY, repository_before_revision BLOB, before_digest BLOB,
+					terminal_revision BLOB, terminal_digest BLOB
+				)`); err != nil {
+					_ = db.Close()
+					t.Fatalf("recreate weakened authority table: %v", err)
+				}
+			case "unexpected column added":
+				if _, err := db.Exec(`ALTER TABLE ingress_grants ADD COLUMN injected TEXT`); err != nil {
+					_ = db.Close()
+					t.Fatalf("alter authority table: %v", err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close weakened-schema fixture: %v", err)
+			}
+			if reopened, err := OpenLocalNudgeAuthority(t.Context(), cityPath, localAuthorityRepositoryState(), localAuthorityOptions()); reopened != nil || !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
+				if reopened != nil {
+					_ = reopened.Close()
+				}
+				t.Fatalf("OpenLocalNudgeAuthority(weakened schema) = %v, err=%v; want conflict", reopened, err)
+			}
+		})
+	}
+}
+
+func TestLocalNudgeAuthorityRejectsForeignKeyOrphan(t *testing.T) {
+	cityPath := t.TempDir()
+	authority, err := OpenLocalNudgeAuthority(t.Context(), cityPath, localAuthorityRepositoryState(), localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	if err := authority.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	dsn := (&url.URL{Scheme: "file", Path: LocalNudgeAuthorityPath(cityPath)}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open foreign-key fixture: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO memberships (command_id, sequence, admission_revision, partition_id) VALUES (?, ?, ?, ?)`,
+		"orphan-command", encodeLocalAuthorityUint64(1), encodeLocalAuthorityUint64(1), make([]byte, sha256.Size)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert foreign-key orphan: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close foreign-key fixture: %v", err)
+	}
+	if reopened, err := OpenLocalNudgeAuthority(t.Context(), cityPath, localAuthorityRepositoryState(), localAuthorityOptions()); reopened != nil || !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("OpenLocalNudgeAuthority(orphan) = %v, err=%v; want conflict", reopened, err)
+	}
+}
+
+func TestLocalNudgeAuthorityRetainsLifetimeExclusionWhenLockPathIsReplaced(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit replacing the open lock pathname")
+	}
+	cityPath := t.TempDir()
+	state := localAuthorityRepositoryState()
+	authority, err := OpenLocalNudgeAuthority(t.Context(), cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	lockPath := LocalNudgeAuthorityPath(cityPath) + ".lock"
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("remove live lock pathname: %v", err)
+	}
+	replacement, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("create replacement lock: %v", err)
+	}
+	if err := replacement.Close(); err != nil {
+		t.Fatalf("close replacement lock: %v", err)
+	}
+
+	second, err := OpenLocalNudgeAuthority(t.Context(), cityPath, state, localAuthorityOptions())
+	if second != nil {
+		_ = second.Close()
+	}
+	if second != nil || !errors.Is(err, ErrRestoreAnchorBusy) {
+		t.Fatalf("second authority = %v, err=%v; want lifetime exclusion", second, err)
+	}
+	if _, err := authority.AuthorizeNudgeIngress(WithAuthenticatedNudgeRequester(t.Context(), localAuthorityRequester()), localAuthorityIngressRequest()); !errors.Is(err, ErrLocalNudgeAuthorityUnavailable) {
+		t.Fatalf("first authority after lock replacement error = %v, want unavailable", err)
+	}
+}
+
+func TestLocalNudgeAuthorityConnectionPragmasSurvivePoolChurn(t *testing.T) {
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), localAuthorityRepositoryState(), localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	authority.db.SetMaxIdleConns(0)
+	for iteration := range 3 {
+		var foreignKeys, synchronous int
+		var journalMode string
+		if err := authority.db.QueryRowContext(t.Context(), `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+			t.Fatalf("iteration %d foreign_keys: %v", iteration, err)
+		}
+		if err := authority.db.QueryRowContext(t.Context(), `PRAGMA synchronous`).Scan(&synchronous); err != nil {
+			t.Fatalf("iteration %d synchronous: %v", iteration, err)
+		}
+		if err := authority.db.QueryRowContext(t.Context(), `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+			t.Fatalf("iteration %d journal_mode: %v", iteration, err)
+		}
+		if foreignKeys != 1 || synchronous != 2 || journalMode != "delete" {
+			t.Fatalf("iteration %d pragmas = foreign_keys=%d synchronous=%d journal_mode=%q", iteration, foreignKeys, synchronous, journalMode)
+		}
+	}
+	if _, err := authority.db.ExecContext(t.Context(), `INSERT INTO memberships (command_id, sequence, admission_revision, partition_id) VALUES (?, ?, ?, ?)`,
+		"orphan-command", encodeLocalAuthorityUint64(1), encodeLocalAuthorityUint64(1), make([]byte, sha256.Size)); err == nil {
+		t.Fatal("foreign-key violation after connection churn succeeded")
+	}
+}
+
+func TestLocalNudgeAuthorityAcceptsPreviousPrincipalSchemaJournal(t *testing.T) {
+	cityPath := t.TempDir()
+	state := localAuthorityRepositoryState()
+	authority, err := OpenLocalNudgeAuthority(t.Context(), cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	request := localAuthorityIngressRequest()
+	first, err := authority.AuthorizeNudgeIngress(WithAuthenticatedNudgeRequester(t.Context(), localAuthorityRequester()), request)
+	if err != nil {
+		t.Fatalf("AuthorizeNudgeIngress: %v", err)
+	}
+	if err := authority.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	dsn := (&url.URL{Scheme: "file", Path: LocalNudgeAuthorityPath(cityPath)}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open previous-schema fixture: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE authority_meta SET principal_schema = ?`, NudgePrincipalSchemaVersion-1); err != nil {
+		_ = db.Close()
+		t.Fatalf("set previous metadata schema: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE ingress_grants SET principal_schema = ?`, NudgePrincipalSchemaVersion-1); err != nil {
+		_ = db.Close()
+		t.Fatalf("set previous grant schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close previous-schema fixture: %v", err)
+	}
+
+	reopened, err := OpenLocalNudgeAuthority(t.Context(), cityPath, state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority(previous schema): %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	resolved, err := reopened.ResolveTrustedNudgeIngress(t.Context(), first.Reference)
+	if err != nil || resolved.Disposition != NudgeAuthorizationAllowed || resolved.PrincipalSchemaVersion != NudgePrincipalSchemaVersion-1 {
+		t.Fatalf("ResolveTrustedNudgeIngress(previous schema) = %#v, err=%v", resolved, err)
+	}
+}
+
+func TestLocalNudgeAuthorityConcurrentCloseIsIdempotent(t *testing.T) {
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), localAuthorityRepositoryState(), localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	const callers = 32
+	start := make(chan struct{})
+	results := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- authority.Close()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent Close: %v", err)
+		}
+	}
+	if _, err := authority.AuthorizeNudgeIngress(WithAuthenticatedNudgeRequester(t.Context(), localAuthorityRequester()), localAuthorityIngressRequest()); !errors.Is(err, ErrLocalNudgeAuthorityUnavailable) {
+		t.Fatalf("AuthorizeNudgeIngress after Close error = %v, want unavailable", err)
+	}
+}
+
 func TestLocalNudgeAuthorityClaimBindsExactCommandAndStore(t *testing.T) {
 	authority, _, pending, partition := localAuthorityPendingCommand(t, "request-claim-binding")
 	request := NudgeClaimAuthorizationRequest{

@@ -83,11 +83,14 @@ type LocalNudgeAuthority struct {
 	mu       sync.RWMutex
 	db       *sql.DB
 	lock     *os.File
+	lockInfo os.FileInfo
+	identity *os.File
 	path     string
 	fileInfo os.FileInfo
 	store    CommandStoreBinding
 	opts     LocalNudgeAuthorityOptions
 	closed   bool
+	closeErr error
 }
 
 // LocalNudgeAuthorityPath returns the canonical independent authority database
@@ -153,15 +156,32 @@ func OpenLocalNudgeAuthority(ctx context.Context, cityPath string, state Command
 	if err := validateLocalNudgeAuthorityFileInfo(info); err != nil {
 		return nil, fmt.Errorf("opening local nudge authority: %w", err)
 	}
+	identity, err := acquireLocalNudgeAuthorityIdentity(path, info)
+	if err != nil {
+		return nil, fmt.Errorf("opening local nudge authority: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = releaseLocalNudgeAuthorityIdentity(identity)
+		}
+	}()
+	lockInfo, err := lock.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("opening local nudge authority: stat lifetime lock: %w", err)
+	}
 
-	dsn := (&url.URL{Scheme: "file", Path: path}).String()
+	query := url.Values{}
+	query.Add("_pragma", "foreign_keys(ON)")
+	query.Add("_pragma", "synchronous(FULL)")
+	query.Add("_pragma", "journal_mode(DELETE)")
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening local nudge authority sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	authority := &LocalNudgeAuthority{db: db, lock: lock, path: path, fileInfo: info, store: state.Store, opts: opts}
+	authority := &LocalNudgeAuthority{db: db, lock: lock, lockInfo: lockInfo, identity: identity, path: path, fileInfo: info, store: state.Store, opts: opts}
 	defer func() {
 		if err != nil {
 			_ = db.Close()
@@ -256,48 +276,72 @@ func (a *LocalNudgeAuthority) configure(ctx context.Context) error {
 }
 
 func (a *LocalNudgeAuthority) initializeOrValidate(ctx context.Context, state CommandRepositoryState) error {
-	objects, err := localAuthoritySchemaObjects(ctx, a.db)
+	empty, err := validateLocalAuthoritySchema(ctx, a.db)
 	if err != nil {
 		return err
 	}
-	if len(objects) == 0 {
+	if empty {
 		if state.Revision != 0 || state.SequenceHighWater != 0 {
 			return fmt.Errorf("%w: empty authority database cannot bind a nonempty repository", ErrLocalNudgeAuthorityConflict)
 		}
 		return a.initializeSchema(ctx, state)
 	}
-	want := []string{
-		"index:memberships_partition_active",
-		"index:memberships_partition_terminal",
-		"table:authority_meta",
-		"table:ingress_grants",
-		"table:memberships",
-		"table:terminal_preparations",
-	}
-	if strings.Join(objects, "\x00") != strings.Join(want, "\x00") {
-		return fmt.Errorf("%w: authority schema objects=%v, want %v", ErrLocalNudgeAuthorityConflict, objects, want)
-	}
 	return a.validateMetadata(ctx, state)
 }
 
-func localAuthoritySchemaObjects(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+func validateLocalAuthoritySchema(ctx context.Context, db *sql.DB) (bool, error) {
+	expected := make(map[string]localNudgeAuthoritySchemaStatement, len(localNudgeAuthoritySchemaStatements))
+	for _, statement := range localNudgeAuthoritySchemaStatements {
+		expected[statement.objectType+":"+statement.name] = statement
+	}
+	rows, err := db.QueryContext(ctx, `SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
 	if err != nil {
-		return nil, fmt.Errorf("opening local nudge authority: listing schema: %w", err)
+		return false, fmt.Errorf("opening local nudge authority: listing schema: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var names []string
+	count := 0
 	for rows.Next() {
-		var objectType, name string
-		if err := rows.Scan(&objectType, &name); err != nil {
-			return nil, fmt.Errorf("opening local nudge authority: scanning schema: %w", err)
+		var objectType, name, tableName, definition string
+		if err := rows.Scan(&objectType, &name, &tableName, &definition); err != nil {
+			return false, fmt.Errorf("opening local nudge authority: scanning schema: %w", err)
 		}
-		names = append(names, objectType+":"+name)
+		count++
+		statement, found := expected[objectType+":"+name]
+		if !found || tableName != statement.tableName || normalizeLocalAuthoritySchemaSQL(definition) != normalizeLocalAuthoritySchemaSQL(statement.sql) {
+			return false, fmt.Errorf("%w: authority schema object %s:%s differs from the exact manifest", ErrLocalNudgeAuthorityConflict, objectType, name)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("opening local nudge authority: listing schema: %w", err)
+		return false, fmt.Errorf("opening local nudge authority: listing schema: %w", err)
 	}
-	return names, nil
+	if err := rows.Close(); err != nil {
+		return false, fmt.Errorf("opening local nudge authority: closing schema inventory: %w", err)
+	}
+	if count == 0 {
+		return true, nil
+	}
+	if count != len(expected) {
+		return false, fmt.Errorf("%w: authority schema has %d objects, want %d", ErrLocalNudgeAuthorityConflict, count, len(expected))
+	}
+	foreignRows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return false, fmt.Errorf("opening local nudge authority: checking foreign keys: %w", err)
+	}
+	defer func() { _ = foreignRows.Close() }()
+	if foreignRows.Next() {
+		return false, fmt.Errorf("%w: authority database contains a foreign-key violation", ErrLocalNudgeAuthorityConflict)
+	}
+	if err := foreignRows.Err(); err != nil {
+		return false, fmt.Errorf("opening local nudge authority: checking foreign keys: %w", err)
+	}
+	if err := foreignRows.Close(); err != nil {
+		return false, fmt.Errorf("opening local nudge authority: closing foreign-key check: %w", err)
+	}
+	return false, nil
+}
+
+func normalizeLocalAuthoritySchemaSQL(statement string) string {
+	return strings.Join(strings.Fields(statement), " ")
 }
 
 func (a *LocalNudgeAuthority) initializeSchema(ctx context.Context, state CommandRepositoryState) error {
@@ -307,7 +351,7 @@ func (a *LocalNudgeAuthority) initializeSchema(ctx context.Context, state Comman
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range localNudgeAuthoritySchemaStatements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
+		if _, err := tx.ExecContext(ctx, statement.sql); err != nil {
 			return fmt.Errorf("initializing local nudge authority schema: %w", err)
 		}
 	}
@@ -328,8 +372,15 @@ func (a *LocalNudgeAuthority) initializeSchema(ctx context.Context, state Comman
 	return osRestoreAnchorFileOps.syncDirectory(filepath.Dir(a.path))
 }
 
-var localNudgeAuthoritySchemaStatements = []string{
-	`CREATE TABLE authority_meta (
+type localNudgeAuthoritySchemaStatement struct {
+	objectType string
+	name       string
+	tableName  string
+	sql        string
+}
+
+var localNudgeAuthoritySchemaStatements = []localNudgeAuthoritySchemaStatement{
+	{objectType: "table", name: "authority_meta", tableName: "authority_meta", sql: `CREATE TABLE authority_meta (
 		singleton INTEGER PRIMARY KEY CHECK (singleton = 1), schema_version INTEGER NOT NULL,
 		profile TEXT NOT NULL, store_uuid TEXT NOT NULL, restore_epoch BLOB NOT NULL CHECK (length(restore_epoch) = 8),
 		authority_id TEXT NOT NULL, issuer TEXT NOT NULL, tenant_scope TEXT NOT NULL, city_scope TEXT NOT NULL,
@@ -337,28 +388,28 @@ var localNudgeAuthoritySchemaStatements = []string{
 		dense_admission_high_water BLOB NOT NULL CHECK (length(dense_admission_high_water) = 8),
 		highest_observed_sequence BLOB NOT NULL CHECK (length(highest_observed_sequence) = 8),
 		highest_observed_revision BLOB NOT NULL CHECK (length(highest_observed_revision) = 8)
-	)`,
-	`CREATE TABLE ingress_grants (
+	)`},
+	{objectType: "table", name: "ingress_grants", tableName: "ingress_grants", sql: `CREATE TABLE ingress_grants (
 		reference_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),
 		command_id TEXT NOT NULL UNIQUE, principal_schema INTEGER NOT NULL, issuer TEXT NOT NULL, principal_id TEXT NOT NULL,
 		tenant_scope TEXT NOT NULL, city_scope TEXT NOT NULL, credential_class TEXT NOT NULL, policy_version TEXT NOT NULL,
 		policy_decision_id TEXT NOT NULL, action TEXT NOT NULL, target_session_id TEXT NOT NULL,
 		payload_digest TEXT NOT NULL, command_created_at TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL
-	)`,
-	`CREATE TABLE memberships (
+	)`},
+	{objectType: "table", name: "memberships", tableName: "memberships", sql: `CREATE TABLE memberships (
 		command_id TEXT PRIMARY KEY REFERENCES ingress_grants(command_id), sequence BLOB NOT NULL UNIQUE CHECK (length(sequence) = 8),
 		admission_revision BLOB NOT NULL CHECK (length(admission_revision) = 8), partition_id BLOB NOT NULL CHECK (length(partition_id) = 32),
 		terminal_revision BLOB CHECK (terminal_revision IS NULL OR length(terminal_revision) = 8),
 		terminal_digest BLOB CHECK (terminal_digest IS NULL OR length(terminal_digest) = 32),
 		CHECK ((terminal_revision IS NULL) = (terminal_digest IS NULL))
-	)`,
-	`CREATE TABLE terminal_preparations (
+	)`},
+	{objectType: "table", name: "terminal_preparations", tableName: "terminal_preparations", sql: `CREATE TABLE terminal_preparations (
 		command_id TEXT PRIMARY KEY REFERENCES memberships(command_id), repository_before_revision BLOB NOT NULL CHECK (length(repository_before_revision) = 8),
 		before_digest BLOB NOT NULL CHECK (length(before_digest) = 32), terminal_revision BLOB NOT NULL CHECK (length(terminal_revision) = 8),
 		terminal_digest BLOB NOT NULL CHECK (length(terminal_digest) = 32)
-	)`,
-	`CREATE INDEX memberships_partition_active ON memberships(partition_id, admission_revision, sequence) WHERE terminal_revision IS NULL`,
-	`CREATE INDEX memberships_partition_terminal ON memberships(partition_id, terminal_revision, sequence) WHERE terminal_revision IS NOT NULL`,
+	)`},
+	{objectType: "index", name: "memberships_partition_active", tableName: "memberships", sql: `CREATE INDEX memberships_partition_active ON memberships(partition_id, admission_revision, sequence) WHERE terminal_revision IS NULL`},
+	{objectType: "index", name: "memberships_partition_terminal", tableName: "memberships", sql: `CREATE INDEX memberships_partition_terminal ON memberships(partition_id, terminal_revision, sequence) WHERE terminal_revision IS NOT NULL`},
 }
 
 func (a *LocalNudgeAuthority) validateMetadata(ctx context.Context, state CommandRepositoryState) error {
@@ -394,15 +445,16 @@ func (a *LocalNudgeAuthority) validateMetadata(ctx context.Context, state Comman
 	if err != nil {
 		return err
 	}
+	principalSchemaSupported := principalSchema == int(NudgePrincipalSchemaVersion) || principalSchema == int(NudgePrincipalSchemaVersion-1)
 	if schema != localNudgeAuthoritySchema || profile != a.opts.Profile || storeUUID != state.Store.StoreUUID || epoch != state.Store.RestoreEpoch ||
 		authorityID != a.opts.AuthorityID || issuer != a.opts.Issuer || tenantScope != a.opts.TenantScope || cityScope != a.opts.CityScope ||
-		credentialClass != a.opts.CredentialClass || policyVersion != a.opts.PolicyVersion || principalSchema != int(NudgePrincipalSchemaVersion) ||
+		credentialClass != a.opts.CredentialClass || policyVersion != a.opts.PolicyVersion || !principalSchemaSupported ||
 		denseHighWater > highestSequence || highestSequence > state.SequenceHighWater || highestRevision > state.Revision {
 		return fmt.Errorf("%w: authority metadata differs from configured repository lineage", ErrLocalNudgeAuthorityConflict)
 	}
-	if highestSequence != state.SequenceHighWater || highestRevision != state.Revision {
-		if _, err := a.db.ExecContext(ctx, `UPDATE authority_meta SET highest_observed_sequence = ?, highest_observed_revision = ? WHERE singleton = 1`,
-			encodeLocalAuthorityUint64(state.SequenceHighWater), encodeLocalAuthorityUint64(state.Revision)); err != nil {
+	if principalSchema != int(NudgePrincipalSchemaVersion) || highestSequence != state.SequenceHighWater || highestRevision != state.Revision {
+		if _, err := a.db.ExecContext(ctx, `UPDATE authority_meta SET principal_schema = ?, highest_observed_sequence = ?, highest_observed_revision = ? WHERE singleton = 1`,
+			NudgePrincipalSchemaVersion, encodeLocalAuthorityUint64(state.SequenceHighWater), encodeLocalAuthorityUint64(state.Revision)); err != nil {
 			return fmt.Errorf("%w: advancing observed repository authority: %w", ErrLocalNudgeAuthorityUnavailable, err)
 		}
 	}
@@ -452,6 +504,19 @@ func (a *LocalNudgeAuthority) validateLivePath() error {
 	if a.fileInfo == nil || !os.SameFile(a.fileInfo, info) {
 		return fmt.Errorf("%w: authority database path was replaced", ErrLocalNudgeAuthorityUnavailable)
 	}
+	if a.identity != nil {
+		identityInfo, err := a.identity.Stat()
+		if err != nil || !os.SameFile(a.fileInfo, identityInfo) {
+			return fmt.Errorf("%w: authority database identity guard is unavailable", ErrLocalNudgeAuthorityUnavailable)
+		}
+	}
+	lockInfo, err := os.Lstat(a.path + ".lock")
+	if err != nil {
+		return fmt.Errorf("%w: authority lock path is unavailable: %w", ErrLocalNudgeAuthorityUnavailable, err)
+	}
+	if err := validateRestoreAnchorFileInfo(lockInfo); err != nil || a.lockInfo == nil || !os.SameFile(a.lockInfo, lockInfo) {
+		return fmt.Errorf("%w: authority lock path was replaced or became unsafe", ErrLocalNudgeAuthorityUnavailable)
+	}
 	return nil
 }
 
@@ -463,13 +528,15 @@ func (a *LocalNudgeAuthority) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
-		return nil
+		return a.closeErr
 	}
 	a.closed = true
 	dbErr := a.db.Close()
+	identityErr := releaseLocalNudgeAuthorityIdentity(a.identity)
 	unlockErr := filelock.Unlock(a.lock)
 	closeErr := a.lock.Close()
-	return errors.Join(dbErr, unlockErr, closeErr)
+	a.closeErr = errors.Join(dbErr, identityErr, unlockErr, closeErr)
+	return a.closeErr
 }
 
 // AuthorizeNudgeIngress authenticates the server-owned requester context and
@@ -502,7 +569,7 @@ func (a *LocalNudgeAuthority) AuthorizeNudgeIngress(ctx context.Context, request
 		if existing.fingerprint != fingerprint || existing.commandID != commandID {
 			return NudgeAuthorization{}, fmt.Errorf("%w: request id is bound to different authenticated content", ErrLocalNudgeAuthorityConflict)
 		}
-		return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: NudgePrincipalSchemaVersion, CommandCreatedAt: existing.commandCreatedAt, Reference: existing.reference}, nil
+		return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: existing.principalSchema, CommandCreatedAt: existing.commandCreatedAt, Reference: existing.reference}, nil
 	}
 	if err := validateNewLocalNudgeIngressAuthorizationRequest(request); err != nil {
 		return NudgeAuthorization{}, err
@@ -529,7 +596,7 @@ func (a *LocalNudgeAuthority) AuthorizeNudgeIngress(ctx context.Context, request
 	if err := a.validatePersistedGrant(persisted); err != nil {
 		return NudgeAuthorization{}, err
 	}
-	return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: NudgePrincipalSchemaVersion, CommandCreatedAt: persisted.commandCreatedAt, Reference: persisted.reference}, nil
+	return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: persisted.principalSchema, CommandCreatedAt: persisted.commandCreatedAt, Reference: persisted.reference}, nil
 }
 
 func validateAuthenticatedNudgeRequester(requester AuthenticatedNudgeRequester) error {
@@ -630,6 +697,7 @@ func localNudgeAuthorizationFingerprint(request NudgeIngressAuthorizationRequest
 type localNudgeGrant struct {
 	fingerprint      [sha256.Size]byte
 	commandID        string
+	principalSchema  uint32
 	commandCreatedAt time.Time
 	reference        TrustedIngressReference
 }
@@ -665,10 +733,11 @@ func scanLocalNudgeGrant(row localNudgeRowScanner) (localNudgeGrant, bool, error
 	if err != nil {
 		return localNudgeGrant{}, false, fmt.Errorf("reading local nudge grant: %w", err)
 	}
-	if len(fingerprint) != sha256.Size || principalSchema != int(NudgePrincipalSchemaVersion) {
+	if len(fingerprint) != sha256.Size || principalSchema < int(NudgePrincipalSchemaVersion-1) || principalSchema > int(NudgePrincipalSchemaVersion) {
 		return localNudgeGrant{}, false, fmt.Errorf("%w: malformed local nudge grant", ErrLocalNudgeAuthorityConflict)
 	}
 	copy(grant.fingerprint[:], fingerprint)
+	grant.principalSchema = uint32(principalSchema)
 	commandCreatedAt, err := time.Parse(time.RFC3339Nano, created)
 	if err != nil {
 		return localNudgeGrant{}, false, fmt.Errorf("%w: malformed grant command_created_at", ErrLocalNudgeAuthorityConflict)
@@ -766,7 +835,7 @@ func (a *LocalNudgeAuthority) ResolveTrustedNudgeIngress(ctx context.Context, re
 	if grant.reference != reference {
 		return NudgeAuthorization{Disposition: NudgeAuthorizationDenied}, nil
 	}
-	return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: NudgePrincipalSchemaVersion, CommandCreatedAt: grant.commandCreatedAt, Reference: grant.reference}, nil
+	return NudgeAuthorization{Disposition: NudgeAuthorizationAllowed, PrincipalSchemaVersion: grant.principalSchema, CommandCreatedAt: grant.commandCreatedAt, Reference: grant.reference}, nil
 }
 
 // AuthorizeNudgeClaim revalidates the immutable ingress reference against the

@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	tmuxNudgeEffectEnteredMarker   = "GC_NUDGE_ENTERED"
-	tmuxNudgeEffectSubmittedMarker = "GC_NUDGE_SUBMITTED"
-	tmuxNudgeEffectRefusedMarker   = "GC_NUDGE_REFUSED"
+	tmuxNudgeEffectEnteredMarker   = "gascity-nudge-effect-entered-v1"
+	tmuxNudgeEffectSubmittedMarker = "gascity-nudge-effect-submitted-v1"
+	tmuxNudgeEffectRefusedMarker   = "gascity-nudge-effect-refused-v1"
 )
 
 // NudgeEffect conditionally injects one durable nudge at the tmux server's

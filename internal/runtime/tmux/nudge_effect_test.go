@@ -15,9 +15,9 @@ func TestProviderNudgeEffectRefusesUnsafeInteractionBeforeNativeEntry(t *testing
 		observation string
 		wantErr     error
 	}{
-		{name: "launch changed", observation: "GC_NUDGE_REFUSED|0|0|replacement-token", wantErr: runtime.ErrNudgeTargetChanged},
-		{name: "human attached", observation: "GC_NUDGE_REFUSED|1|0|expected-token", wantErr: runtime.ErrNudgeHumanAttached},
-		{name: "copy mode", observation: "GC_NUDGE_REFUSED|0|1|expected-token", wantErr: runtime.ErrNudgeCopyMode},
+		{name: "launch changed", observation: "gascity-nudge-effect-refused-v1|0|0|replacement-token", wantErr: runtime.ErrNudgeTargetChanged},
+		{name: "human attached", observation: "gascity-nudge-effect-refused-v1|1|0|expected-token", wantErr: runtime.ErrNudgeHumanAttached},
+		{name: "copy mode", observation: "gascity-nudge-effect-refused-v1|0|1|expected-token", wantErr: runtime.ErrNudgeCopyMode},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -42,10 +42,10 @@ func TestProviderNudgeEffectRefusesUnsafeInteractionBeforeNativeEntry(t *testing
 func TestProviderNudgeEffectAcceptedTransportIsClassifiedUnconfirmed(t *testing.T) {
 	provider, exec := nudgeEffectTestProvider(
 		"%1\tclaude\t123",
-		"GC_NUDGE_REFUSED|0|0|expected-token",
+		"gascity-nudge-effect-refused-v1|0|0|expected-token",
 		"1700000000",
-		"GC_NUDGE_ENTERED",
-		"GC_NUDGE_SUBMITTED",
+		"gascity-nudge-effect-entered-v1",
+		"gascity-nudge-effect-submitted-v1",
 	)
 	result, err := provider.NudgeEffect(t.Context(), "session-1", validTmuxNudgeEffectRequest())
 	if err != nil {
@@ -65,10 +65,10 @@ func TestProviderNudgeEffectAcceptedTransportIsClassifiedUnconfirmed(t *testing.
 func TestProviderNudgeEffectTreatsEnterNamedMessageAsLiteralText(t *testing.T) {
 	provider, exec := nudgeEffectTestProvider(
 		"%1\tclaude\t123",
-		"GC_NUDGE_REFUSED|0|0|expected-token",
+		"gascity-nudge-effect-refused-v1|0|0|expected-token",
 		"1700000000",
-		"GC_NUDGE_ENTERED",
-		"GC_NUDGE_SUBMITTED",
+		"gascity-nudge-effect-entered-v1",
+		"gascity-nudge-effect-submitted-v1",
 	)
 	request := validTmuxNudgeEffectRequest()
 	request.Content = runtime.TextContent("Enter")
@@ -88,9 +88,9 @@ func TestSeamBackedProviderCarriesClassifiedNudgeCapability(t *testing.T) {
 }
 
 func TestProviderNudgeEffectErrorAtAtomicEntryIsNeverReportedPreEntry(t *testing.T) {
-	provider, _ := nudgeEffectTestProvider("%1\tclaude\t123", "GC_NUDGE_REFUSED|0|0|expected-token", "1700000000")
+	provider, _ := nudgeEffectTestProvider("%1\tclaude\t123", "gascity-nudge-effect-refused-v1|0|0|expected-token", "1700000000")
 	provider.tm.exec = &fakeExecutor{
-		outs: []string{"%1\tclaude\t123", "GC_NUDGE_REFUSED|0|0|expected-token", "1700000000"},
+		outs: []string{"%1\tclaude\t123", "gascity-nudge-effect-refused-v1|0|0|expected-token", "1700000000"},
 		errs: []error{nil, nil, nil, errors.New("lost tmux response")},
 	}
 	result, err := provider.NudgeEffect(t.Context(), "session-1", validTmuxNudgeEffectRequest())

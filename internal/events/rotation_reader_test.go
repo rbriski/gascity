@@ -141,8 +141,8 @@ func seedRecorderWithRotation(t *testing.T, recordsBefore, recordsAfter int) str
 		if err != nil {
 			t.Fatalf("ForceRotate: %v", err)
 		}
-		if res.Done != nil {
-			<-res.Done
+		if res.CompressionDone() != nil {
+			<-res.CompressionDone()
 		}
 	}
 	for i := 0; i < recordsAfter; i++ {
@@ -288,8 +288,8 @@ func TestReadAllSurvivesMultipleRotations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ForceRotate r=%d: %v", r, err)
 		}
-		if res.Done != nil {
-			<-res.Done
+		if res.CompressionDone() != nil {
+			<-res.CompressionDone()
 		}
 	}
 	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "tail"})

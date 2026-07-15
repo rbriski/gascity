@@ -10,16 +10,17 @@ import (
 )
 
 const (
-	processScaffoldFingerprint = "cd18b9dc760e2084bfe21bd19a7e6efc50d589df5aeff0e53b59681173228a2b"
-	eventScaffoldFingerprint   = "86d98ee3d27144db965f87dd15bdbb80614937d10b56ea7437a50f57fd9b3869"
+	processScaffoldFingerprint                 = "41f7034b7d9916f42c3831c12d24eee7f45891ea673440a8e4e5e001b8d42c24"
+	processManagedDoltExplicitRouteFingerprint = "77d375c5e58dd2de0672a8427293a348da5ff68383287ba57359c7894c3db11b"
+	eventScaffoldFingerprint                   = "6343a7f98fdd77721801ae14dd7ce39b825df878421e88fe304fdc8791e48c5a"
 )
 
 func TestProcessCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
-	assertProcessEventCatalogScaffold(t, KindProcessMutation, processCatalogSiteRows(), 52, "process-scaffold-site-v1", processScaffoldFingerprint)
+	assertProcessEventCatalogScaffold(t, KindProcessMutation, processCatalogSiteRows(), 54, "process-scaffold-site-v1", processScaffoldFingerprint)
 }
 
 func TestEventCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
-	assertProcessEventCatalogScaffold(t, KindEventEmission, eventCatalogSiteRows(), 93, "event-scaffold-site-v1", eventScaffoldFingerprint)
+	assertProcessEventCatalogScaffold(t, KindEventEmission, eventCatalogSiteRows(), 90, "event-scaffold-site-v1", eventScaffoldFingerprint)
 }
 
 func assertProcessEventCatalogScaffold(
@@ -82,41 +83,89 @@ func TestProcessCatalogUsesExactTargetSlotsAndBoundsDirectBypasses(t *testing.T)
 		t.Fatalf("processInventoryRegistrations() failed: %v", err)
 	}
 	for _, registration := range registrations {
-		route := registration.Cases[0].Routes[0]
-		if route.Target.Signature != TargetSignatureProcess {
-			t.Errorf("%s target signature = %q, want %q", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Target.Signature, TargetSignatureProcess)
+		for _, route := range registration.Cases[0].Routes {
+			if route.Target.Signature != TargetSignatureProcess {
+				t.Errorf("%s target signature = %q, want %q", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Target.Signature, TargetSignatureProcess)
+			}
+			if got := len(route.Target.Identities); got != 1 {
+				t.Errorf("%s target identities = %d, want one primary identity", describePhysicalSite(registration.BoundaryID, registration.Matcher), got)
+				continue
+			}
+			wantSlot := ValueSlot{Kind: SlotParameter, Index: 1}
+			switch registration.BoundaryID {
+			case "os.process.Kill", "workspacesvc.manager.Reload", "workspacesvc.manager.Tick", "workspacesvc.manager.Close":
+				wantSlot = ValueSlot{Kind: SlotReceiver}
+			}
+			if got := route.Target.Identities[0].BoundarySlot; got != wantSlot {
+				t.Errorf("%s target slot = %#v, want exact boundary slot %#v", describePhysicalSite(registration.BoundaryID, registration.Matcher), got, wantSlot)
+			}
+
+			if registration.BoundaryID == "os.process.Kill" {
+				if route.AccessPath != AccessDirectProcessBypass {
+					t.Errorf("%s access = %q, want %q", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.AccessPath, AccessDirectProcessBypass)
+				}
+				if route.Disposition.Kind != DispositionReplaceAtGate || !reflect.DeepEqual(route.Disposition.Gates, []TaskRef{"P3.3"}) {
+					t.Errorf("%s disposition = %#v, want replacement at P3.3", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Disposition)
+				}
+				if route.Exception == nil || route.Exception.Kind != ExceptionLegacyBypass || !reflect.DeepEqual(route.Exception.RemovalTasks, []TaskRef{"P3.3"}) {
+					t.Errorf("%s exception = %#v, want bounded P3.3 legacy bypass", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Exception)
+				}
+			} else {
+				if route.AccessPath != AccessProcessBoundary {
+					t.Errorf("%s access = %q, want %q", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.AccessPath, AccessProcessBoundary)
+				}
+				if route.Exception != nil {
+					t.Errorf("%s unexpectedly has temporary exception %#v", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Exception)
+				}
+			}
 		}
-		if got := len(route.Target.Identities); got != 1 {
-			t.Errorf("%s target identities = %d, want one primary identity", describePhysicalSite(registration.BoundaryID, registration.Matcher), got)
+	}
+}
+
+func TestProcessCatalogPinsEveryManagedDoltGuardExecutionOrigin(t *testing.T) {
+	rows := processCatalogSiteRows()
+	records := make([]string, 0, 18)
+	guardRows := 0
+	for _, row := range rows {
+		if row.BoundaryID != "pidutil.SignalProcess" || row.Matcher.Enclosing.Object.Name != "terminateManagedDoltPIDGuarded" {
 			continue
 		}
-		wantSlot := ValueSlot{Kind: SlotParameter, Index: 1}
-		switch registration.BoundaryID {
-		case "os.process.Kill", "workspacesvc.manager.Reload", "workspacesvc.manager.Tick", "workspacesvc.manager.Close":
-			wantSlot = ValueSlot{Kind: SlotReceiver}
+		guardRows++
+		if len(row.Classes) != 0 || len(row.ExplicitRoutes) != 9 {
+			t.Fatalf("%s leaf/explicit routes = %d/%d, want zero leaf and nine explicit", describePhysicalSite(row.BoundaryID, row.Matcher), len(row.Classes), len(row.ExplicitRoutes))
 		}
-		if got := route.Target.Identities[0].BoundarySlot; got != wantSlot {
-			t.Errorf("%s target slot = %#v, want exact boundary slot %#v", describePhysicalSite(registration.BoundaryID, registration.Matcher), got, wantSlot)
+		processCounts := map[ExecutingProcess]int{}
+		classByID := make(map[catalogRouteClassID]ExecutingProcess)
+		for _, class := range processCatalogRouteClassSpecs {
+			classByID[class.ID] = class.ExecutingProcess
 		}
-
-		if registration.BoundaryID == "os.process.Kill" {
-			if route.AccessPath != AccessDirectProcessBypass {
-				t.Errorf("%s access = %q, want %q", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.AccessPath, AccessDirectProcessBypass)
+		for _, explicit := range row.ExplicitRoutes {
+			processCounts[classByID[explicit.Class]]++
+			if len(explicit.Hops) == 0 || !explicit.Hops[0].Site.Enclosing.equal(explicit.LogicalOwner) || !explicit.Hops[len(explicit.Hops)-1].Callee.equal(row.Matcher.Enclosing) {
+				t.Errorf("%s explicit class %q does not connect its logical owner to the guarded signal helper", describePhysicalSite(row.BoundaryID, row.Matcher), explicit.Class)
 			}
-			if route.Disposition.Kind != DispositionReplaceAtGate || !reflect.DeepEqual(route.Disposition.Gates, []TaskRef{"P3.3"}) {
-				t.Errorf("%s disposition = %#v, want replacement at P3.3", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Disposition)
+			for _, hop := range explicit.Hops {
+				if hop.Dispatch != HopDispatchExact {
+					t.Errorf("%s explicit class %q dispatch = %q, want exact managed-Dolt route", describePhysicalSite(row.BoundaryID, row.Matcher), explicit.Class, hop.Dispatch)
+				}
 			}
-			if route.Exception == nil || route.Exception.Kind != ExceptionLegacyBypass || !reflect.DeepEqual(route.Exception.RemovalTasks, []TaskRef{"P3.3"}) {
-				t.Errorf("%s exception = %#v, want bounded P3.3 legacy bypass", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Exception)
-			}
-		} else {
-			if route.AccessPath != AccessProcessBoundary {
-				t.Errorf("%s access = %q, want %q", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.AccessPath, AccessProcessBoundary)
-			}
-			if route.Exception != nil {
-				t.Errorf("%s unexpectedly has temporary exception %#v", describePhysicalSite(registration.BoundaryID, registration.Matcher), route.Exception)
-			}
+			records = append(records, canonicalFields(
+				"process-explicit-route-selection-v1",
+				registrationPhysicalKey(row.BoundaryID, row.Matcher),
+				catalogExplicitRouteKey(explicit),
+			))
 		}
+		if !reflect.DeepEqual(processCounts, map[ExecutingProcess]int{ProcessForegroundCLI: 5, ProcessProviderChild: 4}) {
+			t.Errorf("%s process route counts = %#v, want five CLI and four provider-child", describePhysicalSite(row.BoundaryID, row.Matcher), processCounts)
+		}
+	}
+	if guardRows != 2 || len(records) != 18 {
+		t.Fatalf("managed-Dolt guarded signal rows/routes = %d/%d, want 2/18", guardRows, len(records))
+	}
+	sort.Strings(records)
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(records, "\n"))))
+	if fingerprint != processManagedDoltExplicitRouteFingerprint {
+		t.Fatalf("managed-Dolt guarded route fingerprint = %q, want exact 18-origin fingerprint %q", fingerprint, processManagedDoltExplicitRouteFingerprint)
 	}
 }
 
@@ -167,15 +216,24 @@ func assertProcessEventCatalogClasses(
 	}
 	used := make(map[catalogRouteClassID]bool, len(classes))
 	for _, row := range rows {
-		if got := len(row.Classes); got != 1 {
-			t.Errorf("%s selects %d classes, want exactly one explicit semantic class", describePhysicalSite(row.BoundaryID, row.Matcher), got)
+		if len(row.Classes) != 0 && len(row.ExplicitRoutes) != 0 {
+			t.Errorf("%s mixes leaf classes and explicit routes", describePhysicalSite(row.BoundaryID, row.Matcher))
 			continue
 		}
-		classID := row.Classes[0]
-		if !knownClass(classID) || !known[classID] {
-			t.Errorf("%s selects unknown class %q", describePhysicalSite(row.BoundaryID, row.Matcher), classID)
+		selected := append([]catalogRouteClassID(nil), row.Classes...)
+		for _, explicit := range row.ExplicitRoutes {
+			selected = append(selected, explicit.Class)
 		}
-		used[classID] = true
+		if len(selected) == 0 {
+			t.Errorf("%s selects no semantic class", describePhysicalSite(row.BoundaryID, row.Matcher))
+			continue
+		}
+		for _, classID := range selected {
+			if !knownClass(classID) || !known[classID] {
+				t.Errorf("%s selects unknown class %q", describePhysicalSite(row.BoundaryID, row.Matcher), classID)
+			}
+			used[classID] = true
+		}
 	}
 	for classID := range known {
 		if !used[classID] {

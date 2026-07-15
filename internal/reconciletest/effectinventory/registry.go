@@ -162,6 +162,7 @@ const (
 	TargetProviderServer        TargetKind = "provider-server"
 	TargetEventLog              TargetKind = "event-log"
 	TargetControllerChannel     TargetKind = "controller-channel"
+	TargetWakeSource            TargetKind = "wake-source"
 	TargetOperatorTerminal      TargetKind = "operator-terminal"
 )
 
@@ -206,6 +207,7 @@ const (
 	TargetSignatureGraphPlan      TargetSignatureKind = "graph-plan"
 	TargetSignatureDependencyEdge TargetSignatureKind = "dependency-edge"
 	TargetSignatureChannel        TargetSignatureKind = "channel"
+	TargetSignatureWakeSource     TargetSignatureKind = "wake-source"
 	TargetSignatureProcess        TargetSignatureKind = "process"
 	TargetSignatureEventAppend    TargetSignatureKind = "event-append"
 	TargetSignatureOperatorAttach TargetSignatureKind = "operator-terminal-attach"
@@ -410,14 +412,26 @@ type OperationSite struct {
 // BoundaryDefinition is a closed discovery seed for the analyzer. For channel
 // matching, zero Input and Output mean Object itself must have channel type.
 // A channel-producing function parameter or result names its explicit
-// one-based slot; Input and Output are mutually exclusive.
+// one-based slot; Input and Output are mutually exclusive. Release optionally
+// names the exact synchronous operation that unregisters this channel source;
+// handing the channel to that operation is terminal cleanup, not an escape to
+// an unknown producer.
 type BoundaryDefinition struct {
-	ID     string
-	Kind   EffectKind
+	ID      string
+	Kind    EffectKind
+	Object  ObjectRef
+	Match   ObjectMatchKind
+	Input   ValueSlot
+	Output  ValueSlot
+	Release ChannelRelease
+}
+
+// ChannelRelease names one exact channel-source cleanup operation and its
+// one-based channel parameter. It does not create channel provenance or an
+// independently cataloged effect site.
+type ChannelRelease struct {
 	Object ObjectRef
-	Match  ObjectMatchKind
 	Input  ValueSlot
-	Output ValueSlot
 }
 
 // SiteRegistration is one exact physical boundary crossing. Its identity is
@@ -702,12 +716,25 @@ func validateBoundaries(definitions []BoundaryDefinition, problems *[]string) ma
 			if !boundary.Output.zero() {
 				validateExactSlot(boundary.Output, SlotResult, scope+" channel output", problems)
 			}
+			if boundary.Release.Object.zero() != boundary.Release.Input.zero() {
+				addProblem(problems, scope, "channel release requires both an object and input slot")
+			}
+			if !boundary.Release.Object.zero() {
+				if boundary.Release.Object.Receiver != "" {
+					addProblem(problems, scope, "channel release must name a package function")
+				}
+				validateObject(boundary.Release.Object, scope+" channel release object", problems)
+				validateExactSlot(boundary.Release.Input, SlotParameter, scope+" channel release input", problems)
+			}
 		} else {
 			if !boundary.Input.zero() {
 				addProblem(problems, scope, "non-channel boundary cannot name an input slot")
 			}
 			if !boundary.Output.zero() {
 				addProblem(problems, scope, "non-channel boundary cannot name an output slot")
+			}
+			if !boundary.Release.zero() {
+				addProblem(problems, scope, "non-channel boundary cannot name a channel release")
 			}
 		}
 		if previous, exists := byID[boundary.ID]; exists {
@@ -1077,6 +1104,18 @@ func deriveBoundaryDigest(boundaries []BoundaryDefinition) string {
 }
 
 func canonicalBoundary(boundary BoundaryDefinition) string {
+	if !boundary.Release.zero() {
+		return canonicalFields(
+			"boundary-v2",
+			boundary.ID,
+			string(boundary.Kind),
+			canonicalObjectRef(boundary.Object),
+			string(boundary.Match),
+			canonicalValueSlot(boundary.Input),
+			canonicalValueSlot(boundary.Output),
+			canonicalChannelRelease(boundary.Release),
+		)
+	}
 	return canonicalFields(
 		"boundary-v1",
 		boundary.ID,
@@ -1086,6 +1125,10 @@ func canonicalBoundary(boundary BoundaryDefinition) string {
 		canonicalValueSlot(boundary.Input),
 		canonicalValueSlot(boundary.Output),
 	)
+}
+
+func canonicalChannelRelease(release ChannelRelease) string {
+	return canonicalFields("channel-release-v1", canonicalObjectRef(release.Object), canonicalValueSlot(release.Input))
 }
 
 func canonicalRoute(route Route) string {
@@ -1812,6 +1855,10 @@ func (object ObjectRef) key() string {
 
 func (object ObjectRef) zero() bool {
 	return object == (ObjectRef{})
+}
+
+func (release ChannelRelease) zero() bool {
+	return release == (ChannelRelease{})
 }
 
 func (slot ValueSlot) zero() bool {

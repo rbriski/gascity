@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -108,19 +109,17 @@ var (
 	managedDoltLogSuffixFn      = managedDoltLogSuffix
 )
 
-// init is the re-entry point for the dolt-managed-test watchdog. The watchdog
-// is a sibling process the test framework re-exec's via this binary so the
-// managed `dolt sql-server` outlives the test parent and can be reliably
-// reaped on parent exit (gastownhall/gascity#2306). It lives in init() —
-// not in the cobra command tree — because the binary is re-exec'd as a
-// child of the test parent, not invoked via `gc <subcommand>`. The cobra
-// dispatch never runs in this mode; os.Exit terminates the process so no
-// subsequent dispatch can produce a misleading "unknown command" error.
+// The private process entrypoint is the re-entry point for the
+// dolt-managed-test watchdog. The watchdog is a sibling process the test
+// framework re-exec's via this binary so the managed `dolt sql-server`
+// outlives the test parent and can be reliably reaped on parent exit
+// (gastownhall/gascity#2306). Both mainExitCode and cmd/gc's TestMain dispatch
+// it before Cobra because the child is not invoked via `gc <subcommand>`.
 //
 // The argv[1] sentinel is the sole, sufficient guard. It is a private
 // re-exec marker (managedDoltTestWatchdogArg) that no production `gc`
 // invocation ever passes, so its presence is itself the authorization to
-// enter the watchdog. Checking it first means the watchdog works whether
+// enter the watchdog. Dispatching it first means the watchdog works whether
 // the re-exec target is a Go test binary OR a real `gc` binary —
 // integration tests (e.g. TestInheritedExternalBdRigStoreConsistent...,
 // TestCmdSessionWait...) start managed dolt through a real `gc` subprocess
@@ -133,14 +132,9 @@ var (
 //
 // The stray-`GC_MANAGED_DOLT_TEST_MODE=1`-in-production threat is handled
 // at the spawn decision (managedDoltTestWatchdogEnabled), not here — a
-// production process is never re-exec'd with this sentinel, so reaching
-// init() with it set is already proof of an intentional test re-exec.
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg {
-		return
-	}
-	os.Exit(runManagedDoltTestWatchdog(os.Args[2:], os.Stdout, os.Stderr))
-}
+// production process is never re-exec'd with this sentinel, so reaching the
+// private entrypoint with it set is already proof of an intentional test
+// re-exec.
 
 func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
 	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, true)
@@ -1117,7 +1111,7 @@ func terminateManagedDoltDataDir(cityPath string) string {
 	return layout.DataDir
 }
 
-func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
+func runManagedDoltTestWatchdog(args []string, stdout, stderr io.Writer) int {
 	if !managedDoltTestModeEnabled() {
 		fmt.Fprintln(stderr, "managed dolt test watchdog is only available in managed Dolt test mode") //nolint:errcheck
 		return 2
@@ -1179,20 +1173,21 @@ func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// Install signal handling before publishing the child PID. The parent can
+	// signal this watchdog as soon as it reads stdout, so the subscription must
+	// already own SIGINT/SIGTERM before that handoff becomes visible.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	fmt.Fprintf(stdout, "%d\n", cmd.Process.Pid) //nolint:errcheck
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-signals:
+		case <-signalCtx.Done():
 			_ = terminateManagedDoltPID("", cmd.Process.Pid)
 			<-done
 			return 0

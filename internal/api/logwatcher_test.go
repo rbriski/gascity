@@ -20,7 +20,7 @@ func TestLogFileWatcherWakeResetsStallTimer(t *testing.T) {
 	emits := make(chan struct{}, 4)
 	stalls := make(chan struct{}, 2)
 
-	go lw.Run(
+	go lw.run(
 		ctx,
 		func() bool {
 			select {
@@ -30,10 +30,10 @@ func TestLogFileWatcherWakeResetsStallTimer(t *testing.T) {
 			return true
 		},
 		func() {},
-		RunOpts{
-			Wake:         wake,
-			StallTimeout: 250 * time.Millisecond,
-			OnStall: func() {
+		logFileWatcherRunOpts{
+			wake:         wake,
+			stallTimeout: 250 * time.Millisecond,
+			onStall: func() {
 				select {
 				case stalls <- struct{}{}:
 				default:
@@ -81,15 +81,15 @@ func TestLogFileWatcherPollingWithoutProgressStillFiresStall(t *testing.T) {
 
 	stalls := make(chan struct{}, 2)
 
-	go lw.Run(
+	go lw.run(
 		ctx,
 		func() bool {
 			return false
 		},
 		func() {},
-		RunOpts{
-			StallTimeout: 150 * time.Millisecond,
-			OnStall: func() {
+		logFileWatcherRunOpts{
+			stallTimeout: 150 * time.Millisecond,
+			onStall: func() {
 				select {
 				case stalls <- struct{}{}:
 				default:
@@ -121,7 +121,7 @@ func TestLogFileWatcherPollsWhileFsnotifyActive(t *testing.T) {
 	defer cancel()
 
 	emits := make(chan struct{}, 2)
-	go lw.Run(
+	go lw.run(
 		ctx,
 		func() bool {
 			select {

@@ -7,6 +7,19 @@ import (
 	"os/signal"
 )
 
+// NotFunction has callable type but is not an exact function declaration.
+var NotFunction = signal.Stop
+
+// WrongChannel has a channel parameter incompatible with signal.Notify.
+func WrongChannel(chan string) {}
+
+// Stopper exercises rejection of release methods while the contract only
+// admits exact package functions.
+type Stopper struct{}
+
+// Stop accepts the same channel type but is intentionally a method.
+func (Stopper) Stop(chan<- os.Signal) {}
+
 // RegisteredLocal registers a local channel with signal.Notify before using
 // the same channel in a select receive.
 func RegisteredLocal() {

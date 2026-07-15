@@ -28,16 +28,17 @@ type processCatalogRouteClassSpec struct {
 }
 
 type processCatalogSiteSpec struct {
-	BoundaryID  string
-	Operation   OperationKind
-	Package     string
-	Receiver    string
-	Function    string
-	File        string
-	ClosurePath []int
-	Ordinal     int
-	ProfileSet  processCatalogProfileSet
-	Class       catalogRouteClassID
+	BoundaryID                     string
+	Operation                      OperationKind
+	Package                        string
+	Receiver                       string
+	Function                       string
+	File                           string
+	ClosurePath                    []int
+	Ordinal                        int
+	ProfileSet                     processCatalogProfileSet
+	Class                          catalogRouteClassID
+	ExplicitManagedDoltGuardRoutes bool
 }
 
 func processInventoryRegistrations() ([]SiteRegistration, error) {
@@ -98,7 +99,7 @@ func processCatalogRouteClasses() []catalogRouteClass {
 func processCatalogSiteRows() []catalogSiteRow {
 	rows := make([]catalogSiteRow, 0, len(processCatalogSiteSpecs))
 	for _, spec := range processCatalogSiteSpecs {
-		rows = append(rows, catalogSiteRow{
+		row := catalogSiteRow{
 			BoundaryID: spec.BoundaryID,
 			Matcher: OperationSite{
 				Operation: spec.Operation,
@@ -114,10 +115,75 @@ func processCatalogSiteRows() []catalogSiteRow {
 				Ordinal: spec.Ordinal,
 			},
 			Profiles: processCatalogProfiles(spec.ProfileSet),
-			Classes:  []catalogRouteClassID{spec.Class},
-		})
+		}
+		if spec.ExplicitManagedDoltGuardRoutes {
+			row.ExplicitRoutes = processManagedDoltGuardExplicitRoutes()
+		} else {
+			row.Classes = []catalogRouteClassID{spec.Class}
+		}
+		rows = append(rows, row)
 	}
 	return rows
+}
+
+func processManagedDoltGuardExplicitRoutes() []catalogExplicitRoute {
+	guarded := FunctionRef{
+		Object: ObjectRef{Package: gcCommandPackage, Name: "terminateManagedDoltPIDGuarded"},
+		File:   "cmd/gc/dolt_start_managed.go",
+	}
+	legacy := FunctionRef{
+		Object: ObjectRef{Package: gcCommandPackage, Name: "terminateManagedDoltPID"},
+		File:   "cmd/gc/dolt_start_managed.go",
+	}
+	direct := func(classID catalogRouteClassID, owner FunctionRef, ordinal int) catalogExplicitRoute {
+		return catalogExplicitRoute{
+			Class:        classID,
+			LogicalOwner: owner,
+			Hops: []RouteHop{{
+				Site:     OperationSite{Operation: OperationCall, Enclosing: owner, Ordinal: ordinal},
+				Dispatch: HopDispatchExact,
+				Callee:   guarded,
+			}},
+		}
+	}
+	viaLegacy := func(classID catalogRouteClassID, owner FunctionRef, ordinal int) catalogExplicitRoute {
+		return catalogExplicitRoute{
+			Class:        classID,
+			LogicalOwner: owner,
+			Hops: []RouteHop{
+				{
+					Site:     OperationSite{Operation: OperationCall, Enclosing: owner, Ordinal: ordinal},
+					Dispatch: HopDispatchExact,
+					Callee:   legacy,
+				},
+				{
+					Site:     OperationSite{Operation: OperationCall, Enclosing: legacy, Ordinal: 1},
+					Dispatch: HopDispatchExact,
+					Callee:   guarded,
+				},
+			},
+		}
+	}
+	function := func(name, file string) FunctionRef {
+		return FunctionRef{Object: ObjectRef{Package: gcCommandPackage, Name: name}, File: file}
+	}
+	startedProcess := function("terminateManagedDoltStartedProcess", "cmd/gc/dolt_start_managed.go")
+	testWatchdogStart := function("startManagedDoltSQLServerWithTestWatchdog", "cmd/gc/dolt_start_managed.go")
+	scopeWatchdogStart := function("startManagedDoltSQLServerWithScopeWatchdog", "cmd/gc/dolt_scope_watchdog.go")
+	recoveryCleanup := function("cleanupFailedManagedDoltRecovery", "cmd/gc/dolt_recover_managed.go")
+	testWatchdog := function("runManagedDoltTestWatchdog", "cmd/gc/dolt_start_managed.go")
+	scopeWatchdogChild := function("terminateManagedDoltScopeWatchdogChild", "cmd/gc/dolt_scope_watchdog.go")
+	return []catalogExplicitRoute{
+		direct(processClassBoundarySignalCLIOne, startedProcess, 1),
+		direct(processClassBoundarySignalCLIOne, startedProcess, 2),
+		viaLegacy(processClassBoundarySignalCLIOne, testWatchdogStart, 1),
+		viaLegacy(processClassBoundarySignalCLIOne, scopeWatchdogStart, 1),
+		viaLegacy(processClassBoundarySignalCLIOne, recoveryCleanup, 1),
+		viaLegacy(processClassBoundarySignalProviderChildOne, testWatchdog, 1),
+		viaLegacy(processClassBoundarySignalProviderChildOne, testWatchdog, 2),
+		viaLegacy(processClassBoundarySignalProviderChildOne, testWatchdog, 3),
+		direct(processClassBoundarySignalProviderChildOne, scopeWatchdogChild, 1),
+	}
 }
 
 func processCatalogProfiles(set processCatalogProfileSet) []BuildProfileID {

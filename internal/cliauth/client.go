@@ -79,9 +79,10 @@ type Client struct {
 	HTTPClient *http.Client
 	// Endpoints are the well-known paths; defaults to ServiceV0Endpoints.
 	Endpoints Endpoints
-	// OpenBrowser opens a URL in the user's browser; when nil, browser login
-	// only prints the URL.
-	OpenBrowser func(string) error
+	// openBrowser opens a URL in the user's browser; when nil, browser login
+	// only prints the URL. Configure it through WithBrowserOpener so callers
+	// do not receive an exported mutable function field.
+	openBrowser func(string) error
 	// Out receives progress and prompts.
 	Out io.Writer
 
@@ -98,6 +99,13 @@ func NewClient(baseURL string, out io.Writer) *Client {
 		Out:        out,
 		after:      time.After,
 	}
+}
+
+// WithBrowserOpener configures the function used to open the service login
+// URL and returns c. A nil opener keeps browser login in URL-printing mode.
+func (c *Client) WithBrowserOpener(openBrowser func(string) error) *Client {
+	c.openBrowser = openBrowser
+	return c
 }
 
 func (c *Client) httpClient() *http.Client {
@@ -272,8 +280,8 @@ func (c *Client) browserLogin(ctx context.Context, label string, openBrowser boo
 		"state":        {state},
 		"label":        {label},
 	}.Encode()
-	if openBrowser && c.OpenBrowser != nil {
-		if err := c.OpenBrowser(authURL); err != nil {
+	if openBrowser && c.openBrowser != nil {
+		if err := c.openBrowser(authURL); err != nil {
 			fmt.Fprintf(c.Out, "Open this URL to finish signing in:\n%s\n", authURL) //nolint:errcheck
 		} else {
 			fmt.Fprintf(c.Out, "Opened your browser to sign in.\n%s\n", authURL) //nolint:errcheck

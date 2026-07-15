@@ -60,7 +60,18 @@ var cityDoltConfigs sync.Map // cityPath → config.DoltConfig
 // simultaneously when dolt restarts, causing a thundering herd that
 // hammers the server back down. Each semaphore allows at most 1
 // concurrent provider operation per city (serialize lifecycle ops).
-var providerOpSemaphores sync.Map // cityPath → chan struct{}
+var providerOpSemaphores sync.Map // cityPath → *providerOpSemaphore
+
+// providerOpSemaphore owns the permit channel for one city's provider
+// lifecycle operations. Keeping the channel behind this semantic carrier
+// prevents the untyped sync.Map from becoming the channel's identity.
+type providerOpSemaphore struct {
+	permit chan struct{}
+}
+
+func newProviderOpSemaphore() *providerOpSemaphore {
+	return &providerOpSemaphore{permit: make(chan struct{}, 1)}
+}
 
 // lastBeadsProviderRecover records the timestamp of the most recent
 // recover attempt per city so healthBeadsProvider can refuse a 2nd
@@ -2131,11 +2142,11 @@ func runtimeEnvEntriesToMap(environ []string) map[string]string {
 // dolt on restart.
 func acquireProviderSemaphore(ctx context.Context, cityPath string) (func(), error) {
 	cityPath = normalizePathForCompare(cityPath)
-	v, _ := providerOpSemaphores.LoadOrStore(cityPath, make(chan struct{}, 1))
-	sem := v.(chan struct{})
+	v, _ := providerOpSemaphores.LoadOrStore(cityPath, newProviderOpSemaphore())
+	sem := v.(*providerOpSemaphore)
 	select {
-	case sem <- struct{}{}:
-		return func() { <-sem }, nil
+	case sem.permit <- struct{}{}:
+		return func() { <-sem.permit }, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("waiting for provider lifecycle slot for %q: %w", cityPath, ctx.Err())
 	}

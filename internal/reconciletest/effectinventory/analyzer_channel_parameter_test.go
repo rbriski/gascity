@@ -117,6 +117,113 @@ func TestDiscoverProfileTracksLocalChannelRegisteredThroughExactParameter(t *tes
 	})
 }
 
+func TestDiscoverClosedWorldProfileTracksChannelRegisteredThroughClosedGlobalFunction(t *testing.T) {
+	const packageName = "closedworld/signalglobal"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := signalNotifyFixtureBoundary("channelparam.closed-global.signal-notify")
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err != nil {
+		t.Fatalf("discoverProfile() error: %v", err)
+	}
+	assertObservedSites(t, observed, []observedKey{
+		fixtureCall(boundary.ID, packageName, "main.go", "run", nil, OperationSelectReceive, 1),
+	})
+}
+
+func TestDiscoverClosedWorldProfileRejectsUnregisteredSameSignatureChannelRelease(t *testing.T) {
+	const packageName = "closedworld/signalreleasewrong"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := signalNotifyFixtureBoundary("channelparam.same-signature-release.signal-notify")
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err == nil {
+		t.Fatal("discoverProfile() error = nil, want unregistered-release escape diagnostic")
+	}
+	if observed != nil {
+		t.Fatalf("discoverProfile() observed = %#v, want nil", observed)
+	}
+	for _, want := range []string{"run", "runDynamic", boundary.ID, "escape through an argument to an unanalyzed callee"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("discoverProfile() error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestDiscoverClosedWorldProfileReleasesOnlyTheDeclaredArgumentSlot(t *testing.T) {
+	const packageName = "closedworld/signalreleaseindex"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := BoundaryDefinition{
+		ID:     "channelparam.release-index.register",
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: fixtureModulePath + "/" + packageName, Name: "Register"},
+		Match:  ObjectMatchChannel,
+		Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+		Release: ChannelRelease{
+			Object: ObjectRef{Package: fixtureModulePath + "/" + packageName, Name: "Stop"},
+			Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+		},
+	}
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err == nil {
+		t.Fatal("discoverProfile() error = nil, want non-release argument escape diagnostic")
+	}
+	if observed != nil {
+		t.Fatalf("discoverProfile() observed = %#v, want nil", observed)
+	}
+	for _, want := range []string{"run", boundary.ID, "escape through an argument to an unanalyzed callee"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("discoverProfile() error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestDiscoverClosedWorldProfileRejectsChannelRegistrationThroughExportedGlobalFunction(t *testing.T) {
+	const packageName = "closedworld/signalglobalopen"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := signalNotifyFixtureBoundary("channelparam.open-global.signal-notify")
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err == nil {
+		t.Fatal("discoverProfile() error = nil, want exported-global call-provenance diagnostic")
+	}
+	if observed != nil {
+		t.Fatalf("discoverProfile() observed = %#v, want nil", observed)
+	}
+	for _, want := range []string{"run", "ambiguous call provenance"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("discoverProfile() error = %q, want %q", err, want)
+		}
+	}
+}
+
+func signalNotifyFixtureBoundary(id string) BoundaryDefinition {
+	return BoundaryDefinition{
+		ID:     id,
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: "os/signal", Name: "Notify"},
+		Match:  ObjectMatchChannel,
+		Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+		Release: ChannelRelease{
+			Object: ObjectRef{Package: "os/signal", Name: "Stop"},
+			Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+		},
+	}
+}
+
 func TestDiscoverProfileRejectsAmbiguousChannelRegistrationCallDeterministically(t *testing.T) {
 	const packageName = "channelparam/ambiguous"
 	config := fixtureAnalysisConfig(t, []string{
@@ -177,6 +284,88 @@ func TestDiscoverProfileRejectsInvalidChannelInputSlots(t *testing.T) {
 				boundary.Output = ValueSlot{Kind: SlotResult, Index: 1}
 			},
 			want: "cannot name both channel input and output slots",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			boundary := base
+			test.mutate(&boundary)
+			_, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("discoverProfile() error = %v, want diagnostic containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestDiscoverProfileRejectsInvalidChannelReleases(t *testing.T) {
+	const packageName = "channelparam/register"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	base := BoundaryDefinition{
+		ID:      "channelparam.register.signal-notify",
+		Kind:    KindWakeSource,
+		Object:  ObjectRef{Package: "os/signal", Name: "Notify"},
+		Match:   ObjectMatchChannel,
+		Input:   ValueSlot{Kind: SlotParameter, Index: 1},
+		Release: ChannelRelease{Object: ObjectRef{Package: "os/signal", Name: "Stop"}, Input: ValueSlot{Kind: SlotParameter, Index: 1}},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*BoundaryDefinition)
+		want   string
+	}{
+		{
+			name: "unloaded package",
+			mutate: func(boundary *BoundaryDefinition) {
+				boundary.Release.Object.Package = "example.com/not-loaded"
+			},
+			want: `channel release package "example.com/not-loaded" was not loaded`,
+		},
+		{
+			name: "missing object",
+			mutate: func(boundary *BoundaryDefinition) {
+				boundary.Release.Object.Name = "Missing"
+			},
+			want: "does not exist",
+		},
+		{
+			name: "non-function object",
+			mutate: func(boundary *BoundaryDefinition) {
+				boundary.Release.Object = ObjectRef{Package: fixtureModulePath + "/" + packageName, Name: "NotFunction"}
+			},
+			want: "is not a function or method",
+		},
+		{
+			name: "out-of-range parameter",
+			mutate: func(boundary *BoundaryDefinition) {
+				boundary.Release.Input.Index = 2
+			},
+			want: "has no parameter slot 2",
+		},
+		{
+			name: "non-channel parameter",
+			mutate: func(boundary *BoundaryDefinition) {
+				boundary.Release.Object.Name = "Notify"
+				boundary.Release.Input.Index = 2
+			},
+			want: "parameter 2 does not have channel type",
+		},
+		{
+			name: "incompatible channel",
+			mutate: func(boundary *BoundaryDefinition) {
+				boundary.Release.Object = ObjectRef{Package: fixtureModulePath + "/" + packageName, Name: "WrongChannel"}
+			},
+			want: "is incompatible with source channel type",
+		},
+		{
+			name: "method target",
+			mutate: func(boundary *BoundaryDefinition) {
+				boundary.Release.Object = ObjectRef{Package: fixtureModulePath + "/" + packageName, Receiver: "Stopper", Name: "Stop"}
+			},
+			want: "channel release must name a package function",
 		},
 	}
 

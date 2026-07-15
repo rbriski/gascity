@@ -1390,20 +1390,20 @@ func TestRunStartDriftCheck_DelegatedRestartUsesTryRestart(t *testing.T) {
 	t.Cleanup(func() { restartHelpersHook = oldHelpers })
 	restartHelpersHook = func() restartHelpers {
 		return restartHelpers{
-			Systemctl: func(...string) error {
+			systemctl: func(...string) error {
 				t.Error("delegated drift restart must not use gc's systemd-managed branch")
 				return nil
 			},
-			Launchctl: func(...string) error {
+			launchctl: func(...string) error {
 				t.Error("delegated drift restart must not use launchctl")
 				return nil
 			},
-			Kill: func(int) error {
+			kill: func(int) error {
 				t.Error("delegated drift restart must not SIGTERM the supervisor")
 				return nil
 			},
-			WaitExit: func(int) error { return nil },
-			Spawn: func(string, ...string) error {
+			waitExit: func(int) error { return nil },
+			spawn: func(string, ...string) error {
 				t.Error("delegated drift restart must not respawn the supervisor directly")
 				return nil
 			},

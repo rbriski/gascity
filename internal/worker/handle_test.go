@@ -1591,10 +1591,8 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	sp.WaitForIdleErrors["legacy-worker"] = nil
-	gate := make(chan struct{})
-	started := make(chan struct{})
-	sp.WaitForIdleGates["legacy-worker"] = gate
-	sp.WaitForIdleStarted["legacy-worker"] = started
+	sp.WaitForIdleGate("legacy-worker")
+	started := sp.WaitForIdleStartedSignal("legacy-worker")
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:     sp,

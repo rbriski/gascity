@@ -502,15 +502,15 @@ func readDaemonAutoRestart(cityPath string) bool {
 // PID/process helpers for direct launches.
 func defaultRestartHelpers() restartHelpers {
 	return restartHelpers{
-		Systemctl: supervisorSystemctlRun,
-		Launchctl: supervisorLaunchctlRun,
-		Kill: func(pid int) error {
+		systemctl: supervisorSystemctlRun,
+		launchctl: supervisorLaunchctlRun,
+		kill: func(pid int) error {
 			return pidutil.Signal(pid, syscall.SIGTERM)
 		},
-		WaitExit: func(pid int) error {
+		waitExit: func(pid int) error {
 			return waitForPIDExit(pid, driftKillTimeout, driftKillEscalateTimeout)
 		},
-		Spawn: spawnDetachedSupervisor,
+		spawn: spawnDetachedSupervisor,
 	}
 }
 

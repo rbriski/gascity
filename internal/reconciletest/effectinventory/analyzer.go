@@ -21,9 +21,10 @@ import (
 )
 
 type analysisConfig struct {
-	RepoRoot   string
-	ModulePath string
-	Patterns   []string
+	RepoRoot    string
+	ModulePath  string
+	Patterns    []string
+	closedWorld bool
 }
 
 type analysisProfile struct {
@@ -50,6 +51,8 @@ type loadedAnalysis struct {
 	program           *ssa.Program
 	packages          map[string]*packages.Package
 	sourceFuncs       map[*ssa.Function]bool
+	effectFuncs       map[*ssa.Function]bool
+	executionFuncs    map[*ssa.Function]bool
 	callGraph         *callgraph.Graph
 	selectOps         map[token.Pos]OperationKind
 	receivers         map[token.Pos]types.Type
@@ -57,6 +60,8 @@ type loadedAnalysis struct {
 	channelInputs     map[ssa.Value]map[string]bool
 	channelTracer     *channelTracer
 	globalUses        map[*ssa.Global][]ssa.Instruction
+	fieldStores       map[*types.Var][]ssa.Value
+	fieldAddresses    map[*types.Var][]*ssa.FieldAddr
 }
 
 type resolvedBoundary struct {
@@ -65,6 +70,12 @@ type resolvedBoundary struct {
 	function      *types.Func
 	interfaceType *types.Interface
 	channel       types.Type
+	release       *resolvedChannelRelease
+}
+
+type resolvedChannelRelease struct {
+	function *types.Func
+	input    ValueSlot
 }
 
 type observedCall struct {
@@ -93,7 +104,7 @@ func discoverLoadedProfile(analysis *loadedAnalysis, definitions []BoundaryDefin
 
 	var observed []observedCall
 	problems := append([]string(nil), inputProblems...)
-	for function := range analysis.sourceFuncs {
+	for function := range analysis.effectFuncs {
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
 				if call, ok := instruction.(ssa.CallInstruction); ok {
@@ -240,8 +251,9 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 	}
 
 	resolvedGraph := vta.CallGraph(graphFunctions, chaGraph)
-	return &loadedAnalysis{
-		config:            analysisConfig{RepoRoot: repoRoot, ModulePath: config.ModulePath, Patterns: append([]string(nil), config.Patterns...)},
+	fieldEvidence := collectSourceFieldEvidence(sourceFuncs)
+	analysis := &loadedAnalysis{
+		config:            analysisConfig{RepoRoot: repoRoot, ModulePath: config.ModulePath, Patterns: append([]string(nil), config.Patterns...), closedWorld: config.closedWorld},
 		profile:           profile,
 		roots:             roots,
 		sourcePackages:    sourcePackages,
@@ -249,12 +261,89 @@ func loadAnalysis(ctx context.Context, config analysisConfig, profile analysisPr
 		program:           program,
 		packages:          packageIndex,
 		sourceFuncs:       sourceFuncs,
+		effectFuncs:       sourceFuncs,
+		executionFuncs:    graphFunctions,
 		globalUses:        collectSourceGlobalUses(sourceFuncs),
+		fieldStores:       fieldEvidence.stores,
+		fieldAddresses:    fieldEvidence.addresses,
 		callGraph:         resolvedGraph,
 		selectOps:         collectSelectOperations(sourcePackages),
 		receivers:         collectSelectionReceivers(sourcePackages),
 		initReachable:     functionsReachableFromInitializers(ssaSourcePackages, resolvedGraph),
-	}, nil
+	}
+	if config.closedWorld {
+		analysis.executionFuncs = executionReachableFunctions(roots, program, resolvedGraph)
+		refineClosedWorldExecution(analysis, ssaPackagesForRoots(roots, program))
+		analysis.effectFuncs = sourceFunctionsInSet(analysis.executionFuncs, sourceFuncs)
+		analysis.globalUses = collectSourceGlobalUses(analysis.effectFuncs)
+		fieldEvidence = collectSourceFieldEvidence(analysis.effectFuncs)
+		analysis.fieldStores = fieldEvidence.stores
+		analysis.fieldAddresses = fieldEvidence.addresses
+		analysis.initReachable = functionsReachableFromEntries(analysis, rootEntryFunctions(ssaPackagesForRoots(roots, program), false))
+	}
+	return analysis, nil
+}
+
+func ssaPackagesForRoots(roots []*packages.Package, program *ssa.Program) []*ssa.Package {
+	result := make([]*ssa.Package, 0, len(roots))
+	for _, root := range roots {
+		if root != nil && root.Types != nil {
+			result = append(result, program.Package(root.Types))
+		}
+	}
+	return result
+}
+
+func executionReachableFunctions(roots []*packages.Package, program *ssa.Program, graph *callgraph.Graph) map[*ssa.Function]bool {
+	reachable := make(map[*ssa.Function]bool)
+	var visit func(*ssa.Function)
+	visit = func(function *ssa.Function) {
+		if function == nil || reachable[function] {
+			return
+		}
+		reachable[function] = true
+		if origin := function.Origin(); origin != nil {
+			reachable[origin] = true
+		}
+		if node := graph.Nodes[function]; node != nil {
+			for _, edge := range node.Out {
+				if edge != nil && edge.Callee != nil {
+					visit(edge.Callee.Func)
+				}
+			}
+		}
+	}
+	for _, root := range roots {
+		if root == nil || root.Types == nil {
+			continue
+		}
+		pkg := program.Package(root.Types)
+		if pkg == nil {
+			continue
+		}
+		visit(pkg.Func("init"))
+		visit(pkg.Func("main"))
+	}
+	return reachable
+}
+
+func sourceFunctionsInSet(functions, sourceFuncs map[*ssa.Function]bool) map[*ssa.Function]bool {
+	reachable := make(map[*ssa.Function]bool)
+	instantiatedOrigins := make(map[*ssa.Function]bool)
+	for function := range functions {
+		origin := function.Origin()
+		if origin == nil || !sourceFuncs[origin] {
+			continue
+		}
+		reachable[function] = true
+		instantiatedOrigins[origin] = true
+	}
+	for function := range functions {
+		if sourceFuncs[function] && !instantiatedOrigins[function] {
+			reachable[function] = true
+		}
+	}
+	return reachable
 }
 
 func functionsReachableFromInitializers(packages []*ssa.Package, graph *callgraph.Graph) map[*ssa.Function]bool {

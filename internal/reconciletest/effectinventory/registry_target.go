@@ -220,6 +220,16 @@ func validateTargetIdentityRef(identity TargetIdentityRef, signature TargetSigna
 		if identity.Role == TargetRolePrimary && identity.BoundarySlot.Kind != SlotBoundaryObject {
 			addProblem(problems, identityScope, "channel target identity must use the registered boundary object")
 		}
+	case TargetSignatureWakeSource:
+		if identity.Role == TargetRolePrimary && !oneOf(identity.BoundarySlot.Kind, SlotBoundaryObject, SlotResult) {
+			addProblem(problems, identityScope, "wake-source target identity must use the registered boundary object or a result slot")
+		}
+		if identity.Role == TargetRolePrimary && identity.Source != TargetSourceBoundaryValue {
+			addProblem(problems, identityScope, "wake-source target identity must use boundary-value provenance")
+		}
+		if identity.Role == TargetRolePrimary && !identity.Projection.zero() {
+			addProblem(problems, identityScope, "wake-source target identity cannot name a projection")
+		}
 	case TargetSignatureProcess:
 		if identity.Role == TargetRolePrimary && !oneOf(identity.BoundarySlot.Kind, SlotReceiver, SlotParameter) {
 			addProblem(problems, identityScope, "process target identity must use a receiver or parameter slot")
@@ -281,6 +291,14 @@ func targetPolicyFor(signature TargetSignatureKind) (targetSignaturePolicy, bool
 			Effects:       []EffectKind{KindWakeSource},
 			Roles:         []TargetIdentityRole{TargetRolePrimary},
 		}, true
+	case TargetSignatureWakeSource:
+		return targetSignaturePolicy{
+			Cardinalities: []TargetCardinality{TargetCardinalityOne},
+			Identity:      TargetIdentityExisting,
+			Kinds:         []TargetKind{TargetWakeSource},
+			Effects:       []EffectKind{KindWakeSource},
+			Roles:         []TargetIdentityRole{TargetRolePrimary},
+		}, true
 	case TargetSignatureProcess:
 		return targetSignaturePolicy{
 			Cardinalities: []TargetCardinality{TargetCardinalityOne, TargetCardinalitySet},
@@ -331,7 +349,7 @@ func knownTargetKind(value TargetKind) bool {
 		TargetDurableRecord, TargetDurableGraph, TargetDurableDependencyEdge,
 		TargetDurableTransaction,
 		TargetSessionIdentity, TargetRuntimeIdentity, TargetProcessIdentity,
-		TargetProviderServer, TargetEventLog, TargetControllerChannel,
+		TargetProviderServer, TargetEventLog, TargetControllerChannel, TargetWakeSource,
 		TargetOperatorTerminal,
 	)
 }

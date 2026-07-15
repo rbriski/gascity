@@ -26,14 +26,16 @@ var (
 // or link-local import in an accepted public pack's pack.toml is rejected before
 // its git/cache seam runs.
 func packAddImportFenced(fs fsys.FS, cityPath, source, name, version string) (*importsvc.AddResult, error) {
-	return importsvc.AddImportWith(fs, cityPath, source, name, version, importsvc.Deps{SourcePolicy: validateHTTPPackSource})
+	deps := importsvc.Deps{}.WithSourcePolicy(validateHTTPPackSource)
+	return importsvc.AddImportWith(fs, cityPath, source, name, version, deps)
 }
 
 // packRemoveImportFenced is the default remove seam. Remove re-syncs the lock
 // graph, so it threads the same source policy to fence any transitive import a
 // re-resolution would otherwise fetch.
 func packRemoveImportFenced(fs fsys.FS, cityPath, name string) (*importsvc.RemoveResult, error) {
-	return importsvc.RemoveImportWith(fs, cityPath, name, importsvc.Deps{SourcePolicy: validateHTTPPackSource})
+	deps := importsvc.Deps{}.WithSourcePolicy(validateHTTPPackSource)
+	return importsvc.RemoveImportWith(fs, cityPath, name, deps)
 }
 
 // PackListBody is the response body for GET /v0/packs.

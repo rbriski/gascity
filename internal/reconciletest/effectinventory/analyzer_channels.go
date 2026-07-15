@@ -233,14 +233,14 @@ func channelLike(value types.Type) bool {
 func (analysis *loadedAnalysis) indexChannelInputBoundaries(boundaries []resolvedBoundary) []string {
 	analysis.channelInputs = make(map[ssa.Value]map[string]bool)
 	var problems []string
-	for function := range analysis.sourceFuncs {
+	for function := range analysis.effectFuncs {
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(ssa.CallInstruction)
 				if !ok || !call.Pos().IsValid() {
 					continue
 				}
-				callees := resolvedCallees(analysis.callGraph, function, call)
+				callees := analysis.closedWorldCallees(function, call)
 				for _, boundary := range boundaries {
 					if boundary.definition.Match != ObjectMatchChannel || boundary.definition.Input.zero() {
 						continue
@@ -286,6 +286,10 @@ func (analysis *loadedAnalysis) indexChannelInputValue(value ssa.Value, boundary
 		analysis.indexChannelInputValue(candidate, boundaryID, visiting)
 	}
 	switch value := value.(type) {
+	case *ssa.UnOp:
+		if value.Op == token.MUL {
+			index(value.X)
+		}
 	case *ssa.ChangeType:
 		index(value.X)
 	case *ssa.Convert:
@@ -314,7 +318,11 @@ func (analysis *loadedAnalysis) callMatchesChannelInputBoundary(call ssa.CallIns
 	if !matched {
 		return false, false
 	}
-	openWorld := len(callees) == 0 || callHasOpenWorldSyntheticDispatch(common) || hasOpenWorldFunctionSource(common.Value, make(map[ssa.Value]bool))
+	openFunctionSource := hasOpenWorldFunctionSource(common.Value, make(map[ssa.Value]bool))
+	if analysis.config.closedWorld {
+		openFunctionSource = !analysis.callableSourceClosed(common.Value)
+	}
+	openWorld := len(callees) == 0 || callHasOpenWorldSyntheticDispatch(common) || openFunctionSource
 	return true, unmatched || openWorld
 }
 
@@ -408,7 +416,11 @@ func (tracer *channelTracer) trace(value ssa.Value, bindings map[*ssa.Parameter]
 	case *ssa.FreeVar:
 		provenance.merge(tracer.traceChannelFreeVar(value, bindings))
 	case *ssa.Global:
-		provenance.openWorld = true
+		if tracer.analysis.config.closedWorld {
+			provenance.merge(tracer.traceChannelGlobal(value, bindings))
+		} else {
+			provenance.openWorld = true
+		}
 	case *ssa.MakeChan, *ssa.Const:
 		// Locally created channels and nil are closed-world non-boundaries.
 		provenance.grounded = true
@@ -528,6 +540,9 @@ func (tracer *channelTracer) traceChannelParameter(parameter *ssa.Parameter) cha
 	}
 	foundBinding := false
 	for _, edge := range node.In {
+		if edge != nil && edge.Caller != nil && edge.Caller.Func != nil && tracer.analysis.config.closedWorld && !tracer.analysis.executionFunction(edge.Caller.Func) {
+			continue
+		}
 		if edge == nil || edge.Caller == nil || edge.Caller.Func == nil || edge.Site == nil || !tracer.analysis.authoredSourceFunction(edge.Caller.Func) {
 			provenance.openWorld = true
 			continue
@@ -553,10 +568,59 @@ func (analysis *loadedAnalysis) authoredSourceFunction(function *ssa.Function) b
 	if function == nil {
 		return false
 	}
-	if analysis.sourceFuncs[function] {
+	origin := function
+	if genericOrigin := function.Origin(); genericOrigin != nil {
+		origin = genericOrigin
+	}
+	if !analysis.sourceFuncs[origin] {
+		return false
+	}
+	return !analysis.config.closedWorld || analysis.executionFunction(function)
+}
+
+func (analysis *loadedAnalysis) executionFunction(function *ssa.Function) bool {
+	if function == nil {
+		return false
+	}
+	if analysis.executionFuncs[function] {
 		return true
 	}
-	return function.Origin() != nil && analysis.sourceFuncs[function.Origin()]
+	return function.Origin() != nil && analysis.executionFuncs[function.Origin()]
+}
+
+func (tracer *channelTracer) traceChannelGlobal(global *ssa.Global, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
+	provenance := newChannelProvenance()
+	uses := tracer.analysis.globalUses[global]
+	if len(uses) == 0 {
+		provenance.grounded = true
+		return provenance
+	}
+	foundStore := false
+	for _, instruction := range uses {
+		switch instruction := instruction.(type) {
+		case *ssa.Store:
+			if instruction.Addr != global {
+				provenance.openWorld = true
+				continue
+			}
+			foundStore = true
+			provenance.merge(tracer.trace(instruction.Val, bindings))
+		case *ssa.UnOp:
+			if instruction.X != global || instruction.Op != token.MUL {
+				provenance.openWorld = true
+			}
+		case *ssa.DebugRef:
+		default:
+			provenance.openWorld = true
+		}
+	}
+	if !foundStore {
+		provenance.grounded = true
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
+		provenance.openWorld = true
+	}
+	return provenance
 }
 
 func channelParameterActual(common *ssa.CallCommon, callee *ssa.Function, parameterIndex int) (ssa.Value, bool) {
@@ -663,11 +727,19 @@ func (tracer *channelTracer) traceChannelField(base ssa.Value, field int, bindin
 	provenance := newChannelProvenance()
 	allocation, local := base.(*ssa.Alloc)
 	if !local {
-		if load, ok := base.(*ssa.UnOp); ok {
-			allocation, local = load.X.(*ssa.Alloc)
+		if load, ok := base.(*ssa.UnOp); ok && load.Op == token.MUL {
+			_, loadsStructValue := types.Unalias(load.Type()).Underlying().(*types.Struct)
+			if loadsStructValue {
+				allocation, local = load.X.(*ssa.Alloc)
+			}
 		}
 	}
 	if !local {
+		if tracer.analysis.config.closedWorld {
+			if stored, closed := tracer.tracePrivateChannelField(base.Type(), field, bindings); closed {
+				return stored
+			}
+		}
 		provenance.merge(tracer.trace(base, bindings))
 		if len(provenance.matches) == 0 && !provenance.unsafe {
 			provenance.openWorld = true
@@ -712,12 +784,41 @@ func (tracer *channelTracer) traceChannelField(base ssa.Value, field int, bindin
 	if !foundStore {
 		// A zero-valued local field is a closed-world nil channel.
 		provenance.grounded = true
-		return provenance
+	}
+	if provenance.openWorld && tracer.analysis.config.closedWorld {
+		// Returning or otherwise aliasing the containing value does not make an
+		// unexported module field mutable by an unanalyzed package. When the
+		// complete reachable field-address census is direct, its store union is
+		// a conservative closed-world fallback for the local instance.
+		if stored, closed := tracer.tracePrivateChannelField(base.Type(), field, bindings); closed {
+			return stored
+		}
 	}
 	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
 		provenance.openWorld = true
 	}
 	return provenance
+}
+
+func (tracer *channelTracer) tracePrivateChannelField(containerType types.Type, field int, bindings map[*ssa.Parameter]ssa.Value) (channelProvenance, bool) {
+	provenance := newChannelProvenance()
+	object := tracer.analysis.privateModuleField(containerType, field)
+	if object == nil || !fieldAddressesHaveDirectUsesOnly(tracer.analysis.fieldAddresses[object]) {
+		return provenance, false
+	}
+	stores := tracer.analysis.fieldStores[object]
+	if len(stores) == 0 {
+		// A private field with no reachable stores retains its zero nil value.
+		provenance.grounded = true
+		return provenance, true
+	}
+	for _, stored := range stores {
+		provenance.merge(tracer.trace(stored, bindings))
+	}
+	if !provenance.grounded && !provenance.openWorld && !provenance.unsafe {
+		provenance.openWorld = true
+	}
+	return provenance, true
 }
 
 func (tracer *channelTracer) traceChannelStores(allocation *ssa.Alloc, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
@@ -749,11 +850,17 @@ func (tracer *channelTracer) traceChannelStores(allocation *ssa.Alloc, bindings 
 
 func (tracer *channelTracer) traceChannelCall(call *ssa.Call, resultIndex int, bindings map[*ssa.Parameter]ssa.Value) channelProvenance {
 	provenance := newChannelProvenance()
+	dynamicTargets := callableTargetResult{}
+	if tracer.analysis.config.closedWorld && call.Call.StaticCallee() == nil {
+		dynamicTargets = newCallableTargetTracer(tracer.analysis).trace(call.Call.Value)
+	}
 	authoritativeMatch := false
 	for _, boundary := range tracer.boundaries {
 		if tracer.analysis.callProducesChannel(call, resultIndex, boundary) {
 			provenance.matches[boundary.definition.ID] = true
-			authoritativeMatch = authoritativeMatch || callDirectlyProducesChannel(call, resultIndex, boundary)
+			authoritativeMatch = authoritativeMatch ||
+				callDirectlyProducesChannel(call, resultIndex, boundary) ||
+				closedDynamicTargetsProduceChannel(dynamicTargets, resultIndex, boundary)
 		}
 	}
 	if authoritativeMatch {
@@ -765,8 +872,8 @@ func (tracer *channelTracer) traceChannelCall(call *ssa.Call, resultIndex int, b
 		return provenance
 	}
 
-	callees := resolvedCallees(tracer.analysis.callGraph, call.Parent(), call)
-	if call.Call.StaticCallee() == nil {
+	callees := tracer.analysis.closedWorldCallees(call.Parent(), call)
+	if call.Call.StaticCallee() == nil && !dynamicTargets.closed {
 		provenance.openWorld = true
 	}
 	if len(callees) == 0 {
@@ -807,6 +914,20 @@ func (tracer *channelTracer) traceChannelCall(call *ssa.Call, resultIndex int, b
 		provenance.openWorld = true
 	}
 	return provenance
+}
+
+func closedDynamicTargetsProduceChannel(targets callableTargetResult, resultIndex int, boundary resolvedBoundary) bool {
+	if !targets.closed || len(targets.targets) == 0 || boundary.definition.Output.zero() ||
+		boundary.function == nil || boundary.definition.Output.Index != resultIndex+1 {
+		return false
+	}
+	for target := range targets.targets {
+		object, ok := target.Object().(*types.Func)
+		if !ok || object.Origin() != boundary.function.Origin() {
+			return false
+		}
+	}
+	return true
 }
 
 func callDirectlyProducesChannel(call *ssa.Call, resultIndex int, boundary resolvedBoundary) bool {
@@ -876,7 +997,7 @@ func (analysis *loadedAnalysis) callProducesChannel(call *ssa.Call, resultIndex 
 	if boundary.definition.Output.zero() || boundary.function == nil || boundary.definition.Output.Index != resultIndex+1 {
 		return false
 	}
-	for _, callee := range resolvedCallees(analysis.callGraph, call.Parent(), call) {
+	for _, callee := range analysis.closedWorldCallees(call.Parent(), call) {
 		if object, ok := callee.Object().(*types.Func); ok && object.Origin() == boundary.function.Origin() {
 			return true
 		}

@@ -1090,14 +1090,14 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 		OnStarted: func() {
 			cancel()
 		},
-		ManagedDoltHealth: func(string) error {
+		managedDoltHealth: func(string) error {
 			orderEvents.record("preflight")
 			return nil
 		},
-		ManagedDoltOwned: func(string) (bool, error) {
+		managedDoltOwned: func(string) (bool, error) {
 			return true, nil
 		},
-		ManagedDoltPort: func(string) string {
+		managedDoltPort: func(string) string {
 			return managedPort
 		},
 		Stdout: io.Discard,
@@ -1183,17 +1183,17 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 		CityName: "test-city",
 		Cfg:      &config.City{},
 		SP:       sp,
-		ManagedDoltHealth: func(cityPath string) error {
+		managedDoltHealth: func(cityPath string) error {
 			healthCalls++
 			if cityPath == "" {
 				t.Fatal("health preflight got empty cityPath")
 			}
 			return nil
 		},
-		ManagedDoltOwned: func(string) (bool, error) {
+		managedDoltOwned: func(string) (bool, error) {
 			return true, nil
 		},
-		ManagedDoltPort: func(string) string {
+		managedDoltPort: func(string) string {
 			return ""
 		},
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
@@ -1222,11 +1222,11 @@ func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.
 		CityName: "test-city",
 		Cfg:      &config.City{},
 		SP:       sp,
-		ManagedDoltHealth: func(string) error {
+		managedDoltHealth: func(string) error {
 			healthCalls++
 			return nil
 		},
-		ManagedDoltOwned: func(string) (bool, error) {
+		managedDoltOwned: func(string) (bool, error) {
 			return true, nil
 		},
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {

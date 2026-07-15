@@ -125,7 +125,18 @@ type RuntimeTmuxConfig struct {
 // which can cause garbled input and missed Enter keys.
 // Uses channel-based semaphores instead of sync.Mutex to support
 // timed lock acquisition — preventing permanent lockout if a nudge hangs.
-var sessionNudgeLocks sync.Map // map[string]chan struct{}
+var sessionNudgeLocks sync.Map // map[string]*sessionNudgeSemaphore
+
+// sessionNudgeSemaphore owns the permit channel used to serialize nudges for
+// one session. The semantic carrier keeps channel identity out of sync.Map's
+// untyped value surface.
+type sessionNudgeSemaphore struct {
+	permit chan struct{}
+}
+
+func newSessionNudgeSemaphore() *sessionNudgeSemaphore {
+	return &sessionNudgeSemaphore{permit: make(chan struct{}, 1)}
+}
 
 var pasteBufferSeq uint64
 
@@ -1269,13 +1280,13 @@ func (t *Tmux) SendKeysDelayedDebounced(session, keys string, preDelayMs, deboun
 	return t.SendKeysDebounced(session, keys, debounceMs)
 }
 
-// getSessionNudgeSem returns the channel semaphore for serializing nudges to a session.
+// getSessionNudgeSem returns the semaphore for serializing nudges to a session.
 // Creates a new semaphore if one doesn't exist for this session.
-// The semaphore is a buffered channel of size 1 — send to acquire, receive to release.
-func getSessionNudgeSem(session string) chan struct{} {
-	sem := make(chan struct{}, 1)
+// Its permit channel has capacity 1 — send to acquire, receive to release.
+func getSessionNudgeSem(session string) *sessionNudgeSemaphore {
+	sem := newSessionNudgeSemaphore()
 	actual, _ := sessionNudgeLocks.LoadOrStore(session, sem)
-	return actual.(chan struct{})
+	return actual.(*sessionNudgeSemaphore)
 }
 
 // acquireNudgeLock attempts to acquire the per-session nudge lock with a timeout.
@@ -1283,7 +1294,7 @@ func getSessionNudgeSem(session string) chan struct{} {
 func acquireNudgeLock(session string, timeout time.Duration) bool {
 	sem := getSessionNudgeSem(session)
 	select {
-	case sem <- struct{}{}:
+	case sem.permit <- struct{}{}:
 		return true
 	case <-time.After(timeout):
 		return false
@@ -1294,7 +1305,7 @@ func acquireNudgeLock(session string, timeout time.Duration) bool {
 func releaseNudgeLock(session string) {
 	sem := getSessionNudgeSem(session)
 	select {
-	case <-sem:
+	case <-sem.permit:
 	default:
 		// Lock wasn't held — shouldn't happen, but don't block
 	}

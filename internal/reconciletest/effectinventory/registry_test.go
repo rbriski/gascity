@@ -95,12 +95,39 @@ func TestValidateRegistryRejectsBoundaryDrift(t *testing.T) {
 		{"invalid object name", func(r *Registry) { r.Boundaries[0].Object.Name = "not.a.name" }, "must be a Go identifier"},
 		{"non-channel input", func(r *Registry) { r.Boundaries[0].Input = ValueSlot{Kind: SlotParameter, Index: 1} }, "non-channel boundary cannot name an input slot"},
 		{"non-channel output", func(r *Registry) { r.Boundaries[0].Output = ValueSlot{Kind: SlotResult, Index: 1} }, "non-channel boundary cannot name an output slot"},
+		{"non-channel release", func(r *Registry) {
+			r.Boundaries[0].Release = ChannelRelease{
+				Object: ObjectRef{Package: "os/signal", Name: "Stop"},
+				Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+			}
+		}, "non-channel boundary cannot name a channel release"},
 		{"channel input and output", func(r *Registry) {
 			r.Boundaries[0].Kind = KindWakeSource
 			r.Boundaries[0].Match = ObjectMatchChannel
 			r.Boundaries[0].Input = ValueSlot{Kind: SlotParameter, Index: 1}
 			r.Boundaries[0].Output = ValueSlot{Kind: SlotResult, Index: 1}
 		}, "channel boundary cannot name both input and output slots"},
+		{"partial channel release", func(r *Registry) {
+			r.Boundaries[0].Kind = KindWakeSource
+			r.Boundaries[0].Match = ObjectMatchChannel
+			r.Boundaries[0].Release.Object = ObjectRef{Package: "os/signal", Name: "Stop"}
+		}, "channel release requires both an object and input slot"},
+		{"invalid channel release input", func(r *Registry) {
+			r.Boundaries[0].Kind = KindWakeSource
+			r.Boundaries[0].Match = ObjectMatchChannel
+			r.Boundaries[0].Release = ChannelRelease{
+				Object: ObjectRef{Package: "os/signal", Name: "Stop"},
+				Input:  ValueSlot{Kind: SlotResult, Index: 1},
+			}
+		}, `channel release input: slot must be "parameter"`},
+		{"method channel release", func(r *Registry) {
+			r.Boundaries[0].Kind = KindWakeSource
+			r.Boundaries[0].Match = ObjectMatchChannel
+			r.Boundaries[0].Release = ChannelRelease{
+				Object: ObjectRef{Package: "example.com/release", Receiver: "Stopper", Name: "Stop"},
+				Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+			}
+		}, "channel release must name a package function"},
 	}
 
 	for _, tt := range tests {

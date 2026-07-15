@@ -220,6 +220,9 @@ func (m cleanupTestingM) Run() int {
 }
 
 func TestMain(m *testing.M) {
+	if handled, code := privateManagedDoltWatchdogEntrypoint(os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 	maybeRunProductMetricsDirectChildEnvSpy()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar

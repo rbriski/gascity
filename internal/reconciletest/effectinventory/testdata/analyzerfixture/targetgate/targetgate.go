@@ -94,6 +94,17 @@ var Wake = make(chan Payload)
 // StringWake has an incompatible channel element type.
 var StringWake = make(chan string)
 
+// RegisterWake returns one invocation-local wake source.
+func RegisterWake() <-chan struct{} { return make(chan struct{}) }
+
+// ResultWakeRoute owns the exact wake registration boundary crossing.
+func ResultWakeRoute() {
+	select {
+	case <-RegisterWake():
+	default:
+	}
+}
+
 // ConfigID and ConstantID exercise exact non-function source objects.
 var ConfigID string
 

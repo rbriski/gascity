@@ -139,8 +139,8 @@ func TestArchiveRetainAgePrunesOldArchivesAfterRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForceRotate: %v", err)
 	}
-	if res.Done != nil {
-		<-res.Done
+	if res.CompressionDone() != nil {
+		<-res.CompressionDone()
 	}
 
 	if _, err := os.Stat(oldArchive); !os.IsNotExist(err) {

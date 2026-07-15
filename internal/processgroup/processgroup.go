@@ -17,9 +17,23 @@ var ErrProcessGroupsUnsupported = errors.New("process groups are unsupported on 
 
 // Options configures process-group cleanup.
 type Options struct {
-	Kill           func(pid int, sig syscall.Signal) error
-	CurrentGroupID func() int
-	PollPeriod     time.Duration
+	killFn           func(pid int, sig syscall.Signal) error
+	currentGroupIDFn func() int
+	PollPeriod       time.Duration
+}
+
+// NewOptions configures the process operations and polling period used during
+// group termination. Nil process operations retain the platform defaults.
+func NewOptions(
+	killFn func(pid int, sig syscall.Signal) error,
+	currentGroupIDFn func() int,
+	pollPeriod time.Duration,
+) Options {
+	return Options{
+		killFn:           killFn,
+		currentGroupIDFn: currentGroupIDFn,
+		PollPeriod:       pollPeriod,
+	}
 }
 
 func (o Options) pollPeriod() time.Duration {

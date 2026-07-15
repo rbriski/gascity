@@ -77,6 +77,70 @@ func TestExpandCatalogPartitionIsDeterministicAndDoesNotAlias(t *testing.T) {
 	}
 }
 
+func TestExpandCatalogPartitionSupportsDistinctExplicitLogicalRoutes(t *testing.T) {
+	registry := validRegistry()
+	template := cloneRoute(*firstRoute(&registry))
+	template.LogicalOwner = FunctionRef{}
+	template.Hops = nil
+	classes := []catalogRouteClass{{
+		ID:         "route-recovery-write",
+		Definition: template,
+	}}
+	matcher := registry.Registrations[0].Matcher
+	firstOwner := functionRef(gcCommandPackage, "cmd/gc/first.go", "firstOrigin")
+	secondOwner := functionRef(gcCommandPackage, "cmd/gc/second.go", "secondOrigin")
+	rows := []catalogSiteRow{{
+		BoundaryID: registry.Registrations[0].BoundaryID,
+		Matcher:    matcher,
+		Profiles:   []BuildProfileID{BuildLinuxDefault, BuildDarwinDefault},
+		ExplicitRoutes: []catalogExplicitRoute{
+			{
+				Class:        "route-recovery-write",
+				LogicalOwner: secondOwner,
+				Hops: []RouteHop{{
+					Site:     OperationSite{Operation: OperationCall, Enclosing: secondOwner, Ordinal: 1},
+					Dispatch: HopDispatchExact,
+					Callee:   matcher.Enclosing,
+				}},
+			},
+			{
+				Class:        "route-recovery-write",
+				LogicalOwner: firstOwner,
+				Hops: []RouteHop{{
+					Site:     OperationSite{Operation: OperationCall, Enclosing: firstOwner, Ordinal: 1},
+					Dispatch: HopDispatchExact,
+					Callee:   matcher.Enclosing,
+				}},
+			},
+		},
+	}}
+
+	registrations, err := expandCatalogPartition(classes, rows)
+	if err != nil {
+		t.Fatalf("expandCatalogPartition() failed: %v", err)
+	}
+	if got := len(registrations[0].Cases[0].Routes); got != 2 {
+		t.Fatalf("expanded routes = %d, want two distinct logical origins", got)
+	}
+	got := registrations[0].Cases[0].Routes
+	if !got[0].LogicalOwner.equal(firstOwner) || !got[1].LogicalOwner.equal(secondOwner) {
+		t.Fatalf("logical owners = %#v, want canonical first/second order", []FunctionRef{got[0].LogicalOwner, got[1].LogicalOwner})
+	}
+	if !got[0].Hops[0].Callee.equal(matcher.Enclosing) || !got[1].Hops[0].Callee.equal(matcher.Enclosing) {
+		t.Fatalf("explicit route hops do not terminate at physical owner %s", canonicalFunctionRef(matcher.Enclosing))
+	}
+
+	got[0].LogicalOwner.Object.Name = "mutated"
+	got[0].Hops[0].Callee.Object.Name = "mutated"
+	again, err := expandCatalogPartition(classes, rows)
+	if err != nil {
+		t.Fatalf("expandCatalogPartition(after mutation) failed: %v", err)
+	}
+	if !again[0].Cases[0].Routes[0].LogicalOwner.equal(firstOwner) || !again[0].Cases[0].Routes[0].Hops[0].Callee.equal(matcher.Enclosing) {
+		t.Fatal("expanded explicit routes alias authored origins or hops")
+	}
+}
+
 func TestExpandCatalogPartitionRejectsInvalidAuthorshipDeterministically(t *testing.T) {
 	registry := validRegistry()
 	template := cloneRoute(*firstRoute(&registry))
@@ -91,6 +155,10 @@ func TestExpandCatalogPartitionRejectsInvalidAuthorshipDeterministically(t *test
 		Matcher:    registry.Registrations[0].Matcher,
 		Profiles:   []BuildProfileID{BuildDarwinDefault},
 		Classes:    []catalogRouteClassID{validClass.ID},
+	}
+	validExplicitRoute := catalogExplicitRoute{
+		Class:        validClass.ID,
+		LogicalOwner: validRow.Matcher.Enclosing,
 	}
 
 	tests := []struct {
@@ -117,6 +185,43 @@ func TestExpandCatalogPartitionRejectsInvalidAuthorshipDeterministically(t *test
 			want: []string{`unknown route class "not-authored"`},
 		},
 		{
+			name:    "unknown explicit route class",
+			classes: []catalogRouteClass{validClass},
+			rows: []catalogSiteRow{{
+				BoundaryID: validRow.BoundaryID,
+				Matcher:    validRow.Matcher,
+				Profiles:   validRow.Profiles,
+				ExplicitRoutes: []catalogExplicitRoute{{
+					Class:        "not-authored",
+					LogicalOwner: validRow.Matcher.Enclosing,
+				}},
+			}},
+			want: []string{`unknown explicit route class "not-authored"`},
+		},
+		{
+			name:    "ambiguous route authorship",
+			classes: []catalogRouteClass{validClass},
+			rows: []catalogSiteRow{{
+				BoundaryID:     validRow.BoundaryID,
+				Matcher:        validRow.Matcher,
+				Profiles:       validRow.Profiles,
+				Classes:        validRow.Classes,
+				ExplicitRoutes: []catalogExplicitRoute{validExplicitRoute},
+			}},
+			want: []string{"route classes and explicit routes are mutually exclusive"},
+		},
+		{
+			name:    "missing explicit logical owner",
+			classes: []catalogRouteClass{validClass},
+			rows: []catalogSiteRow{{
+				BoundaryID:     validRow.BoundaryID,
+				Matcher:        validRow.Matcher,
+				Profiles:       validRow.Profiles,
+				ExplicitRoutes: []catalogExplicitRoute{{Class: validClass.ID}},
+			}},
+			want: []string{"explicit route 0 logical owner is required"},
+		},
+		{
 			name:    "duplicate physical row",
 			classes: []catalogRouteClass{validClass},
 			rows:    []catalogSiteRow{validRow, validRow},
@@ -138,7 +243,7 @@ func TestExpandCatalogPartitionRejectsInvalidAuthorshipDeterministically(t *test
 				BoundaryID: validRow.BoundaryID,
 				Matcher:    validRow.Matcher,
 			}},
-			want: []string{"build profiles are required", "route classes are required"},
+			want: []string{"build profiles are required", "route classes or explicit routes are required"},
 		},
 	}
 

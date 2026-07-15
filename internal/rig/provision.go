@@ -541,13 +541,11 @@ func initRigBeadsStore(deps Deps, req ProvisionRequest, rigPath, prefix string, 
 	var deferred bool
 	var err error
 	if req.Adopt {
-		if deps.PrepareAdopt != nil {
-			if err := deps.PrepareAdopt(cityPath, rigPath); err != nil {
-				return false, fmt.Errorf("prepare adopted rig store: %w", err)
-			}
+		if err := deps.storeProvisioner.PrepareAdoptedRigStore(cityPath, rigPath); err != nil {
+			return false, fmt.Errorf("prepare adopted rig store: %w", err)
 		}
 		if storeContract() {
-			deferred, err = deps.InitStore(cityPath, rigPath, prefix)
+			deferred, err = deps.storeProvisioner.InitRigStore(cityPath, rigPath, prefix)
 			if err != nil {
 				return false, err
 			}
@@ -556,14 +554,14 @@ func initRigBeadsStore(deps Deps, req ProvisionRequest, rigPath, prefix string, 
 		return deferred, nil
 	}
 
-	deferred, err = deps.InitStore(cityPath, rigPath, prefix)
+	deferred, err = deps.storeProvisioner.InitRigStore(cityPath, rigPath, prefix)
 	if err != nil {
 		return false, err
 	}
 	if deferred {
 		if storeContract() && doltSkip() {
 			emit(ProvisionStep{Name: "beads-init", Detail: "  Beads init deferred to controller"})
-		} else if err := deps.InitAndHook(cityPath, rigPath, prefix); err != nil {
+		} else if err := deps.storeProvisioner.InitAndHookRigStore(cityPath, rigPath, prefix); err != nil {
 			emit(ProvisionStep{Name: "beads-init", Detail: "  Beads init deferred to controller"})
 		} else {
 			emit(ProvisionStep{Name: "beads-init", Detail: "  Initialized beads database"})

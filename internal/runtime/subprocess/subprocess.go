@@ -554,11 +554,11 @@ func validatePrivateSocketDir(path string, euid int) error {
 	if special := info.Mode() & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky); special != 0 {
 		return fmt.Errorf("private socket directory %q has special mode bits %v", path, special)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
+	uid, ok := privateSocketDirUID(info)
 	if !ok {
 		return fmt.Errorf("private socket directory %q has unsupported ownership metadata", path)
 	}
-	if got, want := stat.Uid, uint32(euid); got != want {
+	if got, want := uid, uint32(euid); got != want {
 		return fmt.Errorf("private socket directory %q is owned by uid %d, want %d", path, got, want)
 	}
 	return nil

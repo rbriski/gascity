@@ -70,14 +70,14 @@ func TestFactoryThreadsStaleKeyDetectionWaiterToSessionHandles(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	waited := make(chan string, 1)
-	factory, err := NewFactory(FactoryConfig{
+	cfg := FactoryConfig{
 		Store:    store,
 		Provider: sp,
-		StaleKeyDetectionWaiter: func(_ context.Context, name string) error {
-			waited <- name
-			return nil
-		},
+	}.WithStaleKeyDetectionWaiter(func(_ context.Context, name string) error {
+		waited <- name
+		return nil
 	})
+	factory, err := NewFactory(cfg)
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)
 	}

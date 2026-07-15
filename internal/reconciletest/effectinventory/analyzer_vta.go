@@ -23,12 +23,16 @@ func (analysis *loadedAnalysis) callableVTATargetSetClosed(call ssa.CallInstruct
 			return false
 		}
 	}
+	return analysis.callableSourceClosed(call.Common().Value)
+}
+
+func (analysis *loadedAnalysis) callableSourceClosed(value ssa.Value) bool {
 	proof := callableSourceProof{
 		analysis: analysis,
 		states:   make(map[ssa.Value]callableProofState),
 		results:  make(map[callableResult]callableProofState),
 	}
-	return proof.closed(call.Common().Value)
+	return proof.closed(value)
 }
 
 type callableProofState uint8
@@ -79,7 +83,7 @@ func (proof *callableSourceProof) inspect(value ssa.Value) bool {
 		return value.IsNil()
 	case *ssa.MakeClosure:
 		function, _ := value.Fn.(*ssa.Function)
-		return function != nil && proof.analysis.calleeCoveredByAuthoredSource(function, make(map[*ssa.Function]bool))
+		return function != nil && (proof.analysis.config.closedWorld || proof.analysis.calleeCoveredByAuthoredSource(function, make(map[*ssa.Function]bool)))
 	case *ssa.Parameter:
 		return proof.parameterClosed(value)
 	case *ssa.FreeVar:
@@ -133,7 +137,7 @@ func (proof *callableSourceProof) allClosed(values []ssa.Value) bool {
 
 func (proof *callableSourceProof) parameterClosed(parameter *ssa.Parameter) bool {
 	parent := parameter.Parent()
-	if parent == nil || functionExternallyNameable(parent) || functionValueEscapesAuthoredUniverse(parent, proof.analysis) {
+	if parent == nil || (!proof.analysis.config.closedWorld && functionExternallyNameable(parent)) || functionValueEscapesAuthoredUniverse(parent, proof.analysis) {
 		return false
 	}
 	index := -1
@@ -152,6 +156,9 @@ func (proof *callableSourceProof) parameterClosed(parameter *ssa.Parameter) bool
 	}
 	found := false
 	for _, edge := range node.In {
+		if edge != nil && edge.Caller != nil && edge.Caller.Func != nil && proof.analysis.config.closedWorld && !proof.analysis.executionFunction(edge.Caller.Func) {
+			continue
+		}
 		if edge == nil || edge.Site == nil || edge.Caller == nil || edge.Caller.Func == nil {
 			return false
 		}
@@ -187,6 +194,9 @@ func functionValueEscapesAuthoredUniverse(function *ssa.Function, analysis *load
 		return false
 	}
 	for _, instruction := range *referrers {
+		if analysis.config.closedWorld && instruction.Parent() != nil && !analysis.executionFunction(instruction.Parent()) {
+			continue
+		}
 		switch instruction := instruction.(type) {
 		case ssa.CallInstruction:
 			common := instruction.Common()
@@ -218,6 +228,9 @@ func callableValueEscapesAuthoredUniverse(value ssa.Value, analysis *loadedAnaly
 	}
 	foundUse := false
 	for _, instruction := range *value.Referrers() {
+		if analysis.config.closedWorld && instruction.Parent() != nil && !analysis.executionFunction(instruction.Parent()) {
+			continue
+		}
 		switch instruction := instruction.(type) {
 		case ssa.CallInstruction:
 			common := instruction.Common()
@@ -304,6 +317,43 @@ func collectSourceGlobalUses(functions map[*ssa.Function]bool) map[*ssa.Global][
 		}
 	}
 	return uses
+}
+
+type sourceFieldEvidence struct {
+	stores    map[*types.Var][]ssa.Value
+	addresses map[*types.Var][]*ssa.FieldAddr
+}
+
+func collectSourceFieldEvidence(functions map[*ssa.Function]bool) sourceFieldEvidence {
+	evidence := sourceFieldEvidence{
+		stores:    make(map[*types.Var][]ssa.Value),
+		addresses: make(map[*types.Var][]*ssa.FieldAddr),
+	}
+	for function := range functions {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				address, ok := instruction.(*ssa.FieldAddr)
+				if !ok {
+					continue
+				}
+				field := fieldObject(address.X.Type(), address.Field)
+				if field == nil {
+					continue
+				}
+				evidence.addresses[field] = append(evidence.addresses[field], address)
+				if address.Referrers() == nil {
+					continue
+				}
+				for _, referrer := range *address.Referrers() {
+					store, ok := referrer.(*ssa.Store)
+					if ok && store.Addr == address {
+						evidence.stores[field] = append(evidence.stores[field], store.Val)
+					}
+				}
+			}
+		}
+	}
+	return evidence
 }
 
 func (proof *callableSourceProof) allocationClosed(allocation *ssa.Alloc) bool {
@@ -414,7 +464,7 @@ func (proof *callableSourceProof) inspectCallResult(call *ssa.Call, resultIndex 
 	if parent == nil {
 		return false
 	}
-	callees := resolvedCallees(proof.analysis.callGraph, parent, call)
+	callees := proof.analysis.closedWorldCallees(parent, call)
 	if len(callees) == 0 || reflectionTarget(callees) != "" {
 		return false
 	}

@@ -27,8 +27,10 @@ package main
 // watchdog dies with its server.
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -44,7 +46,8 @@ import (
 const (
 	// managedDoltScopeWatchdogArg is the argv[1] re-exec marker for the
 	// production scope watchdog. No production `gc` invocation collides with
-	// it; reaching init() with it set is proof of an intentional re-exec.
+	// it; reaching the private process entrypoint with it set is proof of an
+	// intentional re-exec.
 	managedDoltScopeWatchdogArg = "__gc-managed-dolt-scope-watchdog"
 
 	// managedDoltScopeWatchdogEnv disables the production scope watchdog
@@ -70,13 +73,6 @@ const (
 	// "scope momentarily absent" (crash-adoption window, transient rename).
 	managedDoltScopeGoneConfirmations = 2
 )
-
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltScopeWatchdogArg {
-		return
-	}
-	os.Exit(runManagedDoltScopeWatchdog(os.Args[2:], os.Stdout, os.Stderr))
-}
 
 // managedDoltScopeWatchdogEnabled reports whether production managed dolt
 // servers are spawned under the scope watchdog. Default on; opt out with
@@ -178,7 +174,7 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 // server PID on stdout, then supervises: it terminates the server when the
 // scope is gone for managedDoltScopeGoneConfirmations consecutive polls,
 // forwards SIGTERM/SIGINT, and exits when the server exits on its own.
-func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
+func runManagedDoltScopeWatchdog(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 3 {
 		fmt.Fprintf(stderr, "usage: %s <config-file> <log-file> <city-path>\n", managedDoltScopeWatchdogArg) //nolint:errcheck
 		return 2
@@ -218,6 +214,12 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// Register before publishing the child handshake. Once the parent learns
+	// the watchdog PID it may immediately ask it to terminate; installing the
+	// subscription first closes the gap where that SIGTERM would take the
+	// watchdog's default action and orphan the child.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	// Report the dolt child's PID and OS start identity to the parent BEFORE the
 	// reap goroutine below can Wait() the child and free its numeric PID.
 	// Snapshotting here — while the watchdog still holds the un-reaped child — is
@@ -242,17 +244,13 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	goneStreak := 0
 	for {
 		select {
-		case sig := <-signals:
-			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, cmd.Process.Pid) //nolint:errcheck
+		case <-signalCtx.Done():
+			fmt.Fprintf(logFile, "gc scope watchdog: received termination signal; terminating dolt sql-server pid %d\n", cmd.Process.Pid) //nolint:errcheck
 			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
 			<-done
 			return 0

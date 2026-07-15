@@ -401,7 +401,8 @@ func TestCanonicalTargetIdentityCoversEveryAuthoredField(t *testing.T) {
 }
 
 func TestCanonicalIdentityStructFieldsArePinned(t *testing.T) {
-	assertStructFields(t, reflect.TypeOf(BoundaryDefinition{}), "ID", "Kind", "Object", "Match", "Input", "Output")
+	assertStructFields(t, reflect.TypeOf(BoundaryDefinition{}), "ID", "Kind", "Object", "Match", "Input", "Output", "Release")
+	assertStructFields(t, reflect.TypeOf(ChannelRelease{}), "Object", "Input")
 	assertStructFields(t, reflect.TypeOf(Route{}), "StoreDomain", "ActionFamily", "ExecutingProcess", "LogicalOwner", "Target", "Fences", "CurrentGate", "Disposition", "AccessPath", "Continuation", "Hops", "OwningTests", "Exception")
 	assertStructFields(t, reflect.TypeOf(TargetRef{}), "Kind", "Cardinality", "Identity", "Signature", "Identities", "Detail")
 	assertStructFields(t, reflect.TypeOf(TargetIdentityRef{}), "Role", "BoundarySlot", "Projection", "Source", "SourceObject", "SourceSlot")
@@ -419,6 +420,46 @@ func TestCanonicalIdentityStructFieldsArePinned(t *testing.T) {
 	assertStructFields(t, reflect.TypeOf(FunctionRef{}), "Object", "File", "ClosurePath")
 	assertStructFields(t, reflect.TypeOf(ObjectRef{}), "Package", "Receiver", "Name")
 	assertStructFields(t, reflect.TypeOf(ValueSlot{}), "Kind", "Index")
+}
+
+func TestBoundaryDigestIncludesChannelRelease(t *testing.T) {
+	boundary := BoundaryDefinition{
+		ID:     "wake.fixture",
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: "example.com/source", Name: "Notify"},
+		Match:  ObjectMatchChannel,
+		Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+	}
+	wantLegacyCanonical := canonicalFields(
+		"boundary-v1",
+		boundary.ID,
+		string(boundary.Kind),
+		canonicalObjectRef(boundary.Object),
+		string(boundary.Match),
+		canonicalValueSlot(boundary.Input),
+		canonicalValueSlot(boundary.Output),
+	)
+	if got := canonicalBoundary(boundary); got != wantLegacyCanonical {
+		t.Fatalf("canonicalBoundary() without release = %q, want legacy representation %q", got, wantLegacyCanonical)
+	}
+	withoutRelease := deriveBoundaryDigest([]BoundaryDefinition{boundary})
+	boundary.Release = ChannelRelease{
+		Object: ObjectRef{Package: "example.com/source", Name: "Stop"},
+		Input:  ValueSlot{Kind: SlotParameter, Index: 1},
+	}
+	withRelease := deriveBoundaryDigest([]BoundaryDefinition{boundary})
+	if withRelease == withoutRelease {
+		t.Fatal("boundary digest did not cover the channel release")
+	}
+	boundary.Release.Input.Index = 2
+	if changedInput := deriveBoundaryDigest([]BoundaryDefinition{boundary}); changedInput == withRelease {
+		t.Fatal("boundary digest did not cover the channel release input")
+	}
+	boundary.Release.Input.Index = 1
+	boundary.Release.Object.Name = "Cancel"
+	if changedObject := deriveBoundaryDigest([]BoundaryDefinition{boundary}); changedObject == withRelease {
+		t.Fatal("boundary digest did not cover the channel release object")
+	}
 }
 
 func TestRegistryCanonicalKeysDoNotAliasDelimiterShapedReferences(t *testing.T) {

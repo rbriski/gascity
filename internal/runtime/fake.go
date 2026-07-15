@@ -40,22 +40,22 @@ type Fake struct {
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
-	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
-	// caller closes it. A nil or absent entry returns the configured
-	// WaitForIdleErrors value immediately. The gate is read under f.mu
-	// and the lock is released before the block, so other Fake methods
-	// remain callable while a probe is gated.
-	WaitForIdleGates map[string]chan struct{}
-	// WaitForIdleStarted signals when WaitForIdle has recorded its call and is
-	// about to consult configured results. Tests use this to coordinate
-	// cancellation without relying on wall-clock sleeps.
-	WaitForIdleStarted map[string]chan struct{}
+	waitForIdleGates        map[string]waitForIdleGate
+	waitForIdleStarted      map[string]waitForIdleStart
 	// ExecResults configures Fake.Exec output/code/err per session name; an
 	// absent entry returns empty success.
 	ExecResults map[string]FakeExecResult
 	// RelaunchErrors configures Fake.Relaunch errors per session name; an absent
 	// entry relaunches successfully (records the call, updates the live config).
 	RelaunchErrors map[string]error
+}
+
+type waitForIdleGate struct {
+	ready <-chan struct{}
+}
+
+type waitForIdleStart struct {
+	ready chan struct{}
 }
 
 var (
@@ -112,6 +112,28 @@ func (f *Fake) SnapshotCalls() []Call {
 	return out
 }
 
+// WaitForIdleGate configures WaitForIdle to block for name and returns the
+// gate tests close to release it. The channel is created by Fake so callers
+// cannot inject an unrelated channel into its private synchronization state.
+func (f *Fake) WaitForIdleGate(name string) chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	gate := make(chan struct{})
+	f.waitForIdleGates[name] = waitForIdleGate{ready: gate}
+	return gate
+}
+
+// WaitForIdleStartedSignal configures a one-shot signal that WaitForIdle
+// closes after recording its call. The signal is removed before another call
+// can observe it, so repeated WaitForIdle calls cannot close it twice.
+func (f *Fake) WaitForIdleStartedSignal(name string) <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	started := make(chan struct{})
+	f.waitForIdleStarted[name] = waitForIdleStart{ready: started}
+	return started
+}
+
 // NewFake returns a ready-to-use [Fake].
 func NewFake() *Fake {
 	return &Fake{
@@ -136,8 +158,8 @@ func NewFake() *Fake {
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
-		WaitForIdleGates:        make(map[string]chan struct{}),
-		WaitForIdleStarted:      make(map[string]chan struct{}),
+		waitForIdleGates:        make(map[string]waitForIdleGate),
+		waitForIdleStarted:      make(map[string]waitForIdleStart),
 		RelaunchErrors:          make(map[string]error),
 	}
 }
@@ -167,8 +189,8 @@ func NewFailFake() *Fake {
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
-		WaitForIdleGates:        make(map[string]chan struct{}),
-		WaitForIdleStarted:      make(map[string]chan struct{}),
+		waitForIdleGates:        make(map[string]waitForIdleGate),
+		waitForIdleStarted:      make(map[string]waitForIdleStart),
 		RelaunchErrors:          make(map[string]error),
 		broken:                  true,
 	}
@@ -736,15 +758,15 @@ func (f *Fake) ClearScrollback(name string) error {
 }
 
 // WaitForIdle records the call and returns the configured result. When
-// WaitForIdleGates[name] is set, the method releases f.mu and blocks on
-// the gate (or ctx cancellation) before returning, giving tests
+// a gate is configured by [Fake.WaitForIdleGate], the method releases f.mu
+// and blocks on the gate (or ctx cancellation) before returning, giving tests
 // deterministic control over when the call completes.
 func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) error {
 	f.mu.Lock()
 	f.Calls = append(f.Calls, Call{Method: "WaitForIdle", Name: name})
-	if started := f.WaitForIdleStarted[name]; started != nil {
-		close(started)
-		delete(f.WaitForIdleStarted, name)
+	if started, ok := f.waitForIdleStarted[name]; ok {
+		close(started.ready)
+		delete(f.waitForIdleStarted, name)
 	}
 	if f.broken {
 		f.mu.Unlock()
@@ -761,11 +783,11 @@ func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) er
 		f.mu.Unlock()
 		return ErrInteractionUnsupported
 	}
-	gate := f.WaitForIdleGates[name]
+	gate, gated := f.waitForIdleGates[name]
 	f.mu.Unlock()
-	if gate != nil {
+	if gated {
 		select {
-		case <-gate:
+		case <-gate.ready:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

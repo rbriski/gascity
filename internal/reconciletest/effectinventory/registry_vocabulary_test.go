@@ -114,6 +114,23 @@ func TestValidateRegistryAcceptsBoundedTargetSignatures(t *testing.T) {
 			},
 		},
 		{
+			name:     "invocation-local wake source",
+			boundary: KindWakeSource,
+			access:   AccessDirectWake,
+			target: TargetRef{
+				Kind:        TargetWakeSource,
+				Cardinality: TargetCardinalityOne,
+				Identity:    TargetIdentityExisting,
+				Signature:   TargetSignatureWakeSource,
+				Identities: []TargetIdentityRef{{
+					Role:         TargetRolePrimary,
+					BoundarySlot: ValueSlot{Kind: SlotBoundaryObject},
+					Source:       TargetSourceBoundaryValue,
+				}},
+				Detail: "one invocation-local timer, cancellation, or signal wake source",
+			},
+		},
+		{
 			name:     "process identity",
 			boundary: KindProcessMutation,
 			access:   AccessProcessBoundary,
@@ -228,6 +245,38 @@ func TestValidateRegistryRejectsMalformedGeneratedAndSpecialTargets(t *testing.T
 			Detail: "payload is not the channel identity",
 		})
 		assertErrorContains(t, validateRegistry(registry, validationDate()), "channel target identity must use the registered boundary object")
+	})
+
+	t.Run("invocation wake source cannot claim singleton identity", func(t *testing.T) {
+		registry := registryForTarget(KindWakeSource, AccessDirectWake, "", TargetRef{
+			Kind:        TargetWakeSource,
+			Cardinality: TargetCardinalityOne,
+			Identity:    TargetIdentitySingleton,
+			Signature:   TargetSignatureWakeSource,
+			Identities: []TargetIdentityRef{{
+				Role:         TargetRolePrimary,
+				BoundarySlot: ValueSlot{Kind: SlotBoundaryObject},
+				Source:       TargetSourceBoundaryValue,
+			}},
+			Detail: "false singleton claim",
+		})
+		assertErrorContains(t, validateRegistry(registry, validationDate()), `signature "wake-source" requires target identity "existing"`)
+	})
+
+	t.Run("invocation wake source cannot use an unrelated parameter", func(t *testing.T) {
+		registry := registryForTarget(KindWakeSource, AccessDirectWake, "", TargetRef{
+			Kind:        TargetWakeSource,
+			Cardinality: TargetCardinalityOne,
+			Identity:    TargetIdentityExisting,
+			Signature:   TargetSignatureWakeSource,
+			Identities: []TargetIdentityRef{{
+				Role:         TargetRolePrimary,
+				BoundarySlot: ValueSlot{Kind: SlotParameter, Index: 1},
+				Source:       TargetSourceBoundaryValue,
+			}},
+			Detail: "unrelated parameter",
+		})
+		assertErrorContains(t, validateRegistry(registry, validationDate()), "wake-source target identity must use the registered boundary object or a result slot")
 	})
 }
 

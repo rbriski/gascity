@@ -21,7 +21,20 @@ func TestValidateTargetGateEvidenceForProfileAcceptsExactTypedClaims(t *testing.
 	}
 	channelObject := targetGateChannelRegistry("Wake", ObjectRef{})
 	firstTargetGateRoute(&channelObject).Target.Identities[0].BoundarySlot = ValueSlot{Kind: SlotBoundaryObject}
-	registries = append(registries, channelObject)
+	wakeSource := targetGateChannelRegistry("Wake", ObjectRef{})
+	firstTargetGateRoute(&wakeSource).Target = TargetRef{
+		Kind:        TargetWakeSource,
+		Cardinality: TargetCardinalityOne,
+		Identity:    TargetIdentityExisting,
+		Signature:   TargetSignatureWakeSource,
+		Identities: []TargetIdentityRef{{
+			Role:         TargetRolePrimary,
+			BoundarySlot: ValueSlot{Kind: SlotBoundaryObject},
+			Source:       TargetSourceBoundaryValue,
+		}},
+		Detail: "one typed invocation-local channel wake source",
+	}
+	registries = append(registries, channelObject, wakeSource, targetGateWakeResultRegistry())
 	for _, registry := range registries {
 		if err := validateTargetGateEvidenceForProfile(analysis, registry); err != nil {
 			t.Fatalf("validateTargetGateEvidenceForProfile() error: %v", err)
@@ -666,6 +679,38 @@ func targetGateChannelRegistry(channel string, projection ObjectRef) Registry {
 					Projection:   projection,
 					Source:       TargetSourceBoundaryValue,
 				}}},
+				CurrentGate: GateRef{Kind: GateUnconditionalLegacy},
+			}}}},
+		}},
+	}
+}
+
+func targetGateWakeResultRegistry() Registry {
+	owner := targetGateFunction("ResultWakeRoute")
+	return Registry{
+		Boundaries: []BoundaryDefinition{{
+			ID:     "targetgate.wake-result",
+			Kind:   KindWakeSource,
+			Object: targetGateObject("", "RegisterWake"),
+			Match:  ObjectMatchExact,
+		}},
+		Registrations: []SiteRegistration{{
+			BoundaryID: "targetgate.wake-result",
+			Matcher:    OperationSite{Operation: OperationCall, Enclosing: owner, Ordinal: 1},
+			Cases: []ProfileCase{{BuildProfiles: []BuildProfileID{BuildLinuxDefault}, Routes: []Route{{
+				LogicalOwner: owner,
+				Target: TargetRef{
+					Kind:        TargetWakeSource,
+					Cardinality: TargetCardinalityOne,
+					Identity:    TargetIdentityExisting,
+					Signature:   TargetSignatureWakeSource,
+					Identities: []TargetIdentityRef{{
+						Role:         TargetRolePrimary,
+						BoundarySlot: ValueSlot{Kind: SlotResult, Index: 1},
+						Source:       TargetSourceBoundaryValue,
+					}},
+					Detail: "one typed invocation-local returned wake source",
+				},
 				CurrentGate: GateRef{Kind: GateUnconditionalLegacy},
 			}}}},
 		}},

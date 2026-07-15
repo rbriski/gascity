@@ -16,10 +16,8 @@ func TestPrepareConditionCommandEscalatesToSIGKILL(t *testing.T) {
 	oldOptions := conditionProcessGroupOptions
 	var signals []syscall.Signal
 	killed := false
-	conditionProcessGroupOptions = processgroup.Options{
-		CurrentGroupID: func() int { return -1 },
-		PollPeriod:     time.Millisecond,
-		Kill: func(_ int, sig syscall.Signal) error {
+	conditionProcessGroupOptions = processgroup.NewOptions(
+		func(_ int, sig syscall.Signal) error {
 			switch sig {
 			case syscall.SIGTERM, syscall.SIGKILL:
 				signals = append(signals, sig)
@@ -37,7 +35,9 @@ func TestPrepareConditionCommandEscalatesToSIGKILL(t *testing.T) {
 				return nil
 			}
 		},
-	}
+		func() int { return -1 },
+		time.Millisecond,
+	)
 	t.Cleanup(func() { conditionProcessGroupOptions = oldOptions })
 
 	cmd := exec.CommandContext(context.Background(), "sleep", "10")

@@ -113,9 +113,10 @@ func CompileCanonicalRegistry(ctx context.Context, request CanonicalCompileReque
 	}
 
 	config := analysisConfig{
-		RepoRoot:   pre.repoRoot,
-		ModulePath: canonicalModulePath,
-		Patterns:   canonicalProductionAnalysisPatterns(),
+		RepoRoot:    pre.repoRoot,
+		ModulePath:  canonicalModulePath,
+		Patterns:    canonicalProductionAnalysisPatterns(),
+		closedWorld: true,
 	}
 	profiles := canonicalAnalysisProfiles()
 	runs := make([]canonicalProfileRun, 0, len(profiles))

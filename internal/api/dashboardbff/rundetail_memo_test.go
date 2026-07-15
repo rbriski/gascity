@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -284,6 +285,28 @@ func TestRunDetailMemoEvictsLRU(t *testing.T) {
 	// Builds: gen1, gen2, gen3, (gen2 hit), gen1-rebuild = 4.
 	if builds := detailBuildCount.Load() - before; builds != 4 {
 		t.Fatalf("builds = %d, want 4 (gen2 cached, evicted gen1 rebuilt)", builds)
+	}
+}
+
+func TestRunDetailMemoReelectsAfterBuildError(t *testing.T) {
+	m := newRunDetailMemo()
+	key := runDetailMemoKey{runID: "run1", lastSeq: 1}
+	wantErr := errors.New("transient build failure")
+
+	if _, err := m.getOrBuild(key, func() (runDetailMemoValue, error) {
+		return runDetailMemoValue{}, wantErr
+	}); !errors.Is(err, wantErr) {
+		t.Fatalf("first getOrBuild() error = %v, want %v", err, wantErr)
+	}
+
+	got, err := m.getOrBuild(key, func() (runDetailMemoValue, error) {
+		return runDetailMemoValue{bytes: []byte("rebuilt")}, nil
+	})
+	if err != nil {
+		t.Fatalf("second getOrBuild() error = %v", err)
+	}
+	if string(got.bytes) != "rebuilt" {
+		t.Fatalf("second getOrBuild() bytes = %q, want %q", got.bytes, "rebuilt")
 	}
 }
 

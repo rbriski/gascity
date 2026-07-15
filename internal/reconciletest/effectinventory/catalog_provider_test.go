@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	providerScaffoldFingerprint = "9732281d3f084ea35253ffc1557dc6e72c3aaf3edaa82c4c06bbcd2b1bc3b3d0"
-	providerSemanticFingerprint = "3ae5fee72fedf16476fe9a1a834a5633848392dd8d0bc4a2f416327eb23887a5"
+	providerScaffoldFingerprint = "56907cfd501d52eb506811fc5ddbaff2e81265d06b5ecaacb01e7e375b2d0787"
+	providerSemanticFingerprint = "3377f357039f145524fc7d6988755fb85b7b6a180e3dc88054b9f97ddd56e3a2"
 	providerBoundaryDigest      = "boundaries-v1-854917b2f31cc2120382c76b579df98f1fcd38e940d55503ca7c20da4847e7d4"
 )
 
@@ -28,25 +28,24 @@ var providerBoundaryCounts = map[string]int{
 	"runtime.carrier.SendKeys":                            3,
 	"runtime.dialog.DismissKnownDialogs":                  4,
 	"runtime.immediate-nudge.NudgeNow":                    6,
-	"runtime.interaction.Respond":                         8,
+	"runtime.interaction.Respond":                         7,
 	"runtime.interrupted-turn-reset.ResetInterruptedTurn": 3,
-	"runtime.meta-store.RemoveMeta":                       24,
-	"runtime.meta-store.SetMeta":                          23,
-	"runtime.place.Stage":                                 1,
+	"runtime.meta-store.RemoveMeta":                       22,
+	"runtime.meta-store.SetMeta":                          22,
 	"runtime.process-table.TerminateRuntime":              3,
-	"runtime.provider.Attach":                             12,
-	"runtime.provider.ClearScrollback":                    12,
-	"runtime.provider.CopyTo":                             12,
+	"runtime.provider.Attach":                             11,
+	"runtime.provider.ClearScrollback":                    11,
+	"runtime.provider.CopyTo":                             1,
 	"runtime.provider.Interrupt":                          16,
-	"runtime.provider.Nudge":                              24,
-	"runtime.provider.RunLive":                            4,
+	"runtime.provider.Nudge":                              23,
+	"runtime.provider.RunLive":                            3,
 	"runtime.provider.SendKeys":                           21,
 	"runtime.provider.Start":                              17,
-	"runtime.provider.Stop":                               43,
-	"runtime.relaunch.Relaunch":                           11,
+	"runtime.provider.Stop":                               35,
+	"runtime.relaunch.Relaunch":                           9,
 	"runtime.runtime.Provision":                           1,
 	"runtime.runtime.Teardown":                            2,
-	"runtime.server-lifecycle.ConfigureServer":            5,
+	"runtime.server-lifecycle.ConfigureServer":            3,
 	"runtime.server-lifecycle.TeardownServer":             2,
 	"runtime.transport.Attach":                            1,
 	"runtime.transport.Launch":                            1,
@@ -54,7 +53,7 @@ var providerBoundaryCounts = map[string]int{
 
 func TestProviderCatalogCoversScaffoldExactlyOnce(t *testing.T) {
 	rows := providerCatalogSiteRows()
-	if got, want := len(rows), 273; got != want {
+	if got, want := len(rows), 241; got != want {
 		t.Fatalf("provider catalog rows = %d, want scaffold count %d", got, want)
 	}
 
@@ -135,54 +134,53 @@ func TestProviderCatalogPinsSemanticAssignmentsAndAuditedCensus(t *testing.T) {
 	}
 
 	providerAssertCountMap(t, "access", accessCounts, map[AccessPath]int{
-		AccessProviderNative: 182,
-		AccessProviderBypass: 52,
+		AccessProviderNative: 161,
+		AccessProviderBypass: 45,
 		AccessManagerBypass:  27,
-		AccessWorkerBoundary: 12,
+		AccessWorkerBoundary: 8,
 	})
 	providerAssertCountMap(t, "action family", actionCounts, map[ActionFamily]int{
 		FamilyDrainAckCompletion:        9,
 		FamilyDrainBeginCancel:          6,
-		FamilyIdentityHealRetirement:    3,
+		FamilyIdentityHealRetirement:    2,
 		FamilyInterruptStopTurn:         20,
-		FamilyLiveConfig:                4,
-		FamilyNudge:                     86,
-		FamilyOperatorAttach:            13,
+		FamilyLiveConfig:                3,
+		FamilyNudge:                     83,
+		FamilyOperatorAttach:            12,
 		FamilyProcessSignal:             3,
-		FamilyRestartGeneration:         19,
+		FamilyRestartGeneration:         15,
 		FamilyRuntimeLaunch:             1,
-		FamilyRuntimeProvision:          17,
+		FamilyRuntimeProvision:          3,
 		FamilyServerTeardown:            2,
 		FamilyStartConfirmationAdoption: 1,
 		FamilyStartInitiation:           23,
 		FamilyStatusHeal:                24,
-		FamilyStop:                      42,
+		FamilyStop:                      34,
 	})
 	providerAssertCountMap(t, "executing process", processCounts, map[ExecutingProcess]int{
-		ProcessController:      240,
+		ProcessController:      215,
 		ProcessAPIInController: 1,
-		ProcessForegroundCLI:   32,
+		ProcessForegroundCLI:   25,
 	})
 	providerAssertCountMap(t, "target shape", targetCounts, map[providerCatalogTargetShape]int{
-		providerTargetSessionP1:       193,
-		providerTargetSessionP2:       47,
+		providerTargetSessionP1:       167,
+		providerTargetSessionP2:       45,
 		providerTargetSessionReceiver: 5,
 		providerTargetRuntimeP2:       4,
-		providerTargetRuntimeReceiver: 1,
-		providerTargetServerReceiver:  7,
+		providerTargetServerReceiver:  5,
 		providerTargetProcessRuntime:  3,
-		providerTargetAttachP1:        12,
+		providerTargetAttachP1:        11,
 		providerTargetAttachP3:        1,
 	})
 	providerAssertCountMap(t, "fence shape", fenceCounts, map[providerCatalogFenceShape]int{
-		providerFenceNone:                   235,
+		providerFenceNone:                   203,
 		providerFenceSessionMutationLock:    27,
 		providerFenceControllerSingleWriter: 9,
 		providerFenceProcessScanReread:      2,
 	})
 	providerAssertCountMap(t, "continuation", continuationCounts, map[providerCatalogContinuationShape]int{
-		providerContinuationInline: 238,
-		providerContinuationChild:  35,
+		providerContinuationInline: 210,
+		providerContinuationChild:  31,
 	})
 
 	sort.Strings(records)
@@ -223,7 +221,7 @@ func providerScaffoldRecord(row catalogSiteRow, profiles []BuildProfileID) strin
 
 func TestProviderCatalogUsesOnlyClosedKnownSemanticClasses(t *testing.T) {
 	classes := providerCatalogRouteClasses()
-	if got, want := len(classes), 63; got != want {
+	if got, want := len(classes), 56; got != want {
 		t.Fatalf("provider semantic classes = %d, want %d", got, want)
 	}
 	known := make(map[catalogRouteClassID]bool, len(classes))

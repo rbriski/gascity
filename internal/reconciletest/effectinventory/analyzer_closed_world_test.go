@@ -63,6 +63,26 @@ func TestDiscoverClosedWorldProfileRetainsEscapedCobraRunECallbacks(t *testing.T
 	})
 }
 
+func TestDiscoverClosedWorldProfileUsesConcreteGenericInstantiations(t *testing.T) {
+	const packageName = "closedworld/genericconcrete"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := BoundaryDefinition{
+		ID:     "closed-world.generic-concrete-channel",
+		Kind:   KindWakeSource,
+		Object: ObjectRef{Package: fixtureModulePath + "/" + packageName, Name: "Approved"},
+		Match:  ObjectMatchChannel,
+	}
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err != nil {
+		t.Fatalf("discoverProfile() error: %v", err)
+	}
+	assertObservedSites(t, observed, nil)
+}
+
 func TestDiscoverClosedWorldProfileSeparatesRuntimeEffectsFromInitialization(t *testing.T) {
 	const packageName = "closedworld/initseparation"
 	config := fixtureAnalysisConfig(t, []string{

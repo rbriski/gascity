@@ -323,13 +323,18 @@ func executionReachableFunctions(roots []*packages.Package, program *ssa.Program
 
 func sourceFunctionsInSet(functions, sourceFuncs map[*ssa.Function]bool) map[*ssa.Function]bool {
 	reachable := make(map[*ssa.Function]bool)
+	instantiatedOrigins := make(map[*ssa.Function]bool)
 	for function := range functions {
-		origin := function
-		if genericOrigin := function.Origin(); genericOrigin != nil {
-			origin = genericOrigin
+		origin := function.Origin()
+		if origin == nil || !sourceFuncs[origin] {
+			continue
 		}
-		if sourceFuncs[origin] {
-			reachable[origin] = true
+		reachable[function] = true
+		instantiatedOrigins[origin] = true
+	}
+	for function := range functions {
+		if sourceFuncs[function] && !instantiatedOrigins[function] {
+			reachable[function] = true
 		}
 	}
 	return reachable

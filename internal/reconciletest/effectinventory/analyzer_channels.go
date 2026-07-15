@@ -564,14 +564,14 @@ func (analysis *loadedAnalysis) authoredSourceFunction(function *ssa.Function) b
 	if function == nil {
 		return false
 	}
-	functions := analysis.sourceFuncs
-	if analysis.config.closedWorld {
-		functions = analysis.effectFuncs
+	origin := function
+	if genericOrigin := function.Origin(); genericOrigin != nil {
+		origin = genericOrigin
 	}
-	if functions[function] {
-		return true
+	if !analysis.sourceFuncs[origin] {
+		return false
 	}
-	return function.Origin() != nil && functions[function.Origin()]
+	return !analysis.config.closedWorld || analysis.executionFunction(function)
 }
 
 func (analysis *loadedAnalysis) executionFunction(function *ssa.Function) bool {

@@ -1037,7 +1037,10 @@ func numberObservedCalls(calls []observedCall, profile BuildProfileID) []Observe
 	})
 	ordinals := make(map[string]int)
 	result := make([]ObservedSite, 0, len(calls))
-	for _, call := range calls {
+	for index, call := range calls {
+		if index > 0 && sameObservedPhysicalCall(call, calls[index-1]) {
+			continue
+		}
 		group := call.boundaryID + "|" + call.function.key() + "|" + string(call.operation)
 		ordinals[group]++
 		result = append(result, ObservedSite{
@@ -1051,6 +1054,13 @@ func numberObservedCalls(calls []observedCall, profile BuildProfileID) []Observe
 		})
 	}
 	return result
+}
+
+func sameObservedPhysicalCall(left, right observedCall) bool {
+	return left.boundaryID == right.boundaryID &&
+		left.function.key() == right.function.key() &&
+		left.operation == right.operation &&
+		left.position == right.position
 }
 
 func compactStrings(values []string) []string {

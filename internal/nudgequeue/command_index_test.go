@@ -50,7 +50,7 @@ func TestCommandIndexTrustedPartitionGapsPreserveDenseSequenceCoverage(t *testin
 	index, err := BuildCommandIndex(CommandIndexSnapshot{
 		Store:             indexTestStoreBinding(),
 		Entries:           []CommandIndexEntry{knownIndexTestEntry(owned)},
-		PartitionGaps:     []CommandIndexPartitionGap{{Sequence: 1}, {Sequence: 3}},
+		PartitionGaps:     []CommandIndexPartitionGap{{FirstSequence: 1, LastSequence: 1}, {FirstSequence: 3, LastSequence: 3}},
 		Revision:          3,
 		SequenceHighWater: 3,
 	})
@@ -74,9 +74,10 @@ func TestCommandIndexTrustedPartitionGapsPreserveDenseSequenceCoverage(t *testin
 func TestCommandIndexTrustedPartitionGapsFailClosedOnInvalidCoverage(t *testing.T) {
 	owned := indexTestCommand("command-owned", "session-owned", 1, 1, CommandStatePending)
 	tests := map[string][]CommandIndexPartitionGap{
-		"zero sequence":        {{Sequence: 0}},
-		"duplicate gap":        {{Sequence: 2}, {Sequence: 2}},
-		"overlaps owned entry": {{Sequence: 1}},
+		"zero sequence":        {{FirstSequence: 0, LastSequence: 0}},
+		"reversed range":       {{FirstSequence: 3, LastSequence: 2}},
+		"duplicate gap":        {{FirstSequence: 2, LastSequence: 2}, {FirstSequence: 2, LastSequence: 2}},
+		"overlaps owned entry": {{FirstSequence: 1, LastSequence: 1}},
 	}
 	for name, gaps := range tests {
 		t.Run(name, func(t *testing.T) {

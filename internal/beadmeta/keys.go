@@ -54,6 +54,8 @@ const (
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlCheckpointWireMetadataKey     = "gc.control.checkpoint_wire"
 	ControlCommandKindMetadataKey        = "gc.control.command_kind"
+	ControlCommandPartitionMetadataKey   = "gc.control.command_partition_key"
+	ControlPartitionSchemaMetadataKey    = "gc.control.command_partition_schema_version"
 	ControlCommandRequestIDMetadataKey   = "gc.control.command_request_id"
 	ControlCommandWireMetadataKey        = "gc.control.command_wire"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
@@ -312,6 +314,8 @@ var KnownMetadataKeys = []string{
 	ContinuationGroupMetadataKey,
 	ControlCheckpointWireMetadataKey,
 	ControlCommandKindMetadataKey,
+	ControlCommandPartitionMetadataKey,
+	ControlPartitionSchemaMetadataKey,
 	ControlCommandRequestIDMetadataKey,
 	ControlCommandWireMetadataKey,
 	ControlEpochMetadataKey,

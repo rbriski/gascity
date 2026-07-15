@@ -173,7 +173,7 @@ func TestCommandPartitionReaderRejectsForgedCallerCityScope(t *testing.T) {
 	resolver.authorize(trustedReference, cityA)
 
 	command.TrustedIngress.CityScope = "caller-city-b"
-	entry, created, err := repo.Create(t.Context(), "request-forged", command)
+	entry, created, err := repo.create(t.Context(), "request-forged", command, cityB)
 	if err != nil || !created || entry.Command == nil {
 		t.Fatalf("Create caller-forged command = %#v, created=%t err=%v", entry, created, err)
 	}
@@ -219,7 +219,7 @@ func TestCommandPartitionReaderRequiresVerifiedOpaqueAuthority(t *testing.T) {
 		t.Fatalf("State: %v", err)
 	}
 	command := repositoryCommandForRequest(t, state.Store, "request-unknown", "unknown")
-	if _, _, err := repo.Create(t.Context(), "request-unknown", command); err != nil {
+	if _, _, err := repo.create(t.Context(), "request-unknown", command, partition); err != nil {
 		t.Fatalf("Create unknown-authority command: %v", err)
 	}
 	if _, err := reader.Snapshot(t.Context(), 1); !errors.Is(err, ErrCommandRepositoryPartition) {
@@ -237,10 +237,12 @@ func TestCommandPartitionReaderRejectsNewerOpaqueAuthoritySchema(t *testing.T) {
 	commandID := CommandIDForRequest(state.Store, "future-request")
 	raw := []byte(fmt.Sprintf(`{"version":2,"id":%q,"target":{"session_id":"session-future","intent_generation":1},"store":{"store_uuid":%q,"restore_epoch":%d},"order":{"sequence":1,"revision":1},"trusted_ingress":{"city_scope":"caller-city-a"}}`, commandID, state.Store.StoreUUID, state.Store.RestoreEpoch))
 	store.seedRawCommand(t, state, "future-request", commandID, raw, 1, 1)
+	partition := trustedCityPartitionForTest("authority/city-a")
+	stampCommandPartitionRouteForContractTest(store, commandID, partition)
 	if _, err := repo.RepairLineage(t.Context()); err != nil {
 		t.Fatalf("RepairLineage: %v", err)
 	}
-	reader, err := NewCommandPartitionReader(repo, trustedCityPartitionForTest("authority/city-a"), newTestTrustedCityPartitionResolver())
+	reader, err := NewCommandPartitionReader(repo, partition, newTestTrustedCityPartitionResolver())
 	if err != nil {
 		t.Fatalf("NewCommandPartitionReader: %v", err)
 	}
@@ -455,7 +457,7 @@ func createPartitionedCommandForTest(t *testing.T, repo *CommandRepository, bind
 	command.TrustedIngress.CityScope = callerCityScope
 	command.TrustedIngress.PayloadDigest = ComputeCommandPayloadDigest(command)
 	resolver.authorize(command.TrustedIngress, partition)
-	entry, created, err := repo.Create(t.Context(), requestID, command)
+	entry, created, err := repo.create(t.Context(), requestID, command, partition)
 	if err != nil || !created || entry.Command == nil {
 		t.Fatalf("Create(%s) = %#v, created=%t err=%v", requestID, entry, created, err)
 	}
@@ -473,7 +475,12 @@ func assertPartitionSnapshot(t *testing.T, snapshot CommandIndexSnapshot, wantID
 	}
 	gotGaps := make([]uint64, 0, len(snapshot.PartitionGaps))
 	for _, gap := range snapshot.PartitionGaps {
-		gotGaps = append(gotGaps, gap.Sequence)
+		for sequence := gap.FirstSequence; sequence <= gap.LastSequence; sequence++ {
+			gotGaps = append(gotGaps, sequence)
+			if sequence == ^uint64(0) {
+				break
+			}
+		}
 	}
 	if !reflect.DeepEqual(gotIDs, wantIDs) || !reflect.DeepEqual(gotGaps, wantGaps) {
 		t.Fatalf("partition snapshot IDs/gaps = %v/%v, want %v/%v", gotIDs, gotGaps, wantIDs, wantGaps)

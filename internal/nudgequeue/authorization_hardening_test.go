@@ -21,7 +21,7 @@ func TestClaimAuthorizedDirectStoreWriterCannotSelfAuthorize(t *testing.T) {
 		t.Fatalf("State: %v", err)
 	}
 	command := repositoryCommandForRequest(t, state.Store, "direct-store-request", "self-asserted authority")
-	entry, created, err := repository.Create(t.Context(), "direct-store-request", command)
+	entry, created, err := repository.create(t.Context(), "direct-store-request", command, trustedCityPartitionFromAuthority(command.TrustedIngress))
 	if err != nil || !created || entry.Command == nil {
 		t.Fatalf("direct store Create = %#v, created=%t err=%v", entry, created, err)
 	}
@@ -58,7 +58,7 @@ func TestClaimAuthorizedCopiedStampCannotAuthorizeDifferentPayload(t *testing.T)
 	forged.TrustedIngress = fixture.command.TrustedIngress
 	forged.TrustedIngress.TargetSessionID = forged.Target.SessionID
 	forged.TrustedIngress.PayloadDigest = ComputeCommandPayloadDigest(forged)
-	entry, created, err := fixture.repository.Create(t.Context(), "copied-stamp-request", forged)
+	entry, created, err := fixture.repository.create(t.Context(), "copied-stamp-request", forged, fixture.partition)
 	if err != nil || !created || entry.Command == nil {
 		t.Fatalf("Create copied stamp = %#v, created=%t err=%v", entry, created, err)
 	}

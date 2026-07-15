@@ -41,12 +41,13 @@ var allowedNonMetadata = map[string]string{
 
 	// Durable command repository-wide metadata. These values live in the
 	// history-tracked store metadata table, not in any bead.Metadata map.
-	"gc.control.repository.restore_epoch":       "durable command repository restore lineage metadata (internal/nudgequeue)",
-	"gc.control.repository.revision":            "durable command repository revision metadata (internal/nudgequeue)",
-	"gc.control.repository.schema_version":      "durable command repository schema metadata (internal/nudgequeue)",
-	"gc.control.repository.sequence_high_water": "durable command repository sequence metadata (internal/nudgequeue)",
-	"gc.control.repository.store_uuid":          "durable command repository store identity metadata (internal/nudgequeue)",
-	"gc.control.repository.writer_version":      "durable command repository writer metadata (internal/nudgequeue)",
+	"gc.control.repository.restore_epoch":                    "durable command repository restore lineage metadata (internal/nudgequeue)",
+	"gc.control.repository.command_partition_schema_version": "durable command repository partition routing schema metadata (internal/nudgequeue)",
+	"gc.control.repository.revision":                         "durable command repository revision metadata (internal/nudgequeue)",
+	"gc.control.repository.schema_version":                   "durable command repository schema metadata (internal/nudgequeue)",
+	"gc.control.repository.sequence_high_water":              "durable command repository sequence metadata (internal/nudgequeue)",
+	"gc.control.repository.store_uuid":                       "durable command repository store identity metadata (internal/nudgequeue)",
+	"gc.control.repository.writer_version":                   "durable command repository writer metadata (internal/nudgequeue)",
 
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",

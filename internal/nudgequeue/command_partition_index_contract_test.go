@@ -137,6 +137,27 @@ func TestCommandPartitionReaderRejectsStoreForgedPartitionProjection(t *testing.
 	}
 }
 
+func TestTrustedNudgeIngressIdempotentRetryRejectsPartitionProjectionTamper(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	authority := newTestNudgeAuthority()
+	now := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
+	ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+	}
+	request := validNudgeIngressRequest(now)
+	admitted, err := ingress.Admit(t.Context(), request)
+	if err != nil || admitted.Entry.Command == nil {
+		t.Fatalf("Admit = %#v, err=%v", admitted, err)
+	}
+	stampCommandPartitionRouteForContractTest(store, admitted.Entry.Command.ID, trustedCityPartitionForTest("tampered-route"))
+
+	if _, err := ingress.Admit(t.Context(), request); !errors.Is(err, ErrCommandRepositoryPartition) {
+		t.Fatalf("idempotent Admit after projection tamper error = %v, want partition refusal", err)
+	}
+}
+
 func TestCommandPartitionReaderFailsClosedOnMissingOrFuturePartitionSchema(t *testing.T) {
 	for name, partitionSchema := range map[string]string{
 		"missing": "",
@@ -175,6 +196,32 @@ func TestCommandPartitionReaderFailsClosedOnMissingOrFuturePartitionSchema(t *te
 				t.Fatalf("Snapshot with %s partition schema issued row queries: %#v", name, queries)
 			}
 		})
+	}
+}
+
+func TestCommandRepositoryRefusesLegacyWriterAfterPartitionFence(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	state := CommandRepositoryState{
+		Store:             CommandStoreBinding{StoreUUID: "4d0d56a4-11cc-4b8f-9b8d-f8ec88ae9845", RestoreEpoch: 1},
+		SchemaVersion:     CommandRepositorySchemaVersion,
+		WriterVersion:     CommandRepositoryWriterVersion - 1,
+		Revision:          0,
+		SequenceHighWater: 0,
+	}
+	store.seedMetadata(state)
+	verifier := &repositoryLineageTestVerifier{anchor: &state}
+	repository, err := NewCommandRepository(store, verifier)
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
+	requestID := "legacy-writer-refusal"
+	command := repositoryCommandForRequest(t, state.Store, requestID, requestID)
+	partition := trustedCityPartitionFromAuthority(command.TrustedIngress)
+	if _, _, err := repository.create(t.Context(), requestID, command, partition); !errors.Is(err, ErrCommandRepositorySchemaSkew) {
+		t.Fatalf("create against legacy writer metadata error = %v, want schema skew", err)
+	}
+	if createCalls, metadataCalls := store.durableMutationCallCounts(); createCalls != 0 || metadataCalls != 0 {
+		t.Fatalf("legacy writer refusal mutated repository: Create=%d SetMetadata=%d", createCalls, metadataCalls)
 	}
 }
 
@@ -277,6 +324,8 @@ func (r *countingPartitionResolverForContractTest) callCount() int {
 	return r.calls
 }
 
-var _ beads.AtomicReadSnapshotStore = (*partitionIndexContractStore)(nil)
-var _ beads.AtomicReadSnapshotTx = (*partitionIndexContractTx)(nil)
-var _ TrustedCityPartitionResolver = (*countingPartitionResolverForContractTest)(nil)
+var (
+	_ beads.AtomicReadSnapshotStore = (*partitionIndexContractStore)(nil)
+	_ beads.AtomicReadSnapshotTx    = (*partitionIndexContractTx)(nil)
+	_ TrustedCityPartitionResolver  = (*countingPartitionResolverForContractTest)(nil)
+)

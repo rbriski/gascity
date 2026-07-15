@@ -98,12 +98,13 @@ type CommandIndexSnapshot struct {
 	SequenceHighWater uint64
 }
 
-// CommandIndexPartitionGap certifies that independent authority resolved one
-// sequence to a foreign trusted city partition. It is disjoint from local
-// terminal/tombstone coverage and deliberately carries no foreign command
-// identity, target, content, or authorization data.
+// CommandIndexPartitionGap certifies one inclusive range of sequences owned by
+// foreign trusted city partitions. Ranges are canonical, disjoint from local
+// terminal/tombstone coverage, and carry no foreign command identity, target,
+// content, or authorization data.
 type CommandIndexPartitionGap struct {
-	Sequence uint64
+	FirstSequence uint64
+	LastSequence  uint64
 }
 
 // CommandIndexCompactedCoverage is bounded evidence for exact terminal records
@@ -212,24 +213,30 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		replays:        make(map[uint64][sha256.Size]byte, min(len(snapshot.Entries)+len(snapshot.Tombstones), MaxCommandIndexReplayHistory)),
 		coverage:       cloneCommandIndexCoverage(snapshot.Coverage),
 	}
-	coveredSequences, err := validateCommandIndexCoverage(snapshot.Coverage, snapshot.Revision, snapshot.SequenceHighWater)
+	_, err := validateCommandIndexCoverage(snapshot.Coverage, snapshot.Revision, snapshot.SequenceHighWater)
 	if err != nil {
 		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
 	}
-	sequenceOwner := make(map[uint64]string, len(snapshot.Entries)+len(snapshot.Tombstones)+len(snapshot.PartitionGaps))
+	exactSequenceOwner := make(map[uint64]string, len(snapshot.Entries)+len(snapshot.Tombstones))
+	intervals := make([]commandIndexSequenceInterval, 0, len(snapshot.Entries)+len(snapshot.Tombstones)+len(snapshot.PartitionGaps)+len(commandIndexCoverageRanges(snapshot.Coverage)))
+	for _, sequenceRange := range commandIndexCoverageRanges(snapshot.Coverage) {
+		intervals = append(intervals, commandIndexSequenceInterval{first: sequenceRange.FirstSequence, last: sequenceRange.LastSequence, owner: "compacted coverage"})
+	}
 	var maxSequence uint64
-	for _, gap := range snapshot.PartitionGaps {
-		if gap.Sequence == 0 {
-			return commandIndexProjection{}, errors.New("building nudge command index: trusted partition gap sequence must be positive")
+	var priorGapLast uint64
+	for index, gap := range snapshot.PartitionGaps {
+		if gap.FirstSequence == 0 || gap.LastSequence < gap.FirstSequence || gap.LastSequence > snapshot.SequenceHighWater {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: trusted partition gap range %d [%d,%d] is outside sequence high-water %d", index, gap.FirstSequence, gap.LastSequence, snapshot.SequenceHighWater)
 		}
-		if commandIndexCoverageContainsSequence(snapshot.Coverage, gap.Sequence) {
-			return commandIndexProjection{}, fmt.Errorf("building nudge command index: trusted partition gap sequence %d overlaps compacted coverage", gap.Sequence)
+		if index > 0 && gap.FirstSequence <= priorGapLast {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: trusted partition gap range %d overlaps or is out of order", index)
 		}
-		if owner, exists := sequenceOwner[gap.Sequence]; exists {
-			return commandIndexProjection{}, fmt.Errorf("building nudge command index: sequence %d belongs to both %q and trusted partition gap", gap.Sequence, owner)
+		if index > 0 && priorGapLast != ^uint64(0) && gap.FirstSequence == priorGapLast+1 {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: trusted partition gap range %d is adjacent instead of canonically merged", index)
 		}
-		sequenceOwner[gap.Sequence] = "trusted partition gap"
-		maxSequence = max(maxSequence, gap.Sequence)
+		intervals = append(intervals, commandIndexSequenceInterval{first: gap.FirstSequence, last: gap.LastSequence, owner: "trusted partition gap"})
+		priorGapLast = gap.LastSequence
+		maxSequence = max(maxSequence, gap.LastSequence)
 	}
 	for _, tombstone := range snapshot.Tombstones {
 		if err := validateCommandIndexTombstone(tombstone, snapshot.Store, snapshot.Revision); err != nil {
@@ -238,13 +245,14 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		if _, duplicate := projection.tombstones[tombstone.CommandID]; duplicate {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: duplicate tombstone id %q", tombstone.CommandID)
 		}
-		if owner, exists := sequenceOwner[tombstone.Sequence]; exists {
+		if owner, exists := exactSequenceOwner[tombstone.Sequence]; exists {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: sequence %d belongs to both %q and %q", tombstone.Sequence, owner, tombstone.CommandID)
 		}
 		if commandIndexCoverageContainsSequence(snapshot.Coverage, tombstone.Sequence) {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: tombstone %q sequence %d overlaps compacted coverage", tombstone.CommandID, tombstone.Sequence)
 		}
-		sequenceOwner[tombstone.Sequence] = tombstone.CommandID
+		exactSequenceOwner[tombstone.Sequence] = tombstone.CommandID
+		intervals = append(intervals, commandIndexSequenceInterval{first: tombstone.Sequence, last: tombstone.Sequence, owner: tombstone.CommandID})
 		maxSequence = max(maxSequence, tombstone.Sequence)
 		projection.tombstones[tombstone.CommandID] = tombstone
 		copyForReplay := tombstone
@@ -267,13 +275,14 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		if _, exists := projection.entries[routing.CommandID]; exists {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: duplicate command id %q", routing.CommandID)
 		}
-		if owner, exists := sequenceOwner[routing.Sequence]; exists {
+		if owner, exists := exactSequenceOwner[routing.Sequence]; exists {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: sequence %d belongs to both %q and %q", routing.Sequence, owner, routing.CommandID)
 		}
 		if commandIndexCoverageContainsSequence(snapshot.Coverage, routing.Sequence) {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: command %q sequence %d overlaps compacted coverage", routing.CommandID, routing.Sequence)
 		}
-		sequenceOwner[routing.Sequence] = routing.CommandID
+		exactSequenceOwner[routing.Sequence] = routing.CommandID
+		intervals = append(intervals, commandIndexSequenceInterval{first: routing.Sequence, last: routing.Sequence, owner: routing.CommandID})
 		maxSequence = max(maxSequence, routing.Sequence)
 		owned := cloneCommandIndexEntry(entry)
 		projection.entries[routing.CommandID] = owned
@@ -292,12 +301,66 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 	if maxSequence > snapshot.SequenceHighWater {
 		return commandIndexProjection{}, fmt.Errorf("building nudge command index: record sequence %d exceeds authoritative high-water %d", maxSequence, snapshot.SequenceHighWater)
 	}
-	represented, overflow := addCommandIndexUint64(coveredSequences, uint64(len(sequenceOwner)))
-	if overflow || represented != snapshot.SequenceHighWater {
-		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %d exact plus %d compacted sequences do not densely cover high-water %d", len(sequenceOwner), coveredSequences, snapshot.SequenceHighWater)
+	if err := validateDenseCommandIndexIntervals(intervals, snapshot.SequenceHighWater); err != nil {
+		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
 	}
 	trimCommandIndexReplays(projection.replays, snapshot.Revision)
 	return projection, nil
+}
+
+type commandIndexSequenceInterval struct {
+	first uint64
+	last  uint64
+	owner string
+}
+
+func commandIndexCoverageRanges(coverage *CommandIndexCompactedCoverage) []CommandIndexSequenceRange {
+	if coverage == nil {
+		return nil
+	}
+	return coverage.Ranges
+}
+
+func validateDenseCommandIndexIntervals(intervals []commandIndexSequenceInterval, sequenceHighWater uint64) error {
+	if sequenceHighWater == 0 {
+		if len(intervals) != 0 {
+			return errors.New("records exist above zero sequence high-water")
+		}
+		return nil
+	}
+	sort.Slice(intervals, func(i, j int) bool {
+		if intervals[i].first != intervals[j].first {
+			return intervals[i].first < intervals[j].first
+		}
+		return intervals[i].last < intervals[j].last
+	})
+	expected := uint64(1)
+	for _, interval := range intervals {
+		if interval.first < expected {
+			return fmt.Errorf("sequence range [%d,%d] owned by %q overlaps prior coverage", interval.first, interval.last, interval.owner)
+		}
+		if interval.first > expected {
+			return fmt.Errorf("sequence %d is not represented before range [%d,%d] owned by %q", expected, interval.first, interval.last, interval.owner)
+		}
+		if interval.last > sequenceHighWater {
+			return fmt.Errorf("sequence range [%d,%d] owned by %q exceeds authoritative high-water %d", interval.first, interval.last, interval.owner, sequenceHighWater)
+		}
+		if interval.last == ^uint64(0) {
+			expected = 0
+			continue
+		}
+		expected = interval.last + 1
+	}
+	if sequenceHighWater == ^uint64(0) {
+		if expected != 0 {
+			return fmt.Errorf("sequence %d is not represented through high-water %d", expected, sequenceHighWater)
+		}
+		return nil
+	}
+	if expected != sequenceHighWater+1 {
+		return fmt.Errorf("sequence %d is not represented through high-water %d", expected, sequenceHighWater)
+	}
+	return nil
 }
 
 func validateCommandIndexCoverage(coverage *CommandIndexCompactedCoverage, snapshotRevision, sequenceHighWater uint64) (uint64, error) {

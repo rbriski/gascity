@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -25,7 +26,7 @@ const (
 	CommandRepositorySchemaVersion uint32 = 1
 	// CommandRepositoryWriterVersion identifies the writer protocol that owns
 	// dense command sequence and repository revision allocation.
-	CommandRepositoryWriterVersion uint32 = 1
+	CommandRepositoryWriterVersion uint32 = 2
 	// MaxCommandRepositorySnapshotCommands is the maximum exact active command
 	// set returned by one reconstruction. Terminal lifetime is represented by a
 	// bounded checkpoint and does not consume this limit.
@@ -37,15 +38,18 @@ const (
 	commandRepositoryRestoreEpochMetadataKey      = "gc.control.repository.restore_epoch"
 	commandRepositoryRevisionMetadataKey          = "gc.control.repository.revision"
 	commandRepositorySequenceHighWaterMetadataKey = "gc.control.repository.sequence_high_water"
+	commandRepositoryPartitionSchemaMetadataKey   = "gc.control.repository.command_partition_schema_version"
 
-	commandRecordBeadType                 = "task"
-	commandRecordTitle                    = "durable control command"
-	commandRecordKindMetadataKey          = beadmeta.ControlRecordKindMetadataKey
-	commandRecordKindMetadataValue        = "command"
-	commandRecordCommandKindMetadataKey   = beadmeta.ControlCommandKindMetadataKey
-	commandRecordCommandKindMetadataValue = "nudge"
-	commandRecordRequestIDMetadataKey     = beadmeta.ControlCommandRequestIDMetadataKey
-	commandRecordWireMetadataKey          = beadmeta.ControlCommandWireMetadataKey
+	commandRecordBeadType                   = "task"
+	commandRecordTitle                      = "durable control command"
+	commandRecordKindMetadataKey            = beadmeta.ControlRecordKindMetadataKey
+	commandRecordKindMetadataValue          = "command"
+	commandRecordCommandKindMetadataKey     = beadmeta.ControlCommandKindMetadataKey
+	commandRecordCommandKindMetadataValue   = "nudge"
+	commandRecordPartitionKeyMetadataKey    = beadmeta.ControlCommandPartitionMetadataKey
+	commandRecordPartitionSchemaMetadataKey = beadmeta.ControlPartitionSchemaMetadataKey
+	commandRecordRequestIDMetadataKey       = beadmeta.ControlCommandRequestIDMetadataKey
+	commandRecordWireMetadataKey            = beadmeta.ControlCommandWireMetadataKey
 
 	commandRequestIDDomainV1 = "gascity.nudge-command.request-id.v1"
 	commandIDPrefix          = "gc-nudge-"
@@ -352,6 +356,12 @@ func (r *CommandRepository) Get(ctx context.Context, commandID string) (CommandI
 }
 
 func (r commandRepositoryReader) get(ctx context.Context, commandID string) (CommandIndexResolution, error) {
+	return r.getPartition(ctx, commandID, nil)
+}
+
+type commandRepositoryExactValidator func(context.Context, beads.Bead, CommandIndexEntry) (bool, error)
+
+func (r commandRepositoryReader) getPartition(ctx context.Context, commandID string, validate commandRepositoryExactValidator) (CommandIndexResolution, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandIndexResolution{}, err
 	}
@@ -387,7 +397,17 @@ func (r commandRepositoryReader) get(ctx context.Context, commandID string) (Com
 		if err != nil {
 			return err
 		}
-		found = true
+		include := true
+		if validate != nil {
+			include, err = validate(ctx, row, entry)
+			if err != nil {
+				return err
+			}
+		}
+		found = include
+		if !include {
+			entry = CommandIndexEntry{}
+		}
 		return nil
 	})
 	if err != nil {
@@ -412,6 +432,12 @@ func (r *CommandRepository) Snapshot(ctx context.Context, maxCommands int) (Comm
 }
 
 func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) (CommandIndexSnapshot, error) {
+	return r.snapshotPartition(ctx, maxCommands, "", nil)
+}
+
+type commandRepositoryPartitionValidator func(context.Context, beads.Bead, CommandIndexEntry) error
+
+func (r commandRepositoryReader) snapshotPartition(ctx context.Context, maxCommands int, partitionRoute string, validate commandRepositoryPartitionValidator) (CommandIndexSnapshot, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandIndexSnapshot{}, err
 	}
@@ -456,6 +482,7 @@ func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) 
 		query := beads.AtomicReadSnapshotPageQuery{
 			IDPrefix: commandIDPrefix,
 			Status:   "open",
+			Assignee: partitionRoute,
 			Order:    beads.AtomicReadSnapshotOrderID,
 		}
 		for {
@@ -475,6 +502,11 @@ func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) 
 				entry, _, err := decodeCommandRecord(row, state)
 				if err != nil {
 					return err
+				}
+				if validate != nil {
+					if err := validate(ctx, row, entry); err != nil {
+						return err
+					}
 				}
 				entries = append(entries, entry)
 				if len(entries) > maxCommands {
@@ -496,6 +528,11 @@ func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) 
 				FingerprintSHA256: checkpoint.FingerprintSHA256,
 			}
 		}
+		if partitionRoute != "" {
+			sort.Slice(entries, func(i, j int) bool {
+				return commandIndexEntryRouting(entries[i]).Sequence < commandIndexEntryRouting(entries[j]).Sequence
+			})
+		}
 		snapshot = CommandIndexSnapshot{
 			Store:             state.Store,
 			Entries:           entries,
@@ -503,6 +540,9 @@ func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) 
 			Coverage:          coverage,
 			Revision:          state.Revision,
 			SequenceHighWater: state.SequenceHighWater,
+		}
+		if partitionRoute != "" {
+			snapshot.PartitionGaps = commandPartitionSequenceComplement(snapshot.SequenceHighWater, snapshot.Coverage, snapshot.Entries)
 		}
 		if _, err := BuildCommandIndex(snapshot); err != nil {
 			return &CommandRepositoryRecordError{Err: err}
@@ -564,12 +604,16 @@ func (r *CommandRepository) RepairLineage(ctx context.Context) (CommandRepositor
 	return r.repairLineage(ctx, "repair lineage")
 }
 
-// Create durably admits a new pending command or returns the existing exact
-// command for an idempotent retry. Store binding, sequence, and revision are
-// allocated by the repository in the same transaction as the command row.
-func (r *CommandRepository) Create(ctx context.Context, requestID string, command Command) (CommandIndexEntry, bool, error) {
+// create durably admits an authority-partitioned pending command or returns the
+// existing exact command for an idempotent retry. The opaque partition can be
+// minted only by trusted ingress; store binding, sequence, and revision are
+// allocated with the projected route in one transaction.
+func (r *CommandRepository) create(ctx context.Context, requestID string, command Command, partition TrustedCityPartition) (CommandIndexEntry, bool, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandIndexEntry{}, false, err
+	}
+	if !partition.valid() {
+		return CommandIndexEntry{}, false, fmt.Errorf("trusted city partition is required: %w", ErrCommandRepositoryInvalidRequest)
 	}
 	before, err := r.State(ctx)
 	if err != nil {
@@ -626,16 +670,23 @@ func (r *CommandRepository) Create(ctx context.Context, requestID string, comman
 		if err != nil {
 			return fmt.Errorf("validating repository-stamped command: %w", errors.Join(ErrCommandRepositoryInvalidRequest, err))
 		}
+		partitionRoute := commandPartitionRoute(partition)
+		if partitionRoute == "" {
+			return fmt.Errorf("deriving durable nudge command partition route: %w", ErrCommandRepositoryInvalidRequest)
+		}
 		createdRow, err := tx.Create(beads.Bead{
-			ID:     stamped.ID,
-			Title:  commandRecordTitle,
-			Status: "open",
-			Type:   commandRecordBeadType,
+			ID:       stamped.ID,
+			Title:    commandRecordTitle,
+			Status:   "open",
+			Type:     commandRecordBeadType,
+			Assignee: partitionRoute,
 			Metadata: map[string]string{
-				commandRecordKindMetadataKey:        commandRecordKindMetadataValue,
-				commandRecordCommandKindMetadataKey: commandRecordCommandKindMetadataValue,
-				commandRecordRequestIDMetadataKey:   requestID,
-				commandRecordWireMetadataKey:        string(wire),
+				commandRecordKindMetadataKey:            commandRecordKindMetadataValue,
+				commandRecordCommandKindMetadataKey:     commandRecordCommandKindMetadataValue,
+				commandRecordPartitionKeyMetadataKey:    partitionRoute,
+				commandRecordPartitionSchemaMetadataKey: commandPartitionSchemaVersion,
+				commandRecordRequestIDMetadataKey:       requestID,
+				commandRecordWireMetadataKey:            string(wire),
 			},
 		})
 		if err != nil {
@@ -838,6 +889,7 @@ func readOptionalCommandRepositoryState(tx commandRepositoryMetadataReader) (Com
 		commandRepositoryRestoreEpochMetadataKey,
 		commandRepositoryRevisionMetadataKey,
 		commandRepositorySequenceHighWaterMetadataKey,
+		commandRepositoryPartitionSchemaMetadataKey,
 	}
 	values := make(map[string]string, len(keys))
 	present := 0
@@ -900,6 +952,9 @@ func readOptionalCommandRepositoryState(tx commandRepositoryMetadataReader) (Com
 	if state.WriterVersion != CommandRepositoryWriterVersion {
 		return CommandRepositoryState{}, false, &CommandRepositorySchemaSkewError{Field: "writer_version", Found: fmt.Sprint(state.WriterVersion), Want: fmt.Sprint(CommandRepositoryWriterVersion)}
 	}
+	if values[commandRepositoryPartitionSchemaMetadataKey] != commandPartitionSchemaVersion {
+		return CommandRepositoryState{}, false, &CommandRepositorySchemaSkewError{Field: "command partition schema version", Found: values[commandRepositoryPartitionSchemaMetadataKey], Want: commandPartitionSchemaVersion}
+	}
 	if err := validateCommandRepositoryBinding(state.Store); err != nil {
 		return CommandRepositoryState{}, false, &CommandRepositorySchemaSkewError{Field: "store binding", Found: fmt.Sprintf("uuid=%q epoch=%d", state.Store.StoreUUID, state.Store.RestoreEpoch), Want: "valid UUID and positive restore epoch"}
 	}
@@ -939,6 +994,7 @@ func writeCommandRepositoryState(tx beads.AtomicReadWriteTx, state CommandReposi
 		commandRepositoryRestoreEpochMetadataKey:      strconv.FormatUint(state.Store.RestoreEpoch, 10),
 		commandRepositoryRevisionMetadataKey:          strconv.FormatUint(state.Revision, 10),
 		commandRepositorySequenceHighWaterMetadataKey: strconv.FormatUint(state.SequenceHighWater, 10),
+		commandRepositoryPartitionSchemaMetadataKey:   commandPartitionSchemaVersion,
 	}
 	for _, key := range []string{
 		commandRepositorySchemaVersionMetadataKey,
@@ -947,6 +1003,7 @@ func writeCommandRepositoryState(tx beads.AtomicReadWriteTx, state CommandReposi
 		commandRepositoryRestoreEpochMetadataKey,
 		commandRepositoryRevisionMetadataKey,
 		commandRepositorySequenceHighWaterMetadataKey,
+		commandRepositoryPartitionSchemaMetadataKey,
 	} {
 		if err := tx.SetMetadata(key, values[key]); err != nil {
 			return fmt.Errorf("writing command repository metadata %q: %w", key, err)

@@ -36,7 +36,7 @@ func TestCommandRepositoryCheckpointReconstructionOnRealNativeDolt(t *testing.T)
 	}
 	requestID := "native-checkpoint-terminal"
 	pending := repositoryCommandForRequest(t, state.Store, requestID, "native terminal")
-	created, admitted, err := repo.Create(ctx, requestID, pending)
+	created, admitted, err := repo.createForTest(ctx, requestID, pending)
 	if err != nil || !admitted || created.Command == nil {
 		t.Fatalf("Create = (%#v, admitted=%v, err=%v)", created, admitted, err)
 	}
@@ -87,7 +87,7 @@ func TestCommandRepositoryCheckpointReconstructionOnRealNativeDolt(t *testing.T)
 
 	nextRequest := "native-checkpoint-active"
 	nextCommand := repositoryCommandForRequest(t, state.Store, nextRequest, "native active")
-	if _, admitted, err := repo.Create(ctx, nextRequest, nextCommand); err != nil || !admitted {
+	if _, admitted, err := repo.createForTest(ctx, nextRequest, nextCommand); err != nil || !admitted {
 		t.Fatalf("Create after checkpoint = (admitted=%v, err=%v)", admitted, err)
 	}
 	snapshot, err = repo.Snapshot(ctx, 1)

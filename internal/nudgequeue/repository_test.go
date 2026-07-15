@@ -174,8 +174,8 @@ func TestCommandRepositoryProvisionAndRepairAreExplicitWriterOperations(t *testi
 		t.Fatalf("fresh provisioned state = %#v", state)
 	}
 	createCalls, metadataWriteCalls := store.durableMutationCallCounts()
-	if createCalls != 0 || metadataWriteCalls != 6 {
-		t.Fatalf("Provision mutation calls: Create=%d SetMetadata=%d, want 0/6", createCalls, metadataWriteCalls)
+	if createCalls != 0 || metadataWriteCalls != 7 {
+		t.Fatalf("Provision mutation calls: Create=%d SetMetadata=%d, want 0/7", createCalls, metadataWriteCalls)
 	}
 	if verifier.provisionCallCount() != 1 || verifier.advanceCallCount() != 0 {
 		t.Fatalf("Provision lineage calls: provision=%d advance=%d, want 1/0", verifier.provisionCallCount(), verifier.advanceCallCount())
@@ -185,7 +185,7 @@ func TestCommandRepositoryProvisionAndRepairAreExplicitWriterOperations(t *testi
 		t.Fatalf("idempotent Provision = (%#v, %v), want original state", got, err)
 	}
 	createCalls, metadataWriteCalls = store.durableMutationCallCounts()
-	if createCalls != 0 || metadataWriteCalls != 6 || verifier.provisionCallCount() != 1 || verifier.advanceCallCount() != 0 {
+	if createCalls != 0 || metadataWriteCalls != 7 || verifier.provisionCallCount() != 1 || verifier.advanceCallCount() != 0 {
 		t.Fatalf("idempotent Provision wrote again: Create=%d SetMetadata=%d provision=%d advance=%d", createCalls, metadataWriteCalls, verifier.provisionCallCount(), verifier.advanceCallCount())
 	}
 
@@ -205,7 +205,7 @@ func TestCommandRepositoryProvisionAndRepairAreExplicitWriterOperations(t *testi
 		t.Fatalf("State after RepairLineage = (%#v, %v), want %#v", got, err, databaseAhead)
 	}
 	createCalls, metadataWriteCalls = store.durableMutationCallCounts()
-	if createCalls != 0 || metadataWriteCalls != 6 {
+	if createCalls != 0 || metadataWriteCalls != 7 {
 		t.Fatalf("lineage repair mutated repository: Create=%d SetMetadata=%d", createCalls, metadataWriteCalls)
 	}
 }
@@ -220,7 +220,7 @@ func TestCommandRepositoryCreateNeverImplicitlyProvisions(t *testing.T) {
 	requestID := "request-before-provision"
 	command := repositoryCommandForRequest(t, CommandStoreBinding{}, requestID, "before provision")
 
-	if _, _, err := repo.Create(t.Context(), requestID, command); !errors.Is(err, ErrCommandRepositoryLineage) {
+	if _, _, err := repo.createForTest(t.Context(), requestID, command); !errors.Is(err, ErrCommandRepositoryLineage) {
 		t.Fatalf("Create before Provision error = %v, want lineage refusal", err)
 	}
 	createCalls, metadataWriteCalls := store.durableMutationCallCounts()
@@ -241,7 +241,7 @@ func TestCommandRepositoryCreateIsIdempotentAndReadsExactDurableAuthority(t *tes
 	requestID := "request-1"
 	command := repositoryCommandForRequest(t, state.Store, requestID, "first")
 
-	createdEntry, created, err := repo.Create(t.Context(), requestID, command)
+	createdEntry, created, err := repo.createForTest(t.Context(), requestID, command)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestCommandRepositoryCreateIsIdempotentAndReadsExactDurableAuthority(t *tes
 		t.Fatalf("created order = %#v, want sequence/revision 1", got)
 	}
 
-	retriedEntry, retriedCreated, err := repo.Create(t.Context(), requestID, command)
+	retriedEntry, retriedCreated, err := repo.createForTest(t.Context(), requestID, command)
 	if err != nil {
 		t.Fatalf("idempotent Create: %v", err)
 	}
@@ -298,11 +298,11 @@ func TestCommandRepositoryRejectsConflictingRetryWithoutAllocating(t *testing.T)
 	}
 	requestID := "request-conflict"
 	command := repositoryCommandForRequest(t, state.Store, requestID, "first")
-	if _, _, err := repo.Create(t.Context(), requestID, command); err != nil {
+	if _, _, err := repo.createForTest(t.Context(), requestID, command); err != nil {
 		t.Fatalf("Create first: %v", err)
 	}
 	conflict := repositoryCommandForRequest(t, state.Store, requestID, "changed")
-	if _, _, err := repo.Create(t.Context(), requestID, conflict); !errors.Is(err, ErrCommandRepositoryIdempotencyConflict) {
+	if _, _, err := repo.createForTest(t.Context(), requestID, conflict); !errors.Is(err, ErrCommandRepositoryIdempotencyConflict) {
 		t.Fatalf("conflicting Create error = %v, want ErrCommandRepositoryIdempotencyConflict", err)
 	}
 	state, err = repo.State(t.Context())
@@ -334,7 +334,7 @@ func TestCommandRepositoryConcurrentCreatesAllocateDenseGlobalOrder(t *testing.T
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			entry, created, err := repo.Create(context.Background(), requestID, command)
+			entry, created, err := repo.createForTest(context.Background(), requestID, command)
 			if err == nil && !created {
 				err = errors.New("first create reported idempotent retry")
 			}
@@ -393,7 +393,7 @@ func TestCommandRepositoryCreateRollsBackRowAndDenseAllocationsTogether(t *testi
 	store.failNextCommit(wantErr)
 	requestID := "request-rollback"
 	command := repositoryCommandForRequest(t, state.Store, requestID, "rollback")
-	if _, _, err := repo.Create(t.Context(), requestID, command); !errors.Is(err, wantErr) {
+	if _, _, err := repo.createForTest(t.Context(), requestID, command); !errors.Is(err, wantErr) {
 		t.Fatalf("Create error = %v, want %v", err, wantErr)
 	}
 	state, err = repo.State(t.Context())
@@ -403,7 +403,7 @@ func TestCommandRepositoryCreateRollsBackRowAndDenseAllocationsTogether(t *testi
 	if state.Revision != 0 || state.SequenceHighWater != 0 || store.hasRow(command.ID) {
 		t.Fatalf("rollback left state=%#v row=%v", state, store.hasRow(command.ID))
 	}
-	entry, created, err := repo.Create(t.Context(), requestID, command)
+	entry, created, err := repo.createForTest(t.Context(), requestID, command)
 	if err != nil || !created || entry.Command.Order != (CommandOrder{Sequence: 1, Revision: 1}) {
 		t.Fatalf("Create after rollback = (%#v, %v, %v), want dense first allocation", entry, created, err)
 	}
@@ -574,7 +574,7 @@ func TestCommandRepositoryRejectsUnsupportedSchemaSkewAndLineage(t *testing.T) {
 		}
 	}
 	requestID := "request-lineage-denied"
-	if _, _, err := lineageRepo.Create(t.Context(), requestID, repositoryCommandForRequest(t, CommandStoreBinding{}, requestID, "denied")); !errors.Is(err, ErrCommandRepositoryLineage) {
+	if _, _, err := lineageRepo.createForTest(t.Context(), requestID, repositoryCommandForRequest(t, CommandStoreBinding{}, requestID, "denied")); !errors.Is(err, ErrCommandRepositoryLineage) {
 		t.Fatalf("Create under lineage refusal error = %v", err)
 	}
 	if lineageStore.hasAnyRows() {
@@ -633,7 +633,7 @@ func TestCommandRepositoryCancellationDoesNotInitializeOrAdmit(t *testing.T) {
 		t.Fatalf("State canceled error = %v", err)
 	}
 	requestID := "request-canceled"
-	if _, _, err := repo.Create(ctx, requestID, repositoryCommandForRequest(t, CommandStoreBinding{}, requestID, "canceled")); !errors.Is(err, context.Canceled) {
+	if _, _, err := repo.createForTest(ctx, requestID, repositoryCommandForRequest(t, CommandStoreBinding{}, requestID, "canceled")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Create canceled error = %v", err)
 	}
 	if len(store.metadataSnapshot()) != 0 || store.hasAnyRows() {
@@ -678,7 +678,7 @@ func TestCommandRepositoryCachingStoreForwardsAtomicWritesAndLiveSnapshotsCohere
 	}
 	requestID := "request-cache"
 	command := repositoryCommandForRequest(t, state.Store, requestID, "cache")
-	entry, created, err := repo.Create(t.Context(), requestID, command)
+	entry, created, err := repo.createForTest(t.Context(), requestID, command)
 	if err != nil || !created {
 		t.Fatalf("Create through cache = (%#v, %v, %v)", entry, created, err)
 	}
@@ -819,14 +819,14 @@ func TestCommandRepositoryPostCommitAnchorFailureIsRepairedByIdempotentRetry(t *
 	verifier.failNextAdvance(anchorErr)
 	requestID := "request-anchor-window"
 	command := repositoryCommandForRequest(t, state.Store, requestID, "anchor window")
-	if _, _, err := repo.Create(t.Context(), requestID, command); !errors.Is(err, ErrCommandRepositoryLineage) || !errors.Is(err, anchorErr) {
+	if _, _, err := repo.createForTest(t.Context(), requestID, command); !errors.Is(err, ErrCommandRepositoryLineage) || !errors.Is(err, anchorErr) {
 		t.Fatalf("Create post-commit error = %v, want typed anchor failure", err)
 	}
 	if !store.hasRow(command.ID) {
 		t.Fatal("post-commit verifier failure rolled back the already durable command")
 	}
 
-	entry, created, err := repo.Create(t.Context(), requestID, command)
+	entry, created, err := repo.createForTest(t.Context(), requestID, command)
 	if err != nil {
 		t.Fatalf("idempotent repair Create: %v", err)
 	}
@@ -859,7 +859,7 @@ func TestCommandRepositoryConcurrentSameRequestConsumesOneAllocation(t *testing.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			entry, created, err := repo.Create(context.Background(), requestID, command)
+			entry, created, err := repo.createForTest(context.Background(), requestID, command)
 			if err != nil {
 				errs <- err
 				return
@@ -929,7 +929,7 @@ func TestCommandRepositoryRejectsCallerAuthorityAndDigestBeforeAllocation(t *tes
 		t.Run(name, func(t *testing.T) {
 			command := valid
 			tc.mutate(&command)
-			if _, _, err := repo.Create(t.Context(), tc.request, command); !errors.Is(err, ErrCommandRepositoryInvalidRequest) {
+			if _, _, err := repo.createForTest(t.Context(), tc.request, command); !errors.Is(err, ErrCommandRepositoryInvalidRequest) {
 				t.Fatalf("Create error = %v, want ErrCommandRepositoryInvalidRequest", err)
 			}
 		})
@@ -1008,6 +1008,10 @@ func repositoryCommandForRequest(t *testing.T, binding CommandStoreBinding, requ
 	command.TrustedIngress.ReferenceID = requestID
 	command.TrustedIngress.PayloadDigest = ComputeCommandPayloadDigest(command)
 	return command
+}
+
+func (r *CommandRepository) createForTest(ctx context.Context, requestID string, command Command) (CommandIndexEntry, bool, error) {
+	return r.create(ctx, requestID, command, trustedCityPartitionFromAuthority(command.TrustedIngress))
 }
 
 type repositoryLineageTestVerifier struct {
@@ -1444,7 +1448,7 @@ func (tx *repositoryAtomicTestTx) ListHistoryPage(query beads.AtomicReadSnapshot
 	}
 	rows := make([]beads.Bead, 0, min(len(tx.rows), query.Limit))
 	for _, row := range tx.rows {
-		if row.Ephemeral || row.NoHistory || row.Status != query.Status || !strings.HasPrefix(row.ID, query.IDPrefix) {
+		if row.Ephemeral || row.NoHistory || row.Status != query.Status || !strings.HasPrefix(row.ID, query.IDPrefix) || query.Assignee != "" && row.Assignee != query.Assignee {
 			continue
 		}
 		cursor := beads.AtomicReadSnapshotCursor{ID: row.ID}
@@ -1584,5 +1588,6 @@ func repositoryMetadataForTest(state CommandRepositoryState) map[string]string {
 		commandRepositoryRestoreEpochMetadataKey:      fmt.Sprint(state.Store.RestoreEpoch),
 		commandRepositoryRevisionMetadataKey:          fmt.Sprint(state.Revision),
 		commandRepositorySequenceHighWaterMetadataKey: fmt.Sprint(state.SequenceHighWater),
+		commandRepositoryPartitionSchemaMetadataKey:   commandPartitionSchemaVersion,
 	}
 }

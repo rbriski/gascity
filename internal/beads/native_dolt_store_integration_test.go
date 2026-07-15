@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -136,6 +137,46 @@ func TestNativeDoltAtomicReadSnapshotFiltersExactAssigneeWithOwnedIndex(t *testi
 	columns, present, err := nativeDoltSnapshotIndexColumns(ctx, db, nativeDoltAssigneeStatusIDSnapshotIndex)
 	if err != nil {
 		t.Fatalf("read partition snapshot index: %v", err)
+	}
+	explainRows, err := db.QueryContext(ctx, `
+		EXPLAIN FORMAT=TREE
+		SELECT id
+		FROM issues FORCE INDEX (`+nativeDoltAssigneeStatusIDSnapshotIndex+`)
+		WHERE assignee = ? AND status = ? AND id LIKE ?
+		ORDER BY id ASC
+		LIMIT ?
+	`, "partition-owned", "open", "gc-partition-%", 2)
+	if err != nil {
+		t.Fatalf("explain exact-assignee snapshot query: %v", err)
+	}
+	var plan strings.Builder
+	for explainRows.Next() {
+		var line string
+		if err := explainRows.Scan(&line); err != nil {
+			_ = explainRows.Close()
+			t.Fatalf("scan exact-assignee snapshot plan: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteByte('\n')
+	}
+	if err := explainRows.Err(); err != nil {
+		_ = explainRows.Close()
+		t.Fatalf("iterate exact-assignee snapshot plan: %v", err)
+	}
+	if err := explainRows.Close(); err != nil {
+		t.Fatalf("close exact-assignee snapshot plan: %v", err)
+	}
+	planText := plan.String()
+	if !strings.Contains(planText, "[issues.assignee,issues.status,issues.id]") {
+		t.Fatalf("exact-assignee snapshot plan does not prove the owned index columns:\n%s", planText)
+	}
+	// Dolt may retain a bounded TopN for LIMIT even though the index already
+	// carries id order. A table scan or unbounded Sort would violate the
+	// partition-pushdown contract; the bounded TopN does not.
+	for _, forbidden := range []string{"TableScan", "Sort("} {
+		if strings.Contains(planText, forbidden) {
+			t.Fatalf("exact-assignee snapshot plan contains unbounded %s operator:\n%s", forbidden, planText)
+		}
 	}
 	if err := cleanup(); err != nil {
 		t.Fatalf("close snapshot database after index verification: %v", err)

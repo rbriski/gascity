@@ -215,7 +215,7 @@ func seedRepositoryProviderAttempt(t *testing.T) (*CommandRepository, *repositor
 		t.Fatalf("State: %v", err)
 	}
 	const requestID = "provider-attempt-request"
-	created, wasCreated, err := repository.Create(t.Context(), requestID, repositoryCommandForRequest(t, state.Store, requestID, "provider-attempt"))
+	created, wasCreated, err := repository.createForTest(t.Context(), requestID, repositoryCommandForRequest(t, state.Store, requestID, "provider-attempt"))
 	if err != nil || !wasCreated || created.Command == nil {
 		t.Fatalf("Create = %#v, created=%v, err=%v", created, wasCreated, err)
 	}

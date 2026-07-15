@@ -3,9 +3,18 @@ package nudgequeue
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
+
+const (
+	commandPartitionSchemaVersion = "1"
+	commandPartitionRoutePrefix   = "gc:control-partition:v1:"
 )
 
 // ErrCommandRepositoryPartition reports that a read could not prove which
@@ -21,6 +30,13 @@ type TrustedCityPartition struct {
 
 func (p TrustedCityPartition) valid() bool {
 	return p.identity != [sha256.Size]byte{}
+}
+
+func commandPartitionRoute(partition TrustedCityPartition) string {
+	if !partition.valid() {
+		return ""
+	}
+	return commandPartitionRoutePrefix + hex.EncodeToString(partition.identity[:])
 }
 
 // TrustedCityPartitionResolver revalidates one untrusted ingress reference
@@ -82,48 +98,100 @@ func NewCommandPartitionReader(repository *CommandRepository, partition TrustedC
 }
 
 // Snapshot returns only commands independently resolved to this reader's
-// trusted city. Foreign commands contribute content-free partition gaps so the
-// global repository watermark remains dense without entering the local index.
+// trusted city. The exact partition route is pushed into the backing indexed
+// query; foreign commands are represented by content-free sequence ranges so
+// the global watermark remains dense without materializing foreign rows.
 func (r *CommandPartitionReader) Snapshot(ctx context.Context, maxCommands int) (CommandIndexSnapshot, error) {
 	if r == nil || isNilRepositoryDependency(r.repository.store) || isNilRepositoryDependency(r.repository.verifier) || !r.partition.valid() || isNilRepositoryDependency(r.resolver) {
 		return CommandIndexSnapshot{}, &CommandRepositoryPartitionError{Operation: "snapshot", Err: errors.New("partition reader is not fully bound")}
 	}
-	snapshot, err := r.repository.snapshot(ctx, maxCommands)
-	if err != nil {
-		return CommandIndexSnapshot{}, err
-	}
-	if len(snapshot.Tombstones) != 0 {
-		return CommandIndexSnapshot{}, &CommandRepositoryPartitionError{Operation: "snapshot", Err: errors.New("tombstone has no trusted partition authority")}
-	}
-	filtered := CommandIndexSnapshot{
-		Store:             snapshot.Store,
-		Entries:           make([]CommandIndexEntry, 0, len(snapshot.Entries)),
-		PartitionGaps:     make([]CommandIndexPartitionGap, 0, len(snapshot.Entries)),
-		Coverage:          cloneCommandIndexCoverage(snapshot.Coverage),
-		Revision:          snapshot.Revision,
-		SequenceHighWater: snapshot.SequenceHighWater,
-	}
-	for _, entry := range snapshot.Entries {
-		partition, routing, err := r.resolveEntryPartition(ctx, "snapshot", entry)
+	partitionRoute := commandPartitionRoute(r.partition)
+	return r.repository.snapshotPartition(ctx, maxCommands, partitionRoute, func(ctx context.Context, row beads.Bead, entry CommandIndexEntry) error {
+		partition, err := r.resolveProjectedPartition(ctx, "snapshot", row, entry)
 		if err != nil {
-			return CommandIndexSnapshot{}, err
+			return err
 		}
-		if partition == r.partition {
-			filtered.Entries = append(filtered.Entries, entry)
-		} else {
-			filtered.PartitionGaps = append(filtered.PartitionGaps, CommandIndexPartitionGap{Sequence: routing.Sequence})
+		if partition != r.partition {
+			return &CommandRepositoryPartitionError{
+				Operation: "snapshot",
+				CommandID: row.ID,
+				Err:       errors.New("indexed partition projection resolves to a different trusted city"),
+			}
+		}
+		return nil
+	})
+}
+
+func (r *CommandPartitionReader) resolveProjectedPartition(ctx context.Context, operation string, row beads.Bead, entry CommandIndexEntry) (TrustedCityPartition, error) {
+	projectedRoute, err := commandPartitionProjection(row)
+	if err != nil {
+		return TrustedCityPartition{}, &CommandRepositoryPartitionError{Operation: operation, CommandID: row.ID, Err: err}
+	}
+	partition, routing, err := r.resolveEntryPartition(ctx, operation, entry)
+	if err != nil {
+		return TrustedCityPartition{}, err
+	}
+	wantRoute := commandPartitionRoute(partition)
+	if projectedRoute != wantRoute {
+		return TrustedCityPartition{}, &CommandRepositoryPartitionError{
+			Operation: operation,
+			CommandID: routing.CommandID,
+			Err:       fmt.Errorf("stored partition projection %q differs from trusted authority", projectedRoute),
 		}
 	}
-	sort.Slice(filtered.Entries, func(i, j int) bool {
-		return commandIndexEntryRouting(filtered.Entries[i]).Sequence < commandIndexEntryRouting(filtered.Entries[j]).Sequence
-	})
-	sort.Slice(filtered.PartitionGaps, func(i, j int) bool {
-		return filtered.PartitionGaps[i].Sequence < filtered.PartitionGaps[j].Sequence
-	})
-	if _, err := BuildCommandIndex(filtered); err != nil {
-		return CommandIndexSnapshot{}, &CommandRepositoryPartitionError{Operation: "snapshot validation", Err: err}
+	return partition, nil
+}
+
+func commandPartitionProjection(row beads.Bead) (string, error) {
+	route := row.Assignee
+	if route == "" || row.Metadata[commandRecordPartitionKeyMetadataKey] != route {
+		return "", errors.New("command partition projection is missing or inconsistent")
 	}
-	return filtered, nil
+	if row.Metadata[commandRecordPartitionSchemaMetadataKey] != commandPartitionSchemaVersion {
+		return "", fmt.Errorf("command partition projection schema %q is unsupported", row.Metadata[commandRecordPartitionSchemaMetadataKey])
+	}
+	hexIdentity := strings.TrimPrefix(route, commandPartitionRoutePrefix)
+	decoded, err := hex.DecodeString(hexIdentity)
+	if !strings.HasPrefix(route, commandPartitionRoutePrefix) || err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != hexIdentity {
+		return "", fmt.Errorf("command partition projection %q is non-canonical", route)
+	}
+	return route, nil
+}
+
+func commandPartitionSequenceComplement(sequenceHighWater uint64, coverage *CommandIndexCompactedCoverage, entries []CommandIndexEntry) []CommandIndexPartitionGap {
+	occupied := make([]commandIndexSequenceInterval, 0, len(commandIndexCoverageRanges(coverage))+len(entries))
+	for _, sequenceRange := range commandIndexCoverageRanges(coverage) {
+		occupied = append(occupied, commandIndexSequenceInterval{first: sequenceRange.FirstSequence, last: sequenceRange.LastSequence})
+	}
+	for _, entry := range entries {
+		sequence := commandIndexEntryRouting(entry).Sequence
+		occupied = append(occupied, commandIndexSequenceInterval{first: sequence, last: sequence})
+	}
+	sort.Slice(occupied, func(i, j int) bool {
+		if occupied[i].first != occupied[j].first {
+			return occupied[i].first < occupied[j].first
+		}
+		return occupied[i].last < occupied[j].last
+	})
+
+	next := uint64(1)
+	gaps := make([]CommandIndexPartitionGap, 0, len(occupied)+1)
+	for _, interval := range occupied {
+		if interval.first > next {
+			gaps = append(gaps, CommandIndexPartitionGap{FirstSequence: next, LastSequence: interval.first - 1})
+		}
+		if interval.last == ^uint64(0) {
+			next = 0
+			break
+		}
+		if interval.last >= next {
+			next = interval.last + 1
+		}
+	}
+	if next != 0 && next <= sequenceHighWater {
+		gaps = append(gaps, CommandIndexPartitionGap{FirstSequence: next, LastSequence: sequenceHighWater})
+	}
+	return gaps
 }
 
 // Get returns an exact command only when independent authority resolves it to
@@ -133,19 +201,13 @@ func (r *CommandPartitionReader) Get(ctx context.Context, commandID string) (Com
 	if r == nil || isNilRepositoryDependency(r.repository.store) || isNilRepositoryDependency(r.repository.verifier) || !r.partition.valid() || isNilRepositoryDependency(r.resolver) {
 		return CommandIndexResolution{}, &CommandRepositoryPartitionError{Operation: "exact read", CommandID: commandID, Err: errors.New("partition reader is not fully bound")}
 	}
-	resolution, err := r.repository.get(ctx, commandID)
-	if err != nil || !resolution.Found {
-		return resolution, err
-	}
-	partition, _, err := r.resolveEntryPartition(ctx, "exact read", resolution.Entry)
-	if err != nil {
-		return CommandIndexResolution{}, err
-	}
-	if partition != r.partition {
-		resolution.Entry = CommandIndexEntry{}
-		resolution.Found = false
-	}
-	return resolution, nil
+	return r.repository.getPartition(ctx, commandID, func(ctx context.Context, row beads.Bead, entry CommandIndexEntry) (bool, error) {
+		partition, err := r.resolveProjectedPartition(ctx, "exact read", row, entry)
+		if err != nil {
+			return false, err
+		}
+		return partition == r.partition, nil
+	})
 }
 
 func (r *CommandPartitionReader) resolveEntryPartition(ctx context.Context, operation string, entry CommandIndexEntry) (TrustedCityPartition, CommandRoutingHeader, error) {

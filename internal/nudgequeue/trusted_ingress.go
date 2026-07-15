@@ -150,7 +150,18 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 		if err != nil {
 			return NudgeIngressResult{}, err
 		}
-		return NudgeIngressResult{Entry: existing.Entry, Partition: partition}, nil
+		reader, err := NewCommandPartitionReader(i.repository, partition, i)
+		if err != nil {
+			return NudgeIngressResult{}, err
+		}
+		verified, err := reader.Get(ctx, commandID)
+		if err != nil {
+			return NudgeIngressResult{}, err
+		}
+		if !verified.Found {
+			return NudgeIngressResult{}, &CommandRepositoryPartitionError{Operation: "idempotent ingress", CommandID: commandID, Err: errors.New("trusted command is absent from its indexed partition")}
+		}
+		return NudgeIngressResult{Entry: verified.Entry, Partition: partition}, nil
 	}
 
 	createdAt := i.now().UTC()
@@ -197,7 +208,7 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 		return NudgeIngressResult{}, fmt.Errorf("%w: %w", ErrNudgeAuthorizationInvalid, err)
 	}
 	partition := trustedCityPartitionFromAuthority(command.TrustedIngress)
-	entry, created, err := i.repository.Create(ctx, request.RequestID, command)
+	entry, created, err := i.repository.create(ctx, request.RequestID, command, partition)
 	if err != nil {
 		return NudgeIngressResult{}, err
 	}

@@ -123,7 +123,7 @@ func TestCommandIndexCompactedCoverageAndTrustedPartitionGapsAreDisjoint(t *test
 	snapshot := CommandIndexSnapshot{
 		Store:         indexTestStoreBinding(),
 		Entries:       []CommandIndexEntry{knownIndexTestEntry(indexTestCommand("command-3", "session-a", 3, 4, CommandStatePending))},
-		PartitionGaps: []CommandIndexPartitionGap{{Sequence: 2}},
+		PartitionGaps: []CommandIndexPartitionGap{{FirstSequence: 2, LastSequence: 2}},
 		Coverage: &CommandIndexCompactedCoverage{
 			PublishedRevision: 3,
 			Ranges:            []CommandIndexSequenceRange{{FirstSequence: 1, LastSequence: 1}},
@@ -137,7 +137,7 @@ func TestCommandIndexCompactedCoverageAndTrustedPartitionGapsAreDisjoint(t *test
 		t.Fatalf("BuildCommandIndex with disjoint compacted and partition evidence: %v", err)
 	}
 
-	snapshot.PartitionGaps[0].Sequence = 1
+	snapshot.PartitionGaps[0] = CommandIndexPartitionGap{FirstSequence: 1, LastSequence: 1}
 	if _, err := BuildCommandIndex(snapshot); err == nil {
 		t.Fatal("BuildCommandIndex accepted a trusted partition gap inside compacted coverage")
 	}

@@ -22,8 +22,8 @@ func TestOpenProductionNudgeCommandSourceProvisionsButRefusesUnverifiedCityParti
 	if first != nil || !errors.Is(err, errNudgeCommandSourceUnverified) || !errors.Is(err, nudgequeue.ErrCommandRepositoryPartition) {
 		t.Fatalf("first open = %T, err=%v; want unverified partition refusal", first, err)
 	}
-	if writes := store.metadataWriteCount(); writes != 6 {
-		t.Fatalf("initial metadata writes = %d, want 6", writes)
+	if writes := store.metadataWriteCount(); writes != 7 {
+		t.Fatalf("initial metadata writes = %d, want 7", writes)
 	}
 	if _, exists, err := nudgequeue.LoadRestoreAnchor(t.Context(), nudgequeue.RestoreAnchorPath(cityPath)); err != nil || !exists {
 		t.Fatalf("independent restore anchor after first open: exists=%t err=%v", exists, err)
@@ -33,8 +33,8 @@ func TestOpenProductionNudgeCommandSourceProvisionsButRefusesUnverifiedCityParti
 	if second != nil || !errors.Is(err, errNudgeCommandSourceUnverified) || !errors.Is(err, nudgequeue.ErrCommandRepositoryPartition) {
 		t.Fatalf("second open = %T, err=%v; want stable unverified partition refusal", second, err)
 	}
-	if writes := store.metadataWriteCount(); writes != 6 {
-		t.Fatalf("unverified reopen metadata writes = %d, want 6", writes)
+	if writes := store.metadataWriteCount(); writes != 7 {
+		t.Fatalf("unverified reopen metadata writes = %d, want 7", writes)
 	}
 }
 
@@ -385,7 +385,7 @@ func (tx *nudgeCommandSourceAtomicTx) ListHistory(query beads.AtomicReadWriteLis
 func (tx *nudgeCommandSourceAtomicTx) ListHistoryPage(query beads.AtomicReadSnapshotPageQuery) (beads.AtomicReadSnapshotPage, error) {
 	rows := make([]beads.Bead, 0, len(tx.rows))
 	for _, row := range tx.rows {
-		if row.Status != query.Status || !strings.HasPrefix(row.ID, query.IDPrefix) {
+		if row.Status != query.Status || !strings.HasPrefix(row.ID, query.IDPrefix) || query.Assignee != "" && row.Assignee != query.Assignee {
 			continue
 		}
 		after := query.After == (beads.AtomicReadSnapshotCursor{})

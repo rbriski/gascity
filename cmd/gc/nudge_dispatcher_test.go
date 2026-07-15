@@ -270,13 +270,14 @@ func TestCommittedNudgeStartsProvisionalExactShadowBeforePatrol(t *testing.T) {
 	hintSeen := make(chan hintObservation, 1)
 	commandID := "command-exact-1"
 	sessionID := "session-durable-1"
-	cr.nudgeKeyController.reconcile = func(_ context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) {
+	cr.nudgeKeyController.reconcile = func(_ context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		observed <- observation{
 			key:       key.String(),
 			storeID:   key.StoreID(),
 			sessionID: key.SessionID(),
 			batch:     batch,
 		}
+		return nudgeReconcileSuccess()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

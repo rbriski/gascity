@@ -41,34 +41,113 @@ type nudgeReconcileBatch struct {
 	WorkqueueReplay bool
 }
 
-type nudgeReconcileFunc func(context.Context, reconcilekey.Session, nudgeReconcileBatch)
+// nudgeReconcileDisposition is the closed scheduling vocabulary returned by a
+// keyed callback. A callback cannot smuggle queue policy through arbitrary
+// durations or booleans: the controller owns every follow-up admission.
+type nudgeReconcileDisposition uint8
+
+const (
+	nudgeReconcileOutcomeForget nudgeReconcileDisposition = iota + 1
+	nudgeReconcileOutcomeContinue
+	nudgeReconcileOutcomeAudit
+	nudgeReconcileOutcomeTransient
+	nudgeReconcileOutcomeInvariant
+)
+
+type nudgeReconcileOutcome struct {
+	disposition nudgeReconcileDisposition
+	err         error
+}
+
+func nudgeReconcileSuccess() nudgeReconcileOutcome {
+	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeForget}
+}
+
+func nudgeReconcileContinue() nudgeReconcileOutcome {
+	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeContinue}
+}
+
+func nudgeReconcileAudit() nudgeReconcileOutcome {
+	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeAudit}
+}
+
+func nudgeReconcileTransient(err error) nudgeReconcileOutcome {
+	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeTransient, err: err}
+}
+
+func nudgeReconcileInvariant(err error) nudgeReconcileOutcome {
+	return nudgeReconcileOutcome{disposition: nudgeReconcileOutcomeInvariant, err: err}
+}
+
+func (o nudgeReconcileOutcome) validate() error {
+	switch o.disposition {
+	case nudgeReconcileOutcomeForget, nudgeReconcileOutcomeContinue, nudgeReconcileOutcomeAudit:
+		if o.err != nil {
+			return fmt.Errorf("disposition %d unexpectedly carries an error", o.disposition)
+		}
+	case nudgeReconcileOutcomeTransient, nudgeReconcileOutcomeInvariant:
+		if o.err == nil {
+			return fmt.Errorf("disposition %d requires an error", o.disposition)
+		}
+	default:
+		return fmt.Errorf("unknown disposition %d", o.disposition)
+	}
+	return nil
+}
+
+type nudgeReconcileFunc func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome
+
+const (
+	defaultNudgeContinuationDelay = 10 * time.Millisecond
+	defaultNudgeRetryBaseDelay    = 100 * time.Millisecond
+	defaultNudgeRetryMaxDelay     = 30 * time.Second
+)
+
+type nudgeKeyControllerOptions struct {
+	continuationDelay time.Duration
+	retryBaseDelay    time.Duration
+	retryMaxDelay     time.Duration
+}
+
+type nudgeDeferredAdmission struct {
+	disposition nudgeReconcileDisposition
+	notBefore   time.Time
+}
 
 // nudgeKeyController is the first domain-local keyed scheduler. It deliberately
 // owns no provider or store dependencies: the injected callback is shadow-only
 // until a later ownership gate installs a real nudge reconciler.
 type nudgeKeyController struct {
-	queue     workqueue.TypedInterface[reconcilekey.Session]
+	queue     workqueue.TypedRateLimitingInterface[reconcilekey.Session]
+	limiter   workqueue.TypedRateLimiter[reconcilekey.Session]
 	workers   int
 	reconcile nudgeReconcileFunc
 	stderr    io.Writer
 	now       func() time.Time
+	addAfter  func(reconcilekey.Session, time.Duration)
+	yield     time.Duration
 	ready     chan struct{}
 	failureCh chan error
 
-	mu        sync.Mutex
+	mu       sync.Mutex
+	stderrMu sync.Mutex
+
 	accepting bool
 	started   bool
 	stopped   bool
 	pending   map[reconcilekey.Session]nudgeReconcileBatch
+	deferred  map[reconcilekey.Session]nudgeDeferredAdmission
 
 	// Deterministic barriers for the Get/takeBatch race contract. Production
 	// leaves both nil; tests install them before Run starts.
 	afterGet          func(reconcilekey.Session)
 	onEmptyReplay     func(reconcilekey.Session)
 	onAdmissionClosed func()
+	onDeferred        func(reconcilekey.Session, nudgeReconcileDisposition, time.Duration)
+	onForget          func(reconcilekey.Session)
 }
 
-func newNudgeKeyController(workers int, reconcile nudgeReconcileFunc, stderr io.Writer) (*nudgeKeyController, error) {
+func newNudgeKeyController(workers int, reconcile nudgeReconcileFunc, stderr io.Writer, supplied ...nudgeKeyControllerOptions) (*nudgeKeyController, error) {
 	if workers < 1 {
 		return nil, fmt.Errorf("creating nudge keyed reconciler: workers must be positive")
 	}
@@ -78,17 +157,52 @@ func newNudgeKeyController(workers int, reconcile nudgeReconcileFunc, stderr io.
 	if stderr == nil {
 		return nil, fmt.Errorf("creating nudge keyed reconciler: stderr is nil")
 	}
-	return &nudgeKeyController{
-		queue:     workqueue.NewTyped[reconcilekey.Session](),
+	options, err := normalizeNudgeKeyControllerOptions(supplied)
+	if err != nil {
+		return nil, err
+	}
+	limiter := workqueue.NewTypedItemExponentialFailureRateLimiter[reconcilekey.Session](options.retryBaseDelay, options.retryMaxDelay)
+	queue := workqueue.NewTypedRateLimitingQueue[reconcilekey.Session](limiter)
+	controller := &nudgeKeyController{
+		queue:     queue,
+		limiter:   limiter,
 		workers:   workers,
 		reconcile: reconcile,
 		stderr:    stderr,
 		now:       time.Now,
+		yield:     options.continuationDelay,
 		ready:     make(chan struct{}),
 		failureCh: make(chan error, 1),
 		accepting: true,
 		pending:   make(map[reconcilekey.Session]nudgeReconcileBatch),
-	}, nil
+		deferred:  make(map[reconcilekey.Session]nudgeDeferredAdmission),
+	}
+	controller.addAfter = queue.AddAfter
+	return controller, nil
+}
+
+func normalizeNudgeKeyControllerOptions(supplied []nudgeKeyControllerOptions) (nudgeKeyControllerOptions, error) {
+	if len(supplied) > 1 {
+		return nudgeKeyControllerOptions{}, fmt.Errorf("creating nudge keyed reconciler: received %d option sets, want at most one", len(supplied))
+	}
+	options := nudgeKeyControllerOptions{
+		continuationDelay: defaultNudgeContinuationDelay,
+		retryBaseDelay:    defaultNudgeRetryBaseDelay,
+		retryMaxDelay:     defaultNudgeRetryMaxDelay,
+	}
+	if len(supplied) == 1 {
+		options = supplied[0]
+	}
+	if options.continuationDelay <= 0 {
+		return nudgeKeyControllerOptions{}, fmt.Errorf("creating nudge keyed reconciler: continuation delay must be positive")
+	}
+	if options.retryBaseDelay <= 0 {
+		return nudgeKeyControllerOptions{}, fmt.Errorf("creating nudge keyed reconciler: retry base delay must be positive")
+	}
+	if options.retryMaxDelay < options.retryBaseDelay {
+		return nudgeKeyControllerOptions{}, fmt.Errorf("creating nudge keyed reconciler: retry max delay %s is below base delay %s", options.retryMaxDelay, options.retryBaseDelay)
+	}
+	return options, nil
 }
 
 // Enqueue marks one stable target dirty and merges the typed cause before the
@@ -116,6 +230,11 @@ func (c *nudgeKeyController) Enqueue(key reconcilekey.Session, cause nudgeReconc
 	}
 	batch.Causes |= cause
 	c.pending[key] = batch
+	if _, delayed := c.deferred[key]; delayed {
+		// The source evidence remains dirty, but an irrelevant duplicate must
+		// not bypass the callback-owned continuation/retry eligibility edge.
+		return nil
+	}
 	// Add while holding mu serializes admission with stopAdmission. The
 	// workqueue never runs callbacks while Add holds its own lock.
 	c.queue.Add(key)
@@ -213,7 +332,14 @@ func (c *nudgeKeyController) runWorker(ctx context.Context) {
 			return
 		}
 
-		batch, ok := c.takeBatch(key)
+		batch, ok, eligible := c.takeBatch(key)
+		if !eligible {
+			// A dirty Add that raced the callback result may already be in the
+			// workqueue. Consume that queue replay without consuming the retained
+			// batch; the single delayed admission remains responsible for wakeup.
+			c.queue.Done(key)
+			continue
+		}
 		if !ok {
 			// Enqueue can win after Get marks the key processing but before
 			// takeBatch. The cause joins the current batch while Add also marks
@@ -223,33 +349,78 @@ func (c *nudgeKeyController) runWorker(ctx context.Context) {
 			// latest-state evaluation exists.
 			batch = nudgeReconcileBatch{WorkqueueReplay: true}
 		}
-		err := c.invoke(ctx, key, batch)
-		c.queue.Done(key)
-		if batch.WorkqueueReplay && c.onEmptyReplay != nil {
-			c.onEmptyReplay(key)
-		}
+		outcome, err := c.invoke(ctx, key, batch)
 		if err != nil {
 			c.restoreBatch(key, batch)
+			c.queue.Done(key)
 			c.reportFailure(err)
 			return
+		}
+		if err := outcome.validate(); err != nil {
+			c.restoreBatch(key, batch)
+			c.queue.Done(key)
+			c.reportFailure(fmt.Errorf("nudge keyed reconciler invariant failed for %s: invalid callback outcome: %w", key, err))
+			return
+		}
+
+		switch outcome.disposition {
+		case nudgeReconcileOutcomeForget:
+			c.queue.Forget(key)
+			c.queue.Done(key)
+			if c.onForget != nil {
+				c.onForget(key)
+			}
+		case nudgeReconcileOutcomeContinue:
+			c.queue.Forget(key)
+			c.deferBatch(key, batch, outcome.disposition, c.yield)
+			c.queue.Done(key)
+		case nudgeReconcileOutcomeAudit:
+			c.queue.Forget(key)
+			batch.Causes |= nudgeCauseAudit
+			c.deferBatch(key, batch, outcome.disposition, c.yield)
+			c.queue.Done(key)
+		case nudgeReconcileOutcomeTransient:
+			delay := c.limiter.When(key)
+			c.deferBatch(key, batch, outcome.disposition, delay)
+			c.queue.Done(key)
+			c.logTransient(key, outcome.err, delay)
+		case nudgeReconcileOutcomeInvariant:
+			c.restoreBatch(key, batch)
+			c.queue.Done(key)
+			c.reportFailure(fmt.Errorf("nudge keyed reconciler invariant failed for %s: %w", key, outcome.err))
+			return
+		}
+		if batch.WorkqueueReplay && c.onEmptyReplay != nil {
+			c.onEmptyReplay(key)
 		}
 	}
 }
 
-func (c *nudgeKeyController) takeBatch(key reconcilekey.Session) (nudgeReconcileBatch, bool) {
+func (c *nudgeKeyController) takeBatch(key reconcilekey.Session) (nudgeReconcileBatch, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if deferred, ok := c.deferred[key]; ok {
+		now := c.now()
+		if now.Before(deferred.notBefore) {
+			return nudgeReconcileBatch{}, false, false
+		}
+		delete(c.deferred, key)
+	}
 	batch, ok := c.pending[key]
-	if !ok || batch.Causes == 0 {
-		return nudgeReconcileBatch{}, false
+	if !ok || (batch.Causes == 0 && !batch.WorkqueueReplay) {
+		return nudgeReconcileBatch{}, false, true
 	}
 	delete(c.pending, key)
-	return batch, true
+	return batch, true, true
 }
 
 func (c *nudgeKeyController) restoreBatch(key reconcilekey.Session, failed nudgeReconcileBatch) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.restoreBatchLocked(key, failed)
+}
+
+func (c *nudgeKeyController) restoreBatchLocked(key reconcilekey.Session, failed nudgeReconcileBatch) {
 	pending := c.pending[key]
 	if !failed.FirstEnqueuedAt.IsZero() &&
 		(pending.FirstEnqueuedAt.IsZero() || failed.FirstEnqueuedAt.Before(pending.FirstEnqueuedAt)) {
@@ -260,6 +431,33 @@ func (c *nudgeKeyController) restoreBatch(key reconcilekey.Session, failed nudge
 	c.pending[key] = pending
 }
 
+func (c *nudgeKeyController) deferBatch(key reconcilekey.Session, batch nudgeReconcileBatch, disposition nudgeReconcileDisposition, delay time.Duration) {
+	c.mu.Lock()
+	now := c.now()
+	c.restoreBatchLocked(key, batch)
+	pending := c.pending[key]
+	if pending.FirstEnqueuedAt.IsZero() {
+		pending.FirstEnqueuedAt = now
+		c.pending[key] = pending
+	}
+	c.deferred[key] = nudgeDeferredAdmission{
+		disposition: disposition,
+		notBefore:   now.Add(delay),
+	}
+	c.mu.Unlock()
+
+	c.addAfter(key, delay)
+	if c.onDeferred != nil {
+		c.onDeferred(key, disposition, delay)
+	}
+}
+
+func (c *nudgeKeyController) logTransient(key reconcilekey.Session, err error, delay time.Duration) {
+	c.stderrMu.Lock()
+	defer c.stderrMu.Unlock()
+	fmt.Fprintf(c.stderr, "nudge keyed reconciler transient failure for %s; retrying after %s: %v\n", key, delay, err) //nolint:errcheck // the callback error is retained by the retry state
+}
+
 func (c *nudgeKeyController) reportFailure(err error) {
 	select {
 	case c.failureCh <- err:
@@ -268,12 +466,11 @@ func (c *nudgeKeyController) reportFailure(err error) {
 	}
 }
 
-func (c *nudgeKeyController) invoke(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) (err error) {
+func (c *nudgeKeyController) invoke(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) (outcome nudgeReconcileOutcome, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("nudge keyed reconciler panicked for %s: %v\n%s", key, recovered, debug.Stack())
 		}
 	}()
-	c.reconcile(ctx, key, batch)
-	return nil
+	return c.reconcile(ctx, key, batch), nil
 }

@@ -821,8 +821,9 @@ func (cr *CityRuntime) installNudgeKeyShadow() error {
 		stderr = io.Discard
 	}
 	warnings := newNudgeKeyObservationWarnings(stderr)
-	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		observeNudgeKeyScheduling(ctx, batch, time.Now(), warnings)
+		return nudgeReconcileSuccess()
 	}, stderr)
 	if err != nil {
 		return err

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,11 +25,12 @@ func testSessionReconcileKey(t *testing.T, id string) reconcilekey.Session {
 func TestNudgeKeyControllerCoalescesDuplicateCausesBeforeStart(t *testing.T) {
 	key := testSessionReconcileKey(t, "session-1")
 	got := make(chan nudgeReconcileBatch, 1)
-	controller, err := newNudgeKeyController(1, func(_ context.Context, gotKey reconcilekey.Session, batch nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(_ context.Context, gotKey reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		if gotKey != key {
 			t.Errorf("key = %v, want %v", gotKey, key)
 		}
 		got <- batch
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -83,7 +85,7 @@ func TestNudgeKeyControllerSerializesOneKeyAndRunsIndependentKeysConcurrently(t 
 	maxConcurrent := 0
 	overlappedSameKey := false
 
-	controller, err := newNudgeKeyController(2, func(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(2, func(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		mu.Lock()
 		active[key]++
 		if active[key] > 1 {
@@ -115,6 +117,7 @@ func TestNudgeKeyControllerSerializesOneKeyAndRunsIndependentKeysConcurrently(t 
 		active[key]--
 		concurrent--
 		mu.Unlock()
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -178,8 +181,9 @@ func TestNudgeKeyControllerSerializesOneKeyAndRunsIndependentKeysConcurrently(t 
 func TestNudgeKeyControllerEnqueueStartsWithoutPatrolOrFullScan(t *testing.T) {
 	key := testSessionReconcileKey(t, "session-immediate")
 	started := make(chan nudgeReconcileBatch, 1)
-	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		started <- batch
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -233,7 +237,9 @@ func TestInstallNudgeKeyShadowNeverFallsBackToCityPathOrDisplayName(t *testing.T
 }
 
 func TestNudgeKeyControllerRejectsMalformedAdmission(t *testing.T) {
-	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) {}, &bytes.Buffer{})
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome {
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
 	}
@@ -258,9 +264,10 @@ func TestNudgeKeyControllerRejectsMalformedAdmission(t *testing.T) {
 func TestNudgeKeyControllerCancellationBoundsCooperativeShutdown(t *testing.T) {
 	key := testSessionReconcileKey(t, "session-cancel")
 	started := make(chan struct{})
-	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) nudgeReconcileOutcome {
 		close(started)
 		<-ctx.Done()
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -283,10 +290,11 @@ func TestNudgeKeyControllerPanicFailsClosedWithoutConsumingAdmission(t *testing.
 	keyA := testSessionReconcileKey(t, "session-panic")
 	keyB := testSessionReconcileKey(t, "session-after-panic")
 	var stderr bytes.Buffer
-	controller, err := newNudgeKeyController(1, func(_ context.Context, key reconcilekey.Session, _ nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(_ context.Context, key reconcilekey.Session, _ nudgeReconcileBatch) nudgeReconcileOutcome {
 		if key == keyA {
 			panic("boom")
 		}
+		return nudgeReconcileSuccess()
 	}, &stderr)
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -302,6 +310,9 @@ func TestNudgeKeyControllerPanicFailsClosedWithoutConsumingAdmission(t *testing.
 	if runErr == nil || !bytes.Contains([]byte(runErr.Error()), []byte("nudge keyed reconciler panicked")) {
 		t.Fatalf("Run() error = %v, want surfaced panic", runErr)
 	}
+	if !bytes.Contains([]byte(runErr.Error()), []byte(keyA.String())) {
+		t.Fatalf("Run() error = %v, want preserved key %s", runErr, keyA)
+	}
 	controller.mu.Lock()
 	failedBatch := controller.pending[keyA]
 	controller.mu.Unlock()
@@ -310,6 +321,243 @@ func TestNudgeKeyControllerPanicFailsClosedWithoutConsumingAdmission(t *testing.
 	}
 	if err := controller.Enqueue(keyB, nudgeCauseCommandCommit); err == nil {
 		t.Fatal("enqueue after panic error = nil, want failed-closed admission")
+	}
+}
+
+func TestNudgeKeyControllerOutcomeContinuationYieldsAndPreservesAdmission(t *testing.T) {
+	key := testSessionReconcileKey(t, "session-continuation")
+	start := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	now := start
+	const yield = 25 * time.Millisecond
+	batches := make(chan nudgeReconcileBatch, 2)
+	deferred := make(chan time.Duration, 1)
+	forgotten := make(chan struct{}, 1)
+	var calls atomic.Int32
+	controller, err := newNudgeKeyController(1, func(_ context.Context, gotKey reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
+		if gotKey != key {
+			t.Errorf("key = %v, want %v", gotKey, key)
+		}
+		batches <- batch
+		if calls.Add(1) == 1 {
+			return nudgeReconcileContinue()
+		}
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{}, nudgeKeyControllerOptions{
+		continuationDelay: yield,
+		retryBaseDelay:    time.Second,
+		retryMaxDelay:     time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	controller.addAfter = func(reconcilekey.Session, time.Duration) {}
+	controller.onDeferred = func(_ reconcilekey.Session, disposition nudgeReconcileDisposition, delay time.Duration) {
+		if disposition != nudgeReconcileOutcomeContinue {
+			t.Errorf("deferred disposition = %v, want continuation", disposition)
+		}
+		deferred <- delay
+	}
+	controller.onForget = func(reconcilekey.Session) { forgotten <- struct{}{} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runNudgeKeyController(ctx, t, controller)
+	if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	first := receiveBeforeDeadline(t, batches)
+	if got := receiveBeforeDeadline(t, deferred); got != yield {
+		t.Fatalf("continuation delay = %v, want %v", got, yield)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls before clock advance = %d, want 1", got)
+	}
+	controller.mu.Lock()
+	preserved := controller.pending[key]
+	controller.mu.Unlock()
+	if !preserved.FirstEnqueuedAt.Equal(start) || preserved.Causes != first.Causes {
+		t.Fatalf("preserved batch = %#v, want admission %#v", preserved, first)
+	}
+
+	now = now.Add(yield)
+	controller.queue.Add(key)
+	second := receiveBeforeDeadline(t, batches)
+	if !second.FirstEnqueuedAt.Equal(first.FirstEnqueuedAt) || second.Causes != first.Causes {
+		t.Fatalf("continuation batch = %#v, want original admission %#v", second, first)
+	}
+	receiveBeforeDeadline(t, forgotten)
+	cancel()
+	waitControllerStopped(t, done)
+}
+
+func TestNudgeKeyControllerOutcomeAuditAddsCauseAfterBoundedYield(t *testing.T) {
+	key := testSessionReconcileKey(t, "session-audit-needed")
+	start := time.Date(2026, 7, 15, 11, 0, 0, 0, time.UTC)
+	now := start
+	const yield = 40 * time.Millisecond
+	batches := make(chan nudgeReconcileBatch, 2)
+	deferred := make(chan time.Duration, 1)
+	var calls atomic.Int32
+	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
+		batches <- batch
+		if calls.Add(1) == 1 {
+			return nudgeReconcileAudit()
+		}
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{}, nudgeKeyControllerOptions{
+		continuationDelay: yield,
+		retryBaseDelay:    time.Second,
+		retryMaxDelay:     time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	controller.addAfter = func(reconcilekey.Session, time.Duration) {}
+	controller.onDeferred = func(_ reconcilekey.Session, disposition nudgeReconcileDisposition, delay time.Duration) {
+		if disposition != nudgeReconcileOutcomeAudit {
+			t.Errorf("deferred disposition = %v, want audit", disposition)
+		}
+		deferred <- delay
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runNudgeKeyController(ctx, t, controller)
+	if err := controller.Enqueue(key, nudgeCauseProviderResult); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	first := receiveBeforeDeadline(t, batches)
+	if got := receiveBeforeDeadline(t, deferred); got != yield {
+		t.Fatalf("audit delay = %v, want %v", got, yield)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls before audit eligibility = %d, want 1", got)
+	}
+	now = now.Add(yield)
+	controller.queue.Add(key)
+	second := receiveBeforeDeadline(t, batches)
+	if want := first.Causes | nudgeCauseAudit; second.Causes != want {
+		t.Fatalf("audit causes = %v, want %v", second.Causes, want)
+	}
+	if !second.FirstEnqueuedAt.Equal(first.FirstEnqueuedAt) {
+		t.Fatalf("audit admission = %v, want %v", second.FirstEnqueuedAt, first.FirstEnqueuedAt)
+	}
+	cancel()
+	waitControllerStopped(t, done)
+}
+
+func TestNudgeKeyControllerOutcomeTransientRetryIsCappedAndDuplicatesDoNotHotLoop(t *testing.T) {
+	key := testSessionReconcileKey(t, "session-transient")
+	start := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	now := start
+	const (
+		base     = 100 * time.Millisecond
+		maxDelay = 200 * time.Millisecond
+	)
+	batches := make(chan nudgeReconcileBatch, 4)
+	deferred := make(chan time.Duration, 4)
+	forgotten := make(chan struct{}, 1)
+	var calls atomic.Int32
+	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
+		batches <- batch
+		call := calls.Add(1)
+		if call <= 3 {
+			return nudgeReconcileTransient(errors.New("provider unavailable"))
+		}
+		return nudgeReconcileSuccess()
+	}, &bytes.Buffer{}, nudgeKeyControllerOptions{
+		continuationDelay: time.Millisecond,
+		retryBaseDelay:    base,
+		retryMaxDelay:     maxDelay,
+	})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	controller.now = func() time.Time { return now }
+	controller.addAfter = func(reconcilekey.Session, time.Duration) {}
+	controller.onDeferred = func(_ reconcilekey.Session, disposition nudgeReconcileDisposition, delay time.Duration) {
+		if disposition != nudgeReconcileOutcomeTransient {
+			t.Errorf("deferred disposition = %v, want transient", disposition)
+		}
+		deferred <- delay
+	}
+	controller.onForget = func(reconcilekey.Session) { forgotten <- struct{}{} }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runNudgeKeyController(ctx, t, controller)
+	if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	first := receiveBeforeDeadline(t, batches)
+	if got := receiveBeforeDeadline(t, deferred); got != base {
+		t.Fatalf("retry 1 delay = %v, want %v", got, base)
+	}
+	for attempt := 0; attempt < 10_000; attempt++ {
+		if err := controller.Enqueue(key, nudgeCauseRuntimeReadiness); err != nil {
+			t.Fatalf("duplicate enqueue %d: %v", attempt, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls under frozen clock after duplicates = %d, want 1", got)
+	}
+
+	now = now.Add(base)
+	controller.queue.Add(key)
+	second := receiveBeforeDeadline(t, batches)
+	if want := nudgeCauseCommandCommit | nudgeCauseRuntimeReadiness; second.Causes != want {
+		t.Fatalf("retry causes = %v, want %v", second.Causes, want)
+	}
+	if !second.FirstEnqueuedAt.Equal(first.FirstEnqueuedAt) {
+		t.Fatalf("retry admission = %v, want %v", second.FirstEnqueuedAt, first.FirstEnqueuedAt)
+	}
+	if got := receiveBeforeDeadline(t, deferred); got != maxDelay {
+		t.Fatalf("retry 2 delay = %v, want cap %v", got, maxDelay)
+	}
+	now = now.Add(maxDelay)
+	controller.queue.Add(key)
+	receiveBeforeDeadline(t, batches)
+	if got := receiveBeforeDeadline(t, deferred); got != maxDelay {
+		t.Fatalf("retry 3 delay = %v, want capped %v", got, maxDelay)
+	}
+	now = now.Add(maxDelay)
+	controller.queue.Add(key)
+	receiveBeforeDeadline(t, batches)
+	receiveBeforeDeadline(t, forgotten)
+	if got := controller.queue.NumRequeues(key); got != 0 {
+		t.Fatalf("NumRequeues after success = %d, want reset", got)
+	}
+	cancel()
+	waitControllerStopped(t, done)
+}
+
+func TestNudgeKeyControllerOutcomeInvariantFailsClosedAndPreservesKey(t *testing.T) {
+	key := testSessionReconcileKey(t, "session-invariant")
+	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) nudgeReconcileOutcome {
+		return nudgeReconcileInvariant(errors.New("foreign lineage"))
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("newNudgeKeyController: %v", err)
+	}
+	if err := controller.Enqueue(key, nudgeCauseCommandCommit); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := receiveBeforeDeadline(t, runNudgeKeyController(ctx, t, controller))
+	if runErr == nil || !bytes.Contains([]byte(runErr.Error()), []byte("foreign lineage")) {
+		t.Fatalf("Run() error = %v, want invariant cause", runErr)
+	}
+	if !bytes.Contains([]byte(runErr.Error()), []byte(key.String())) {
+		t.Fatalf("Run() error = %v, want preserved key %s", runErr, key)
+	}
+	controller.mu.Lock()
+	preserved := controller.pending[key]
+	controller.mu.Unlock()
+	if preserved.Causes != nudgeCauseCommandCommit {
+		t.Fatalf("preserved invariant batch = %#v, want command cause", preserved)
+	}
+	if err := controller.Enqueue(key, nudgeCauseAudit); err == nil {
+		t.Fatal("enqueue after invariant failure error = nil, want failed-closed admission")
 	}
 }
 
@@ -322,9 +570,10 @@ func TestNudgeKeyControllerGetTakeRacePreservesExplicitReplay(t *testing.T) {
 	var gets atomic.Int32
 	var calls atomic.Int32
 
-	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		calls.Add(1)
 		processed <- batch
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -368,7 +617,7 @@ func TestNudgeKeyControllerGetTakeRacePreservesExplicitReplay(t *testing.T) {
 func TestNudgeKeyControllerCancellationDoesNotSwallowCallbackPanic(t *testing.T) {
 	key := testSessionReconcileKey(t, "session-cancel-panic")
 	started := make(chan struct{})
-	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) nudgeReconcileOutcome {
 		close(started)
 		<-ctx.Done()
 		panic("panic-after-cancel")
@@ -401,11 +650,12 @@ func TestNudgeKeyControllerPreservesPanicOnCauseFreeReplay(t *testing.T) {
 	releaseFirstGet := make(chan struct{})
 	firstProcessed := make(chan struct{})
 	var gets atomic.Int32
-	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		if batch.WorkqueueReplay {
 			panic("replay-panic")
 		}
 		close(firstProcessed)
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -444,9 +694,10 @@ func TestNudgeKeyControllerShutdownClosesAdmissionBeforeCancellation(t *testing.
 	key := testSessionReconcileKey(t, "session-shutdown-linearization")
 	started := make(chan struct{})
 	closed := make(chan struct{})
-	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) nudgeReconcileOutcome {
 		close(started)
 		<-ctx.Done()
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)
@@ -479,9 +730,10 @@ func TestNudgeKeyControllerShutdownClosesAdmissionBeforeCancellation(t *testing.
 func TestNudgeKeyControllerRunIsSingleStart(t *testing.T) {
 	key := testSessionReconcileKey(t, "session-single-start")
 	started := make(chan struct{})
-	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, _ nudgeReconcileBatch) nudgeReconcileOutcome {
 		close(started)
 		<-ctx.Done()
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)

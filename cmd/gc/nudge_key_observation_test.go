@@ -161,9 +161,10 @@ func TestExactWakeAdmissionRecordsProductionKeySchedulingWithoutPatrol(t *testin
 
 	productionCallback := cr.nudgeKeyController.reconcile
 	callbackDone := make(chan struct{}, 1)
-	cr.nudgeKeyController.reconcile = func(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) {
-		productionCallback(ctx, key, batch)
+	cr.nudgeKeyController.reconcile = func(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
+		outcome := productionCallback(ctx, key, batch)
 		callbackDone <- struct{}{}
+		return outcome
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -348,8 +349,9 @@ func TestNudgeKeyDuplicateAdmissionPreservesFirstEnqueuedDelay(t *testing.T) {
 	duplicateAdmission := firstAdmission.Add(80 * time.Millisecond)
 	callbackAt := firstAdmission.Add(125 * time.Millisecond)
 	observed := make(chan nudgeKeySchedulingObservation, 1)
-	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) {
+	controller, err := newNudgeKeyController(1, func(_ context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		observed <- newNudgeKeySchedulingObservation(batch, callbackAt)
+		return nudgeReconcileSuccess()
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("newNudgeKeyController: %v", err)

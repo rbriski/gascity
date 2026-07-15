@@ -124,7 +124,7 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 						break
 					}
 					callback, ok := typed.Args[1].(*ast.FuncLit)
-					if !ok || len(callback.Type.Params.List) != 3 || len(callback.Body.List) != 1 {
+					if !ok || len(callback.Type.Params.List) != 3 || callback.Type.Results == nil || len(callback.Type.Results.List) != 1 || len(callback.Body.List) != 2 {
 						t.Errorf("shadow constructor callback at %s is not the fixed scheduling-only function literal", fset.Position(typed.Args[1].Pos()))
 						break
 					}
@@ -150,6 +150,11 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 					nowCall, ok := observationCall.Args[2].(*ast.CallExpr)
 					if !ok || selectorPath(nowCall.Fun) != "time.Now" || len(nowCall.Args) != 0 {
 						t.Errorf("shadow scheduling observer at %s does not receive the local current time", fset.Position(observationCall.Args[2].Pos()))
+						break
+					}
+					result, ok := callback.Body.List[1].(*ast.ReturnStmt)
+					if !ok || len(result.Results) != 1 || calledFunction(result.Results[0]) != "nudgeReconcileSuccess" {
+						t.Errorf("shadow constructor callback at %s does not return the fixed success outcome", fset.Position(callback.Body.List[1].Pos()))
 						break
 					}
 					schedulingOnlyShadowCallbacks++
@@ -430,18 +435,21 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 	}
 	allowedCalls := map[string]bool{
 		"<func>": true,
-		"make":   true, "uint8": true, "close": true, "clear": true, "delete": true, "recover": true,
+		"make":   true, "len": true, "uint8": true, "close": true, "clear": true, "delete": true, "recover": true,
 		"cancelWorkers": true, "onClosed": true,
-		"fmt.Errorf": true, "fmt.Fprintf": true, "workqueue.NewTyped": true, "context.WithCancel": true, "debug.Stack": true,
+		"fmt.Errorf": true, "fmt.Fprintf": true, "context.WithCancel": true, "debug.Stack": true,
+		"workqueue.NewTypedItemExponentialFailureRateLimiter": true, "workqueue.NewTypedRateLimitingQueue": true,
+		"normalizeNudgeKeyControllerOptions": true, "outcome.validate": true,
 		"key.IsZero": true, "ctx.Err": true, "ctx.Done": true,
-		"c.mu.Lock": true, "c.mu.Unlock": true, "c.now": true,
-		"c.queue.Add": true, "c.queue.ShutDown": true, "c.queue.Get": true, "c.queue.Done": true,
+		"c.mu.Lock": true, "c.mu.Unlock": true, "c.stderrMu.Lock": true, "c.stderrMu.Unlock": true, "c.now": true,
+		"c.queue.Add": true, "c.queue.ShutDown": true, "c.queue.Get": true, "c.queue.Done": true, "c.queue.Forget": true,
 		"workers.Add": true, "workers.Done": true, "workers.Wait": true,
 		"c.runWorker": true, "c.closeAdmission": true, "c.takeBatch": true, "c.invoke": true,
-		"c.restoreBatch": true, "c.reportFailure": true, "c.reconcile": true,
-		"c.afterGet": true, "c.onEmptyReplay": true,
+		"c.restoreBatch": true, "c.restoreBatchLocked": true, "c.deferBatch": true, "c.reportFailure": true, "c.reconcile": true,
+		"c.afterGet": true, "c.onEmptyReplay": true, "c.onDeferred": true, "c.onForget": true, "c.addAfter": true,
+		"c.limiter.When": true, "c.logTransient": true,
 		"failed.FirstEnqueuedAt.IsZero": true, "failed.FirstEnqueuedAt.Before": true,
-		"pending.FirstEnqueuedAt.IsZero": true,
+		"pending.FirstEnqueuedAt.IsZero": true, "now.Before": true, "now.Add": true,
 	}
 	assertASTCallsOnly(t, fset, file, "nudge keyed core", allowedCalls)
 }

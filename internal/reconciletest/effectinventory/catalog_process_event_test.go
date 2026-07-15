@@ -12,7 +12,7 @@ import (
 const (
 	processScaffoldFingerprint                 = "41f7034b7d9916f42c3831c12d24eee7f45891ea673440a8e4e5e001b8d42c24"
 	processManagedDoltExplicitRouteFingerprint = "77d375c5e58dd2de0672a8427293a348da5ff68383287ba57359c7894c3db11b"
-	eventScaffoldFingerprint                   = "86d98ee3d27144db965f87dd15bdbb80614937d10b56ea7437a50f57fd9b3869"
+	eventScaffoldFingerprint                   = "6343a7f98fdd77721801ae14dd7ce39b825df878421e88fe304fdc8791e48c5a"
 )
 
 func TestProcessCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
@@ -20,7 +20,7 @@ func TestProcessCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
 }
 
 func TestEventCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
-	assertProcessEventCatalogScaffold(t, KindEventEmission, eventCatalogSiteRows(), 93, "event-scaffold-site-v1", eventScaffoldFingerprint)
+	assertProcessEventCatalogScaffold(t, KindEventEmission, eventCatalogSiteRows(), 90, "event-scaffold-site-v1", eventScaffoldFingerprint)
 }
 
 func assertProcessEventCatalogScaffold(

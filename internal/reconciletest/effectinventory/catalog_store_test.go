@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-const storeScaffoldFingerprint = "f07f7ab7bd0005d9ec2708864abb67a59020014b9469680829a8ec659ff9d485"
+const storeScaffoldFingerprint = "79b0c4c97f8e8f68897aaa50aac6f56874ece2d8a4f35b1987e61873261e3a55"
 
 func TestStoreCatalogCoversScaffoldExactlyOnce(t *testing.T) {
 	rows := storeCatalogSiteRows()
-	if got, want := len(rows), 419; got != want {
+	if got, want := len(rows), 414; got != want {
 		t.Fatalf("store catalog rows = %d, want scaffold count %d", got, want)
 	}
 

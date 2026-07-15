@@ -10,37 +10,62 @@ import (
 )
 
 const (
-	wakeScaffoldFingerprint = "f97eb191572ade2adec0ad6194a9c6fd448d898f3fe399ba1cb06713487e43b9"
-	wakeSemanticFingerprint = "d49750b1b4891f10309c434a20043a39b69ad0c6fbf2466de1cf083d53098465"
+	wakeScaffoldFingerprint      = "a12c326a68cbbd1fd33088b0ccca306ec53042595ad5c9c8d99a4477f7559958"
+	wakeSemanticFingerprint      = "83dee76c3904d814c5abc3fee833b7224a0d9ebf53997f89af462f1a0a4a130e"
+	wakeExplicitRouteFingerprint = "6f2fca5dcbc0d5410f9872b4f15a3ff7a2ad8353595f3030a0235c082fdfe1e7"
 )
 
 func TestWakeCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
-	assertProcessEventCatalogScaffold(t, KindWakeSource, wakeCatalogSiteRows(), 11, "wake-scaffold-site-v1", wakeScaffoldFingerprint)
+	assertProcessEventCatalogScaffold(t, KindWakeSource, wakeCatalogSiteRows(), 292, "wake-scaffold-site-v1", wakeScaffoldFingerprint)
 }
 
 func TestWakeCatalogPinsEveryPhysicalSiteSemanticClassSelection(t *testing.T) {
 	rows := wakeCatalogSiteRows()
-	records := make([]string, 0, 14)
+	records := make([]string, 0, 327)
+	explicitRouteRecords := make([]string, 0, 62)
 	for _, row := range rows {
+		physicalKey := registrationPhysicalKey(row.BoundaryID, row.Matcher)
 		classes := append([]catalogRouteClassID(nil), row.Classes...)
 		for _, explicit := range row.ExplicitRoutes {
 			classes = append(classes, explicit.Class)
+			if _, reviewed := wakeCatalogReviewedExplicitRoutes[physicalKey]; reviewed {
+				hops := make([]string, len(explicit.Hops))
+				for index, hop := range explicit.Hops {
+					hops[index] = canonicalRouteHop(hop)
+				}
+				explicitRouteRecords = append(explicitRouteRecords, canonicalFields(
+					"wake-explicit-route-v1",
+					physicalKey,
+					string(explicit.Class),
+					canonicalFunctionRef(explicit.LogicalOwner),
+					canonicalStringList("wake-explicit-route-hops-v1", hops),
+				))
+			}
 		}
 		for _, classID := range classes {
 			records = append(records, canonicalFields(
 				"wake-semantic-route-v1",
-				registrationPhysicalKey(row.BoundaryID, row.Matcher),
+				physicalKey,
 				string(classID),
 			))
 		}
 	}
-	if got := len(records); got != 14 {
-		t.Fatalf("wake semantic selections = %d, want 14 physical-route pairs", got)
+	if got := len(records); got != 327 {
+		t.Fatalf("wake semantic selections = %d, want 327 physical-route pairs", got)
 	}
 	sort.Strings(records)
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(records, "\n"))))
 	if fingerprint != wakeSemanticFingerprint {
 		t.Fatalf("wake semantic fingerprint = %q, want exact class-selection fingerprint %q", fingerprint, wakeSemanticFingerprint)
+	}
+
+	if got := len(explicitRouteRecords); got != 62 {
+		t.Fatalf("wake reviewed explicit-route evidence records = %d, want 62", got)
+	}
+	sort.Strings(explicitRouteRecords)
+	explicitRouteFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(explicitRouteRecords, "\n"))))
+	if explicitRouteFingerprint != wakeExplicitRouteFingerprint {
+		t.Fatalf("wake explicit-route evidence fingerprint = %q, want exact owner/hop fingerprint %q", explicitRouteFingerprint, wakeExplicitRouteFingerprint)
 	}
 }
 
@@ -225,6 +250,80 @@ func TestWakeCatalogAuthorsDistinctCLIAndSidecarOriginsForSharedProductMetricsWa
 	}
 	if sharedRows != 3 {
 		t.Fatalf("shared product-metrics wake rows = %d, want context plus two timer receives", sharedRows)
+	}
+}
+
+func TestWakeCatalogAuthorsEveryReviewedProductionOwnershipRouteExplicitly(t *testing.T) {
+	if got := len(wakeCatalogReviewedExplicitRoutes); got != 30 {
+		t.Fatalf("reviewed production explicit-route keys = %d, want 30", got)
+	}
+	for _, spec := range wakeCatalogSiteSpecs {
+		physicalKey := wakeCatalogReviewedSiteKey(spec.BoundaryID, spec.Operation, FunctionRef{
+			Object: ObjectRef{Package: spec.Package, Receiver: spec.Receiver, Name: spec.Function},
+			File:   spec.File, ClosurePath: spec.ClosurePath,
+		}, spec.Ordinal)
+		if _, reviewed := wakeCatalogReviewedExplicitRoutes[physicalKey]; reviewed && len(spec.Classes) != 0 {
+			t.Errorf("reviewed production spec %q retains %d fallback leaf classes", physicalKey, len(spec.Classes))
+		}
+	}
+	matchedKeys := make(map[string]bool, len(wakeCatalogReviewedExplicitRoutes))
+	var explicitSites, explicitRoutes, singletonSites, sharedSites int
+	for _, row := range wakeCatalogSiteRows() {
+		physicalKey := registrationPhysicalKey(row.BoundaryID, row.Matcher)
+		reviewedRoutes, reviewed := wakeCatalogReviewedExplicitRoutes[physicalKey]
+		if !reviewed {
+			continue
+		}
+		matchedKeys[physicalKey] = true
+		if len(row.ExplicitRoutes) != len(reviewedRoutes) {
+			t.Errorf("%s expanded explicit routes = %d, want %d reviewed routes", describePhysicalSite(row.BoundaryID, row.Matcher), len(row.ExplicitRoutes), len(reviewedRoutes))
+		}
+		explicitSites++
+		explicitRoutes += len(row.ExplicitRoutes)
+		switch len(row.ExplicitRoutes) {
+		case 1:
+			singletonSites++
+		default:
+			sharedSites++
+		}
+		if len(row.Classes) != 0 {
+			t.Errorf("%s retains %d leaf classes alongside explicit provenance", describePhysicalSite(row.BoundaryID, row.Matcher), len(row.Classes))
+		}
+
+		seen := make(map[string]bool, len(row.ExplicitRoutes))
+		for _, explicit := range row.ExplicitRoutes {
+			if len(explicit.Hops) == 0 {
+				t.Errorf("%s explicit class %q has no authored route hops", describePhysicalSite(row.BoundaryID, row.Matcher), explicit.Class)
+				continue
+			}
+			if !explicit.Hops[0].Site.Enclosing.equal(explicit.LogicalOwner) {
+				t.Errorf("%s explicit class %q route does not start at its logical owner", describePhysicalSite(row.BoundaryID, row.Matcher), explicit.Class)
+			}
+			if !explicit.Hops[len(explicit.Hops)-1].Callee.equal(row.Matcher.Enclosing) {
+				t.Errorf("%s explicit class %q route does not terminate at its physical owner", describePhysicalSite(row.BoundaryID, row.Matcher), explicit.Class)
+			}
+			parts := []string{string(explicit.Class), canonicalFunctionRef(explicit.LogicalOwner)}
+			for _, hop := range explicit.Hops {
+				parts = append(parts, canonicalRouteHop(hop))
+			}
+			key := strings.Join(parts, "|")
+			if seen[key] {
+				t.Errorf("%s duplicates explicit class/origin/hop route %q", describePhysicalSite(row.BoundaryID, row.Matcher), key)
+			}
+			seen[key] = true
+		}
+	}
+
+	if explicitSites != 30 || explicitRoutes != 62 {
+		t.Fatalf("reviewed production explicit sites/routes = %d/%d, want 30/62", explicitSites, explicitRoutes)
+	}
+	if singletonSites != 5 || sharedSites != 25 {
+		t.Fatalf("reviewed production singleton/shared explicit sites = %d/%d, want 5/25", singletonSites, sharedSites)
+	}
+	for physicalKey := range wakeCatalogReviewedExplicitRoutes {
+		if !matchedKeys[physicalKey] {
+			t.Errorf("reviewed production explicit-route key %q has no physical catalog site", physicalKey)
+		}
 	}
 }
 

@@ -23,17 +23,17 @@ type wakeCatalogRouteClassSpec struct {
 }
 
 type wakeCatalogSiteSpec struct {
-	BoundaryID                string
-	Operation                 OperationKind
-	Package                   string
-	Receiver                  string
-	Function                  string
-	File                      string
-	ClosurePath               []int
-	Ordinal                   int
-	ProfileSet                wakeCatalogProfileSet
-	Classes                   []catalogRouteClassID
-	ExplicitAcquireLockRoutes bool
+	BoundaryID     string
+	Operation      OperationKind
+	Package        string
+	Receiver       string
+	Function       string
+	File           string
+	ClosurePath    []int
+	Ordinal        int
+	ProfileSet     wakeCatalogProfileSet
+	Classes        []catalogRouteClassID
+	ExplicitRoutes []catalogExplicitRoute
 }
 
 func wakeInventoryRegistrations() ([]SiteRegistration, error) {
@@ -130,17 +130,32 @@ func wakeCatalogSiteRows() []catalogSiteRow {
 			},
 			Profiles: wakeCatalogProfiles(spec.ProfileSet),
 		}
-		if spec.ExplicitAcquireLockRoutes {
-			row.ExplicitRoutes = make([]catalogExplicitRoute, 0, len(spec.Classes))
-			for _, classID := range spec.Classes {
-				row.ExplicitRoutes = append(row.ExplicitRoutes, wakeAcquireLockExplicitRoute(classID))
-			}
+		if explicitRoutes, ok := wakeCatalogReviewedExplicitRoutes[registrationPhysicalKey(row.BoundaryID, row.Matcher)]; ok {
+			row.ExplicitRoutes = cloneCatalogExplicitRoutes(explicitRoutes)
+		} else if len(spec.ExplicitRoutes) != 0 {
+			row.ExplicitRoutes = cloneCatalogExplicitRoutes(spec.ExplicitRoutes)
 		} else {
 			row.Classes = append([]catalogRouteClassID(nil), spec.Classes...)
 		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func cloneCatalogExplicitRoutes(routes []catalogExplicitRoute) []catalogExplicitRoute {
+	cloned := make([]catalogExplicitRoute, len(routes))
+	for index, route := range routes {
+		definition := cloneRoute(Route{
+			LogicalOwner: route.LogicalOwner,
+			Hops:         route.Hops,
+		})
+		cloned[index] = catalogExplicitRoute{
+			Class:        route.Class,
+			LogicalOwner: definition.LogicalOwner,
+			Hops:         definition.Hops,
+		}
+	}
+	return cloned
 }
 
 func wakeCatalogProfiles(set wakeCatalogProfileSet) []BuildProfileID {
@@ -204,4 +219,12 @@ func wakeAcquireLockExplicitRoute(classID catalogRouteClassID) catalogExplicitRo
 			},
 		},
 	}
+}
+
+func wakeAcquireLockExplicitRoutes(classIDs ...catalogRouteClassID) []catalogExplicitRoute {
+	routes := make([]catalogExplicitRoute, 0, len(classIDs))
+	for _, classID := range classIDs {
+		routes = append(routes, wakeAcquireLockExplicitRoute(classID))
+	}
+	return routes
 }

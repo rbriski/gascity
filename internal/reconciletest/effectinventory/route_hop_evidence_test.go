@@ -100,6 +100,57 @@ func TestValidateRouteHopEvidenceForProfileNormalizesOnlyDispatchSyntheticWrappe
 	}
 }
 
+func TestValidateRouteHopEvidenceForProfileScopesDispatchFailuresToCandidateCalls(t *testing.T) {
+	analysis := loadRouteHopFixture(t)
+	leaf := routeHopFixtureRef("", "Leaf", "routehops.go", nil)
+	workerA := routeHopFixtureRef("WorkerA", "Run", "routehops.go", nil)
+	unseededWorker := routeHopFixtureRef("UnseededWorker", "Run", "routehops.go", nil)
+	owner := routeHopFixtureRef("", "UnrelatedCycleOwner", "routehops.go", nil)
+	zeroCalleeOwner := routeHopFixtureRef("", "ZeroCalleeAndPositiveOwner", "routehops.go", nil)
+
+	t.Run("unrelated synthetic cycle does not poison exact edge", func(t *testing.T) {
+		registry := Registry{Registrations: []SiteRegistration{routeHopRegistration(leaf,
+			routeHopRoute(owner,
+				routeHop("UnrelatedCycleOwner", OperationCall, 1, HopDispatchExact, leaf)),
+		)}}
+		if err := validateRouteHopEvidenceForProfile(analysis, registry); err != nil {
+			t.Fatalf("unrelated dispatch failure poisoned exact route edge: %v", err)
+		}
+	})
+
+	t.Run("positive candidate evidence is not poisoned by alternate cycle", func(t *testing.T) {
+		registry := Registry{Registrations: []SiteRegistration{routeHopRegistration(workerA,
+			routeHopRoute(owner,
+				routeHop("UnrelatedCycleOwner", OperationCall, 1, HopDispatchVTA, workerA)),
+		)}}
+		if err := validateRouteHopEvidenceForProfile(analysis, registry); err != nil {
+			t.Fatalf("alternate dispatch failure poisoned positively proved route edge: %v", err)
+		}
+	})
+
+	t.Run("unresolved candidate synthetic cycle remains fail closed", func(t *testing.T) {
+		registry := Registry{Registrations: []SiteRegistration{routeHopRegistration(unseededWorker,
+			routeHopRoute(owner,
+				routeHop("UnrelatedCycleOwner", OperationCall, 1, HopDispatchVTA, unseededWorker)),
+		)}}
+		err := validateRouteHopEvidenceForProfile(analysis, registry)
+		if err == nil || !strings.Contains(err.Error(), "dispatch-only SSA cycle") {
+			t.Fatalf("candidate dispatch cycle error = %v, want fail-closed synthetic-cycle diagnostic", err)
+		}
+	})
+
+	t.Run("unresolved zero-callee candidate cannot hide beside positive call", func(t *testing.T) {
+		registry := Registry{Registrations: []SiteRegistration{routeHopRegistration(workerA,
+			routeHopRoute(zeroCalleeOwner,
+				routeHop("ZeroCalleeAndPositiveOwner", OperationCall, 1, HopDispatchExact, workerA)),
+		)}}
+		err := validateRouteHopEvidenceForProfile(analysis, registry)
+		if err == nil || !strings.Contains(err.Error(), "shape-compatible dynamic call has no closed-world callee evidence") {
+			t.Fatalf("zero-callee candidate error = %v, want fail-closed missing-callee diagnostic", err)
+		}
+	})
+}
+
 func TestValidateRouteHopEvidenceForProfileRejectsAdversarialClaims(t *testing.T) {
 	analysis := loadRouteHopFixture(t)
 	leaf := routeHopFixtureRef("", "Leaf", "routehops.go", nil)
@@ -210,6 +261,56 @@ func TestValidateRouteHopEvidenceForProfileRejectsAdversarialClaims(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+func TestValidateRouteHopEvidenceForProfileBindsParameterCallbackToPriorCallsite(t *testing.T) {
+	analysis := loadRouteHopFixture(t)
+	leaf := routeHopFixtureRef("", "Leaf", "routehops.go", nil)
+	invokeCallback := routeHopFixtureRef("", "InvokeCallback", "routehops.go", nil)
+
+	valid := Registry{Registrations: []SiteRegistration{routeHopRegistration(leaf,
+		routeHopRoute(routeHopFixtureRef("", "CallLeafThroughCallback", "routehops.go", nil),
+			routeHop("CallLeafThroughCallback", OperationCall, 1, HopDispatchExact, invokeCallback),
+			routeHop("InvokeCallback", OperationCall, 1, HopDispatchVTA, leaf)),
+	)}}
+	if err := validateRouteHopEvidenceForProfile(analysis, valid); err != nil {
+		t.Fatalf("matching callback callsite rejected: %v", err)
+	}
+	otherLeaf := routeHopFixtureRef("", "OtherLeaf", "routehops.go", nil)
+	otherValid := Registry{Registrations: []SiteRegistration{routeHopRegistration(otherLeaf,
+		routeHopRoute(routeHopFixtureRef("", "CallOtherLeafThroughCallback", "routehops.go", nil),
+			routeHop("CallOtherLeafThroughCallback", OperationCall, 1, HopDispatchExact, invokeCallback),
+			routeHop("InvokeCallback", OperationCall, 1, HopDispatchVTA, otherLeaf)),
+	)}}
+	if err := validateRouteHopEvidenceForProfile(analysis, otherValid); err != nil {
+		t.Fatalf("symmetric matching callback callsite rejected: %v", err)
+	}
+
+	invalid := Registry{Registrations: []SiteRegistration{routeHopRegistration(leaf,
+		routeHopRoute(routeHopFixtureRef("", "CallOtherLeafThroughCallback", "routehops.go", nil),
+			routeHop("CallOtherLeafThroughCallback", OperationCall, 1, HopDispatchExact, invokeCallback),
+			routeHop("InvokeCallback", OperationCall, 1, HopDispatchVTA, leaf)),
+	)}}
+	err := validateRouteHopEvidenceForProfile(analysis, invalid)
+	if err == nil || !strings.Contains(err.Error(), "InvokeCallback") || !strings.Contains(err.Error(), "has no call edge to callee") {
+		t.Fatalf("non-matching callback callsite error = %v, want callsite-bound rejection", err)
+	}
+}
+
+func TestValidateRouteHopEvidenceForProfileDoesNotConfuseInterfaceMethodWithBoundClosure(t *testing.T) {
+	analysis := loadRouteHopFixture(t)
+	owner := routeHopFixtureRef("", "CallClosureThroughCallbackBesideUnresolvedMethod", "routehops.go", nil)
+	bridge := routeHopFixtureRef("", "InvokeCallbackBesideUnresolvedMethod", "routehops.go", nil)
+	closure := routeHopFixtureRef("", "CallClosureThroughCallbackBesideUnresolvedMethod", "routehops.go", []int{1})
+	registry := Registry{Registrations: []SiteRegistration{routeHopRegistration(closure,
+		routeHopRoute(owner,
+			routeHop("CallClosureThroughCallbackBesideUnresolvedMethod", OperationCall, 1, HopDispatchExact, bridge),
+			routeHop("InvokeCallbackBesideUnresolvedMethod", OperationCall, 1, HopDispatchVTA, closure)),
+	)}}
+
+	if err := validateRouteHopEvidenceForProfile(analysis, registry); err != nil {
+		t.Fatalf("same-signature interface method contaminated bound closure evidence: %v", err)
 	}
 }
 

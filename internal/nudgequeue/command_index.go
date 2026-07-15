@@ -3,9 +3,11 @@ package nudgequeue
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/google/btree"
@@ -44,6 +46,7 @@ type CommandIndex struct {
 	barrierOrdered *btree.BTreeG[commandIndexOrderRef]
 	tombstones     map[string]CommandIndexTombstone
 	replays        map[uint64][sha256.Size]byte
+	coverage       *CommandIndexCompactedCoverage
 
 	revision               uint64
 	sequenceHighWater      uint64
@@ -90,6 +93,7 @@ type CommandIndexSnapshot struct {
 	Entries           []CommandIndexEntry
 	Tombstones        []CommandIndexTombstone
 	PartitionGaps     []CommandIndexPartitionGap
+	Coverage          *CommandIndexCompactedCoverage
 	Revision          uint64
 	SequenceHighWater uint64
 }
@@ -100,6 +104,27 @@ type CommandIndexSnapshot struct {
 // identity, target, content, or authorization data.
 type CommandIndexPartitionGap struct {
 	Sequence uint64
+}
+
+// CommandIndexCompactedCoverage is bounded evidence for exact terminal records
+// and tombstones intentionally omitted from a rebuild. Ranges contain only
+// sequences that are no longer active. Together with the exact Entries and
+// Tombstones and trusted PartitionGaps in a snapshot they must partition every
+// sequence from one through SequenceHighWater without a gap or overlap.
+type CommandIndexCompactedCoverage struct {
+	PublishedRevision uint64
+	Ranges            []CommandIndexSequenceRange
+	TerminalCount     uint64
+	TombstoneCount    uint64
+	FingerprintSHA256 string
+}
+
+// CommandIndexSequenceRange is one inclusive canonical interval of compacted
+// command sequences. Adjacent intervals are rejected because a canonical
+// checkpoint must merge them.
+type CommandIndexSequenceRange struct {
+	FirstSequence uint64
+	LastSequence  uint64
 }
 
 // CommandIndexTombstone is the durable deletion evidence retained by an audit
@@ -149,6 +174,7 @@ type commandIndexProjection struct {
 	barrierOrdered *btree.BTreeG[commandIndexOrderRef]
 	tombstones     map[string]CommandIndexTombstone
 	replays        map[uint64][sha256.Size]byte
+	coverage       *CommandIndexCompactedCoverage
 }
 
 // BuildCommandIndex independently rebuilds an index from the complete decoded
@@ -166,6 +192,7 @@ func BuildCommandIndex(snapshot CommandIndexSnapshot) (*CommandIndex, error) {
 		barrierOrdered:         projection.barrierOrdered,
 		tombstones:             projection.tombstones,
 		replays:                projection.replays,
+		coverage:               cloneCommandIndexCoverage(projection.coverage),
 		revision:               snapshot.Revision,
 		sequenceHighWater:      snapshot.SequenceHighWater,
 		completedAuditRevision: snapshot.Revision,
@@ -183,12 +210,20 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		barrierOrdered: btree.NewG(32, commandIndexOrderLess),
 		tombstones:     make(map[string]CommandIndexTombstone, len(snapshot.Tombstones)),
 		replays:        make(map[uint64][sha256.Size]byte, min(len(snapshot.Entries)+len(snapshot.Tombstones), MaxCommandIndexReplayHistory)),
+		coverage:       cloneCommandIndexCoverage(snapshot.Coverage),
+	}
+	coveredSequences, err := validateCommandIndexCoverage(snapshot.Coverage, snapshot.Revision, snapshot.SequenceHighWater)
+	if err != nil {
+		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %w", err)
 	}
 	sequenceOwner := make(map[uint64]string, len(snapshot.Entries)+len(snapshot.Tombstones)+len(snapshot.PartitionGaps))
 	var maxSequence uint64
 	for _, gap := range snapshot.PartitionGaps {
 		if gap.Sequence == 0 {
 			return commandIndexProjection{}, errors.New("building nudge command index: trusted partition gap sequence must be positive")
+		}
+		if commandIndexCoverageContainsSequence(snapshot.Coverage, gap.Sequence) {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: trusted partition gap sequence %d overlaps compacted coverage", gap.Sequence)
 		}
 		if owner, exists := sequenceOwner[gap.Sequence]; exists {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: sequence %d belongs to both %q and trusted partition gap", gap.Sequence, owner)
@@ -205,6 +240,9 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		}
 		if owner, exists := sequenceOwner[tombstone.Sequence]; exists {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: sequence %d belongs to both %q and %q", tombstone.Sequence, owner, tombstone.CommandID)
+		}
+		if commandIndexCoverageContainsSequence(snapshot.Coverage, tombstone.Sequence) {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: tombstone %q sequence %d overlaps compacted coverage", tombstone.CommandID, tombstone.Sequence)
 		}
 		sequenceOwner[tombstone.Sequence] = tombstone.CommandID
 		maxSequence = max(maxSequence, tombstone.Sequence)
@@ -232,6 +270,9 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 		if owner, exists := sequenceOwner[routing.Sequence]; exists {
 			return commandIndexProjection{}, fmt.Errorf("building nudge command index: sequence %d belongs to both %q and %q", routing.Sequence, owner, routing.CommandID)
 		}
+		if commandIndexCoverageContainsSequence(snapshot.Coverage, routing.Sequence) {
+			return commandIndexProjection{}, fmt.Errorf("building nudge command index: command %q sequence %d overlaps compacted coverage", routing.CommandID, routing.Sequence)
+		}
 		sequenceOwner[routing.Sequence] = routing.CommandID
 		maxSequence = max(maxSequence, routing.Sequence)
 		owned := cloneCommandIndexEntry(entry)
@@ -251,11 +292,86 @@ func buildCommandIndexProjection(snapshot CommandIndexSnapshot) (commandIndexPro
 	if maxSequence > snapshot.SequenceHighWater {
 		return commandIndexProjection{}, fmt.Errorf("building nudge command index: record sequence %d exceeds authoritative high-water %d", maxSequence, snapshot.SequenceHighWater)
 	}
-	if uint64(len(sequenceOwner)) != snapshot.SequenceHighWater {
-		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %d represented sequences do not densely cover high-water %d", len(sequenceOwner), snapshot.SequenceHighWater)
+	represented, overflow := addCommandIndexUint64(coveredSequences, uint64(len(sequenceOwner)))
+	if overflow || represented != snapshot.SequenceHighWater {
+		return commandIndexProjection{}, fmt.Errorf("building nudge command index: %d exact plus %d compacted sequences do not densely cover high-water %d", len(sequenceOwner), coveredSequences, snapshot.SequenceHighWater)
 	}
 	trimCommandIndexReplays(projection.replays, snapshot.Revision)
 	return projection, nil
+}
+
+func validateCommandIndexCoverage(coverage *CommandIndexCompactedCoverage, snapshotRevision, sequenceHighWater uint64) (uint64, error) {
+	if coverage == nil {
+		return 0, nil
+	}
+	if coverage.PublishedRevision == 0 || coverage.PublishedRevision > snapshotRevision {
+		return 0, fmt.Errorf("compacted coverage publication revision %d is outside snapshot revision %d", coverage.PublishedRevision, snapshotRevision)
+	}
+	digest, err := hex.DecodeString(coverage.FingerprintSHA256)
+	if err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != coverage.FingerprintSHA256 {
+		return 0, errors.New("compacted coverage fingerprint is not a canonical SHA-256 digest")
+	}
+	var covered uint64
+	var priorLast uint64
+	for i, sequenceRange := range coverage.Ranges {
+		if sequenceRange.FirstSequence == 0 || sequenceRange.LastSequence < sequenceRange.FirstSequence || sequenceRange.LastSequence > sequenceHighWater {
+			return 0, fmt.Errorf("compacted coverage range %d [%d,%d] is outside sequence high-water %d", i, sequenceRange.FirstSequence, sequenceRange.LastSequence, sequenceHighWater)
+		}
+		if i > 0 {
+			if sequenceRange.FirstSequence <= priorLast {
+				return 0, fmt.Errorf("compacted coverage range %d overlaps or is out of order", i)
+			}
+			if priorLast != ^uint64(0) && sequenceRange.FirstSequence == priorLast+1 {
+				return 0, fmt.Errorf("compacted coverage range %d is adjacent instead of canonically merged", i)
+			}
+		}
+		length := sequenceRange.LastSequence - sequenceRange.FirstSequence + 1
+		var overflow bool
+		covered, overflow = addCommandIndexUint64(covered, length)
+		if overflow {
+			return 0, errors.New("compacted coverage sequence count overflows uint64")
+		}
+		priorLast = sequenceRange.LastSequence
+	}
+	conserved, overflow := addCommandIndexUint64(coverage.TerminalCount, coverage.TombstoneCount)
+	if overflow || conserved != covered {
+		return 0, fmt.Errorf("compacted coverage conserves %d terminal plus %d tombstone records, want %d covered sequences", coverage.TerminalCount, coverage.TombstoneCount, covered)
+	}
+	return covered, nil
+}
+
+func addCommandIndexUint64(left, right uint64) (uint64, bool) {
+	result := left + right
+	return result, result < left
+}
+
+func commandIndexCoverageContainsSequence(coverage *CommandIndexCompactedCoverage, sequence uint64) bool {
+	if coverage == nil || sequence == 0 {
+		return false
+	}
+	position := sort.Search(len(coverage.Ranges), func(i int) bool {
+		return coverage.Ranges[i].LastSequence >= sequence
+	})
+	return position < len(coverage.Ranges) && coverage.Ranges[position].FirstSequence <= sequence
+}
+
+func commandIndexCoverageContainsRange(coverage *CommandIndexCompactedCoverage, sequenceRange CommandIndexSequenceRange) bool {
+	if coverage == nil || sequenceRange.FirstSequence == 0 || sequenceRange.LastSequence < sequenceRange.FirstSequence {
+		return false
+	}
+	position := sort.Search(len(coverage.Ranges), func(i int) bool {
+		return coverage.Ranges[i].LastSequence >= sequenceRange.FirstSequence
+	})
+	return position < len(coverage.Ranges) && coverage.Ranges[position].FirstSequence <= sequenceRange.FirstSequence && coverage.Ranges[position].LastSequence >= sequenceRange.LastSequence
+}
+
+func cloneCommandIndexCoverage(coverage *CommandIndexCompactedCoverage) *CommandIndexCompactedCoverage {
+	if coverage == nil {
+		return nil
+	}
+	owned := *coverage
+	owned.Ranges = append([]CommandIndexSequenceRange(nil), coverage.Ranges...)
+	return &owned
 }
 
 func validateCommandIndexTombstone(tombstone CommandIndexTombstone, store CommandStoreBinding, snapshotRevision uint64) error {
@@ -955,6 +1071,9 @@ func (idx *CommandIndex) CompleteAudit(expectedRevision uint64, snapshot Command
 	}
 	for commandID, currentTombstone := range idx.tombstones {
 		replacement, retained := projection.tombstones[commandID]
+		if !retained && commandIndexCoverageContainsSequence(projection.coverage, currentTombstone.Sequence) {
+			continue
+		}
 		if !retained {
 			return false, fmt.Errorf("completing nudge command index audit: snapshot dropped tombstone %q", commandID)
 		}
@@ -975,7 +1094,20 @@ func (idx *CommandIndex) CompleteAudit(expectedRevision uint64, snapshot Command
 			}
 			continue
 		}
+		if current.Command != nil && commandIsTerminalState(current.Command.State) && commandIndexCoverageContainsSequence(projection.coverage, current.Command.Order.Sequence) {
+			continue
+		}
 		return false, fmt.Errorf("completing nudge command index audit: command %q disappeared without a tombstone", commandID)
+	}
+	if idx.coverage != nil {
+		if projection.coverage == nil || projection.coverage.PublishedRevision < idx.coverage.PublishedRevision {
+			return false, errors.New("completing nudge command index audit: snapshot dropped or rewound compacted coverage")
+		}
+		for _, sequenceRange := range idx.coverage.Ranges {
+			if !commandIndexCoverageContainsRange(projection.coverage, sequenceRange) {
+				return false, fmt.Errorf("completing nudge command index audit: snapshot resurrected compacted range [%d,%d]", sequenceRange.FirstSequence, sequenceRange.LastSequence)
+			}
+		}
 	}
 
 	idx.entries = projection.entries
@@ -983,6 +1115,7 @@ func (idx *CommandIndex) CompleteAudit(expectedRevision uint64, snapshot Command
 	idx.barrierOrdered = projection.barrierOrdered
 	idx.tombstones = projection.tombstones
 	idx.replays = projection.replays
+	idx.coverage = cloneCommandIndexCoverage(projection.coverage)
 	idx.revision = snapshot.Revision
 	idx.sequenceHighWater = snapshot.SequenceHighWater
 	idx.completedAuditRevision = snapshot.Revision

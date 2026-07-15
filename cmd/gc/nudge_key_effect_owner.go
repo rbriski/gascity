@@ -116,9 +116,10 @@ func newNudgeKeyEffectOwner(config nudgeKeyEffectOwnerConfig) (*nudgeKeyEffectOw
 }
 
 // reconcile executes at most the first ordered pending command. Once a claim
-// commits, all remaining work uses a detached bounded context: cancellation of
-// the queue callback must not strand a provider result between native entry and
-// its durable marker-last completion.
+// commits, final validation/provider entry and marker-last persistence each get
+// their own detached bounded context. Cancellation of the queue callback, or a
+// provider consuming its entire deadline, must not erase the persistence budget
+// for terminal evidence.
 func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 	if o == nil {
 		return nudgeReconcileInvariant(errors.New("reconciling keyed nudge effect: owner is nil"))
@@ -219,20 +220,21 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		return nudgeReconcileInvariant(fmt.Errorf("claiming keyed nudge command: unknown disposition %q", claimResult.Disposition))
 	}
 
-	completionCtx, cancelCompletion := context.WithTimeout(context.WithoutCancel(ctx), o.completionTimeout)
-	defer cancelCompletion()
-	claimed, err := o.refreshClaimedCommand(completionCtx, command.ID, claimRequest)
+	providerCtx, cancelProvider := context.WithTimeout(context.WithoutCancel(ctx), o.completionTimeout)
+	defer cancelProvider()
+	claimed, err := o.refreshClaimedCommand(providerCtx, command.ID, claimRequest)
 	if err != nil {
 		return o.reader.sourceFailureOutcome(newNudgeCommandSourceFailure(o.source, err))
 	}
 
-	finalTarget, err := o.targets.Read(completionCtx, claimed.Target.SessionID)
+	finalTarget, err := o.targets.Read(providerCtx, claimed.Target.SessionID)
 	if err != nil {
 		return nudgeReconcileTransient(fmt.Errorf("reading keyed nudge target after claim: %w", err))
 	}
 	finalLaunch, err := selectNudgeEffectLaunch(claimed, finalTarget)
 	if errors.Is(err, errNudgeEffectTargetChanged) {
-		return o.completeAttempt(completionCtx, key, claimed, nudgeProviderCompletion{
+		cancelProvider()
+		return o.completeAttemptDetached(ctx, key, claimed, nudgeProviderCompletion{
 			terminal:      true,
 			actionResult:  nudgequeue.CommandActionResultSuperseded,
 			errorClass:    nudgequeue.CommandErrorClassSuperseded,
@@ -245,7 +247,8 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		return nudgeReconcileInvariant(fmt.Errorf("revalidating keyed nudge launch: %w", err))
 	}
 	if finalLaunch != claimRequest.boundLaunchIdentity {
-		return o.completeAttempt(completionCtx, key, claimed, nudgeProviderCompletion{
+		cancelProvider()
+		return o.completeAttemptDetached(ctx, key, claimed, nudgeProviderCompletion{
 			terminal:      true,
 			actionResult:  nudgequeue.CommandActionResultSuperseded,
 			errorClass:    nudgequeue.CommandErrorClassSuperseded,
@@ -259,7 +262,7 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 	if err != nil {
 		return nudgeReconcileTransient(fmt.Errorf("constructing keyed nudge worker handle: %w", err))
 	}
-	result, effectErr := handle.Nudge(completionCtx, worker.NudgeRequest{
+	result, effectErr := handle.Nudge(providerCtx, worker.NudgeRequest{
 		Text:     claimed.Message,
 		Delivery: worker.NudgeDeliveryImmediate,
 		Source:   string(claimed.Source),
@@ -276,7 +279,8 @@ func (o *nudgeKeyEffectOwner) reconcile(ctx context.Context, key reconcilekey.Se
 		// separate same-operation policy; lease expiry alone is never replay proof.
 		return nudgeReconcileSuccess()
 	}
-	return o.completeAttempt(completionCtx, key, claimed, completion)
+	cancelProvider()
+	return o.completeAttemptDetached(ctx, key, claimed, completion)
 }
 
 func (o *nudgeKeyEffectOwner) firstPending(key reconcilekey.Session) (nudgequeue.Command, bool, nudgeReconcileOutcome) {
@@ -368,6 +372,18 @@ func (o *nudgeKeyEffectOwner) completeAttempt(ctx context.Context, key reconcile
 		return nudgeReconcileInvariant(errors.New("refreshing keyed nudge completion: command disappeared"))
 	}
 	return o.nextAfterCompletion(key)
+}
+
+// completeAttemptDetached gives terminal marker-last persistence a fresh
+// bounded budget that is independent of both the queue callback and the
+// provider phase. It never invokes the provider or creates a new claim.
+func (o *nudgeKeyEffectOwner) completeAttemptDetached(parent context.Context, key reconcilekey.Session, command nudgequeue.Command, completion nudgeProviderCompletion) nudgeReconcileOutcome {
+	if parent == nil {
+		return nudgeReconcileInvariant(errors.New("completing keyed nudge attempt: parent context is nil"))
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), o.completionTimeout)
+	defer cancel()
+	return o.completeAttempt(ctx, key, command, completion)
 }
 
 func (o *nudgeKeyEffectOwner) nextAfterCompletion(key reconcilekey.Session) nudgeReconcileOutcome {

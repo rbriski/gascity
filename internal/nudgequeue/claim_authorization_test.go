@@ -59,12 +59,23 @@ func TestClaimAuthorizedRevocationDeniesDurablyBeforeProviderEntry(t *testing.T)
 	fixture := newAuthorizedClaimFixture(t)
 	fixture.authority.setClaimDisposition(NudgeAuthorizationDenied)
 	request := fixture.claimRequest("claim-denied", "owner-1", "attempt-denied", fixture.now.Add(time.Second))
+	beforeRow, err := fixture.store.Get(fixture.command.ID)
+	if err != nil {
+		t.Fatalf("Get command row before denial: %v", err)
+	}
 
 	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
 	assertAuthorizationDeniedCommand(t, result)
+	afterRow, err := fixture.store.Get(fixture.command.ID)
+	if err != nil {
+		t.Fatalf("Get command row after denial: %v", err)
+	}
+	if afterRow.Status != "closed" || !afterRow.UpdatedAt.After(beforeRow.UpdatedAt) {
+		t.Fatalf("denied command row = status %q updated_at %s, want closed and after %s", afterRow.Status, afterRow.UpdatedAt, beforeRow.UpdatedAt)
+	}
 	if calls := fixture.authority.claimCalls(); calls != 1 {
 		t.Fatalf("claim authorization calls = %d, want one", calls)
 	}
@@ -146,6 +157,10 @@ func TestClaimAuthorizedExpiredIngressDeniesAndExpiredCommandTerminalizes(t *tes
 	for _, scenario := range []string{"ingress expired", "command expired"} {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := newAuthorizedClaimFixture(t)
+			beforeRow, err := fixture.store.Get(fixture.command.ID)
+			if err != nil {
+				t.Fatalf("Get command row before expiry: %v", err)
+			}
 			claimAt := fixture.now.Add(2 * time.Second)
 			if scenario == "ingress expired" {
 				fixture.authority.expireReference(fixture.command.TrustedIngress.ReferenceID, fixture.now.Add(time.Second))
@@ -166,6 +181,13 @@ func TestClaimAuthorizedExpiredIngressDeniesAndExpiredCommandTerminalizes(t *tes
 			}
 			if scenario == "command expired" && result.Command.Terminal.ActionResult != CommandActionResultExpired {
 				t.Fatalf("command expiry result = %q, want expired", result.Command.Terminal.ActionResult)
+			}
+			afterRow, err := fixture.store.Get(fixture.command.ID)
+			if err != nil {
+				t.Fatalf("Get command row after expiry: %v", err)
+			}
+			if afterRow.Status != "closed" || !afterRow.UpdatedAt.After(beforeRow.UpdatedAt) {
+				t.Fatalf("expired command row = status %q updated_at %s, want closed and after %s", afterRow.Status, afterRow.UpdatedAt, beforeRow.UpdatedAt)
 			}
 		})
 	}

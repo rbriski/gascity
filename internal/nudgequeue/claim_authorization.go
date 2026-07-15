@@ -424,7 +424,14 @@ func writeCommandTransition(tx beads.AtomicReadWriteTx, state CommandRepositoryS
 	if err != nil {
 		return Command{}, err
 	}
-	if err := tx.Update(row.ID, beads.UpdateOpts{Metadata: map[string]string{commandRecordWireMetadataKey: string(wire)}}); err != nil {
+	status := "open"
+	if commandIsTerminalState(command.State) {
+		status = "closed"
+	}
+	if err := tx.Update(row.ID, beads.UpdateOpts{
+		Status:   &status,
+		Metadata: map[string]string{commandRecordWireMetadataKey: string(wire)},
+	}); err != nil {
 		return Command{}, fmt.Errorf("updating durable nudge command %q: %w", row.ID, err)
 	}
 	if err := setCommandRepositoryHighWaters(tx, command.Order.Revision, state.SequenceHighWater); err != nil {

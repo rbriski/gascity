@@ -1353,6 +1353,9 @@ func (tx *repositoryAtomicTestTx) Create(row beads.Bead) (beads.Bead, error) {
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = tx.now
 	}
+	if row.UpdatedAt.IsZero() {
+		row.UpdatedAt = row.CreatedAt
+	}
 	tx.rows[row.ID] = cloneRepositoryRow(row)
 	return cloneRepositoryRow(row), nil
 }
@@ -1377,6 +1380,7 @@ func (tx *repositoryAtomicTestTx) Update(id string, opts beads.UpdateOpts) error
 		}
 		row.Metadata[key] = value
 	}
+	row.UpdatedAt = tx.now
 	tx.rows[id] = cloneRepositoryRow(row)
 	return nil
 }

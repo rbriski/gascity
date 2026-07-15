@@ -797,9 +797,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 const nudgeKeyShadowProjectScopePrefix = "shadow-project/v1/"
 
 // installNudgeKeyShadow installs the sole production keyed-controller
-// construction. Its empty callback is structurally guarded: this phase proves
-// post-commit source-to-queue wiring only. It makes no latency or cutover claim;
-// the legacy dispatcher remains the only store/provider effect owner.
+// construction. Its scheduling-only callback is structurally guarded: this
+// phase measures admitted-key-to-callback delay without reading commands.
+// It makes no delivery or cutover claim; the legacy dispatcher remains the only
+// store/provider effect owner.
 //
 // Project identity is intentionally namespaced as an uncertified shadow scope.
 // It must be replaced by P0.15 store_uuid + restore_epoch capability evidence
@@ -819,7 +820,10 @@ func (cr *CityRuntime) installNudgeKeyShadow() error {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	controller, err := newNudgeKeyController(1, func(context.Context, reconcilekey.Session, nudgeReconcileBatch) {}, stderr)
+	warnings := newNudgeKeyObservationWarnings(stderr)
+	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) {
+		observeNudgeKeyScheduling(ctx, batch, time.Now(), warnings)
+	}, stderr)
 	if err != nil {
 		return err
 	}

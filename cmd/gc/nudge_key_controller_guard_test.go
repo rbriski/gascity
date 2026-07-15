@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -28,7 +29,7 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 	constructorLiterals := 0
 	constructorReferences := 0
 	allowedShadowReferences := 0
-	effectFreeShadowCallbacks := 0
+	schedulingOnlyShadowCallbacks := 0
 	constructorCallbackBindings := 0
 	fset := token.NewFileSet()
 	for _, entry := range entries {
@@ -113,12 +114,45 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 						t.Errorf("shadow constructor at %s has %d args, want fixed worker/callback/stderr contract", fset.Position(typed.Pos()), len(typed.Args))
 						break
 					}
-					callback, ok := typed.Args[1].(*ast.FuncLit)
-					if !ok || len(callback.Body.List) != 0 {
-						t.Errorf("shadow constructor callback at %s is not an empty function literal; effectful activation requires a later ownership gate", fset.Position(typed.Args[1].Pos()))
+					workers, ok := typed.Args[0].(*ast.BasicLit)
+					if !ok || workers.Kind != token.INT || workers.Value != "1" {
+						t.Errorf("shadow constructor worker count at %s is not the literal 1", fset.Position(typed.Args[0].Pos()))
 						break
 					}
-					effectFreeShadowCallbacks++
+					if selectorPath(typed.Args[2]) != "stderr" {
+						t.Errorf("shadow constructor warning sink at %s is not the normalized stderr", fset.Position(typed.Args[2].Pos()))
+						break
+					}
+					callback, ok := typed.Args[1].(*ast.FuncLit)
+					if !ok || len(callback.Type.Params.List) != 3 || len(callback.Body.List) != 1 {
+						t.Errorf("shadow constructor callback at %s is not the fixed scheduling-only function literal", fset.Position(typed.Args[1].Pos()))
+						break
+					}
+					keyParam := callback.Type.Params.List[1]
+					if len(keyParam.Names) != 1 || keyParam.Names[0].Name != "_" {
+						t.Errorf("shadow constructor callback at %s does not discard the stable key before observation", fset.Position(keyParam.Pos()))
+						break
+					}
+					statement, ok := callback.Body.List[0].(*ast.ExprStmt)
+					if !ok {
+						t.Errorf("shadow constructor callback at %s contains a non-call statement", fset.Position(callback.Body.List[0].Pos()))
+						break
+					}
+					observationCall, ok := statement.X.(*ast.CallExpr)
+					if !ok || selectorPath(observationCall.Fun) != "observeNudgeKeyScheduling" || len(observationCall.Args) != 4 {
+						t.Errorf("shadow constructor callback at %s is not the exact scheduling observer call", fset.Position(statement.Pos()))
+						break
+					}
+					if selectorPath(observationCall.Args[0]) != "ctx" || selectorPath(observationCall.Args[1]) != "batch" || selectorPath(observationCall.Args[3]) != "warnings" {
+						t.Errorf("shadow scheduling observer at %s receives unapproved arguments", fset.Position(observationCall.Pos()))
+						break
+					}
+					nowCall, ok := observationCall.Args[2].(*ast.CallExpr)
+					if !ok || selectorPath(nowCall.Fun) != "time.Now" || len(nowCall.Args) != 0 {
+						t.Errorf("shadow scheduling observer at %s does not receive the local current time", fset.Position(observationCall.Args[2].Pos()))
+						break
+					}
+					schedulingOnlyShadowCallbacks++
 				}
 				builtin, ok := typed.Fun.(*ast.Ident)
 				if !ok || builtin.Name != "new" || len(typed.Args) != 1 {
@@ -138,8 +172,8 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 	if constructorReferences != 1 || allowedShadowReferences != 1 {
 		t.Fatalf("production nudge keyed constructor references = %d (allowed shadow = %d), want exactly one reviewed shadow activation", constructorReferences, allowedShadowReferences)
 	}
-	if effectFreeShadowCallbacks != 1 {
-		t.Fatalf("effect-free production nudge shadow callbacks = %d, want exactly one empty callback", effectFreeShadowCallbacks)
+	if schedulingOnlyShadowCallbacks != 1 {
+		t.Fatalf("scheduling-only production nudge shadow callbacks = %d, want exactly one identity-free observer", schedulingOnlyShadowCallbacks)
 	}
 	if constructorCallbackBindings != 1 {
 		t.Fatalf("nudge keyed constructor callback field bindings = %d, want direct parameter binding", constructorCallbackBindings)
@@ -175,6 +209,200 @@ func TestNudgeKeyShadowMapperHasNoEffectfulCalls(t *testing.T) {
 		if got := gotCalls[name]; got != want {
 			t.Errorf("enqueueNudgeKeyShadow call count %s = %d, want %d", name, got, want)
 		}
+	}
+}
+
+func TestNudgeKeySchedulingObserverIsIdentityFreeAndEffectFree(t *testing.T) {
+	fset, file := parseGCTestSource(t, "nudge_key_observation.go")
+	wantImports := map[string]bool{
+		"context": true,
+		"io":      true,
+		"sync":    true,
+		"time":    true,
+		"github.com/gastownhall/gascity/internal/telemetry": true,
+	}
+	for _, imported := range file.Imports {
+		path := strings.Trim(imported.Path.Value, "\"")
+		if !wantImports[path] {
+			t.Errorf("nudge keyed scheduling observer imports unapproved capability %q at %s", path, fset.Position(imported.Pos()))
+		}
+		delete(wantImports, path)
+	}
+	for missing := range wantImports {
+		t.Errorf("nudge keyed scheduling observer allowlist is stale: expected import %q is absent", missing)
+	}
+
+	allowedCalls := map[string]bool{
+		"uint8":                              true,
+		"<func>":                             true,
+		"batch.FirstEnqueuedAt.IsZero":       true,
+		"now.Sub":                            true,
+		"newNudgeKeySchedulingObservation":   true,
+		"emitNudgeKeySchedulingObservation":  true,
+		"invokeNudgeKeySchedulingEmitter":    true,
+		"recover":                            true,
+		"warnings.warn":                      true,
+		"warnings.once.Do":                   true,
+		"writeNudgeKeyObservationWarning":    true,
+		"io.WriteString":                     true,
+		"emit":                               true,
+		"telemetry.RecordNudgeKeyScheduling": true,
+		"telemetry.NudgeKeySchedulingRecord": true,
+	}
+	assertASTCallsOnly(t, fset, file, "nudge keyed scheduling observer", allowedCalls)
+	assertASTHasNoCapabilityEscape(t, fset, file, "nudge keyed scheduling observer", map[string]bool{
+		"observation": true,
+		"delay":       true,
+		"delayState":  true,
+		"failed":      true,
+		"_":           true,
+	})
+
+	observe := findGCFunction(t, file, "observeNudgeKeyScheduling")
+	if got := len(observe.Type.Params.List); got != 4 {
+		t.Fatalf("observeNudgeKeyScheduling parameters = %d, want context, batch, time, and bounded warning state only", got)
+	}
+	for _, param := range observe.Type.Params.List {
+		if selectorPath(param.Type) == "reconcilekey.Session" {
+			t.Errorf("observeNudgeKeyScheduling accepts a stable key at %s; identity must be discarded by its caller", fset.Position(param.Pos()))
+		}
+	}
+}
+
+func TestNudgeKeySchedulingTelemetryRecorderIsTheSoleCapabilityBoundary(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
+	recorderPath := filepath.Join(repoRoot, "internal", "telemetry", "recorder_nudge_key.go")
+	fset := token.NewFileSet()
+	recorder, err := parser.ParseFile(fset, recorderPath, nil, 0)
+	if err != nil {
+		t.Fatalf("ParseFile(%q): %v", recorderPath, err)
+	}
+	wantImports := map[string]bool{
+		"context":                            true,
+		"errors":                             true,
+		"fmt":                                true,
+		"sync":                               true,
+		"sync/atomic":                        true,
+		"time":                               true,
+		"go.opentelemetry.io/otel":           true,
+		"go.opentelemetry.io/otel/attribute": true,
+		"go.opentelemetry.io/otel/metric":    true,
+	}
+	for _, imported := range recorder.Imports {
+		path := strings.Trim(imported.Path.Value, "\"")
+		if !wantImports[path] {
+			t.Errorf("nudge scheduling telemetry recorder imports unapproved capability %q at %s", path, fset.Position(imported.Pos()))
+		}
+		delete(wantImports, path)
+	}
+	for missing := range wantImports {
+		t.Errorf("nudge scheduling telemetry recorder allowlist is stale: expected import %q is absent", missing)
+	}
+	assertASTCallsOnly(t, fset, recorder, "nudge scheduling telemetry recorder", map[string]bool{
+		"loadNudgeKeySchedulingInstruments":               true,
+		"int64":                                           true,
+		"attribute.Int64":                                 true,
+		"attribute.Bool":                                  true,
+		"attribute.String":                                true,
+		"nudgeKeyQueueDelayStateLabel":                    true,
+		"metric.WithAttributes":                           true,
+		"snapshot.instruments.total.Add":                  true,
+		"snapshot.instruments.queueDelay.Record":          true,
+		"float64":                                         true,
+		"nudgeKeySchedulingInstrumentState.current.Load":  true,
+		"nudgeKeySchedulingInstrumentState.mu.Lock":       true,
+		"nudgeKeySchedulingInstrumentState.mu.Unlock":     true,
+		"otel.GetMeterProvider":                           true,
+		"Meter":                                           true,
+		"meter.Int64Counter":                              true,
+		"meter.Float64Histogram":                          true,
+		"metric.WithDescription":                          true,
+		"metric.WithUnit":                                 true,
+		"errors.Join":                                     true,
+		"wrapNudgeKeySchedulingInstrumentError":           true,
+		"nudgeKeySchedulingInstrumentState.current.Store": true,
+		"fmt.Errorf":                                      true,
+	})
+
+	type caller struct {
+		path  string
+		owner string
+	}
+	var callers []caller
+	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" || info.Name() == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fileSet := token.NewFileSet()
+		file, parseErr := parser.ParseFile(fileSet, path, nil, 0)
+		if parseErr != nil {
+			return parseErr
+		}
+		aliases := make(map[string]bool)
+		for _, imported := range file.Imports {
+			if strings.Trim(imported.Path.Value, "\"") != "github.com/gastownhall/gascity/internal/telemetry" {
+				continue
+			}
+			alias := "telemetry"
+			if imported.Name != nil {
+				alias = imported.Name.Name
+			}
+			if alias == "." {
+				return fmt.Errorf("production file %s dot-imports internal/telemetry", path)
+			}
+			aliases[alias] = true
+		}
+		var functions []*ast.FuncDecl
+		for _, declaration := range file.Decls {
+			if fn, ok := declaration.(*ast.FuncDecl); ok {
+				functions = append(functions, fn)
+			}
+		}
+		ownerAt := func(pos token.Pos) string {
+			for _, fn := range functions {
+				if pos >= fn.Pos() && pos <= fn.End() {
+					return fn.Name.Name
+				}
+			}
+			return ""
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "RecordNudgeKeyScheduling" {
+				return true
+			}
+			base, ok := selector.X.(*ast.Ident)
+			if !ok || !aliases[base.Name] {
+				return true
+			}
+			relative, relErr := filepath.Rel(repoRoot, path)
+			if relErr != nil {
+				t.Errorf("Rel(%q): %v", path, relErr)
+				return true
+			}
+			callers = append(callers, caller{path: filepath.ToSlash(relative), owner: ownerAt(selector.Pos())})
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking production callers: %v", err)
+	}
+	if len(callers) != 1 || callers[0].path != "cmd/gc/nudge_key_observation.go" || callers[0].owner != "recordNudgeKeySchedulingObservation" {
+		t.Fatalf("production RecordNudgeKeyScheduling callers = %+v, want only cmd/gc/nudge_key_observation.go:recordNudgeKeySchedulingObservation", callers)
 	}
 }
 

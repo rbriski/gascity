@@ -506,7 +506,7 @@ else
   codex_credentials_source=""
 fi
 
-timeout --kill-after=5s 30s claude auth status >/dev/null 2>&1 ||
+timeout --kill-after=5s 2m claude auth status >/dev/null 2>&1 ||
   die "Claude authentication preflight failed"
 codex_preflight_message="$root/codex-auth-preflight.txt"
 codex_preflight_stderr="$root/codex-auth-preflight.stderr"

@@ -252,6 +252,10 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
+	if req.Effect != nil {
+		result, err = h.nudgeEffect(ctx, req.Text, *req.Effect)
+		return result, err
+	}
 	if !h.provider.IsRunning(h.sessionName) {
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			result = NudgeResult{Delivered: false}
@@ -281,6 +285,38 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		err = fmt.Errorf("unsupported nudge delivery %q", req.Delivery)
 		return NudgeResult{}, err
 	}
+}
+
+func (h *RuntimeHandle) nudgeEffect(ctx context.Context, text string, contract runtime.NudgeEffectContract) (NudgeResult, error) {
+	definitePreEntry := runtime.NudgeEffectResult{
+		Stage:      runtime.NudgeEffectStageNotEntered,
+		Completion: runtime.NudgeEffectCompletionNotCompleted,
+	}
+	if ctx == nil {
+		return NudgeResult{Effect: &definitePreEntry}, fmt.Errorf("%w: context is nil", runtime.ErrNudgeEffectInvalid)
+	}
+	if err := contract.Validate(); err != nil {
+		return NudgeResult{Effect: &definitePreEntry}, err
+	}
+	provider, ok := h.provider.(runtime.NudgeEffectProvider)
+	if !ok {
+		return NudgeResult{Effect: &definitePreEntry}, runtime.ErrNudgeEffectUnsupported
+	}
+	effect, effectErr := provider.NudgeEffect(ctx, h.sessionName, runtime.NudgeEffectRequest{
+		Contract: contract,
+		Content:  runtime.TextContent(text),
+	})
+	if validationErr := effect.Validate(effectErr); validationErr != nil {
+		ambiguous := runtime.NudgeEffectResult{
+			Stage:      runtime.NudgeEffectStageMayHaveEntered,
+			Completion: runtime.NudgeEffectCompletionUnknown,
+		}
+		return NudgeResult{Effect: &ambiguous}, errors.Join(runtime.ErrNudgeDeliveryUnknown, validationErr, effectErr)
+	}
+	return NudgeResult{
+		Delivered: effect.Stage == runtime.NudgeEffectStageAccepted && effect.Completion == runtime.NudgeEffectCompletionCompleted,
+		Effect:    &effect,
+	}, effectErr
 }
 
 // Transcript reports unavailable because runtime-only handles have no transcript adapter.

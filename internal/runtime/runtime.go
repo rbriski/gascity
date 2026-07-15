@@ -32,6 +32,32 @@ var ErrSessionInitializing = errors.New("session is initializing")
 // structured pending/respond interaction capability for the requested session.
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
+// ErrNudgeEffectUnsupported reports that a provider cannot return the staged
+// effect evidence required by a durable nudge owner. Callers must not fall back
+// to the legacy best-effort Nudge method after receiving this error.
+var ErrNudgeEffectUnsupported = errors.New("classified nudge effect is unsupported")
+
+// ErrNudgeEffectInvalid reports an invalid effect contract or an internally
+// inconsistent staged result. A result returned after provider admission must
+// be treated conservatively as delivery-unknown.
+var ErrNudgeEffectInvalid = errors.New("classified nudge effect is invalid")
+
+// ErrNudgeTargetChanged reports that the requested immutable launch is no
+// longer the provider's live target.
+var ErrNudgeTargetChanged = errors.New("nudge target launch changed")
+
+// ErrNudgeHumanAttached reports that safe raw input was refused because a
+// human client is attached to the target.
+var ErrNudgeHumanAttached = errors.New("nudge target has an attached human client")
+
+// ErrNudgeCopyMode reports that safe raw input was refused because the target
+// pane is in an interactive copy mode.
+var ErrNudgeCopyMode = errors.New("nudge target is in copy mode")
+
+// ErrNudgeDeliveryUnknown reports that provider entry may have occurred but
+// completion cannot be proved. Non-deduplicating callers must not retry.
+var ErrNudgeDeliveryUnknown = errors.New("nudge delivery is unknown")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
@@ -306,6 +332,115 @@ type TransportCapabilityProvider interface {
 // input immediately without performing their own wait-idle heuristic first.
 type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
+}
+
+// NudgeInteractionPolicy controls the provider-side interaction precondition
+// for one durable nudge attempt.
+type NudgeInteractionPolicy string
+
+const (
+	// NudgeInteractionRequireUnattachedNormal requires the provider to refuse
+	// native input unless the exact target is both unattached and outside copy
+	// mode at its provider entry boundary.
+	NudgeInteractionRequireUnattachedNormal NudgeInteractionPolicy = "require_unattached_normal"
+)
+
+// NudgeEffectStage records the strongest provider-entry fact established by a
+// classified nudge attempt.
+type NudgeEffectStage string
+
+const (
+	// NudgeEffectStageNotEntered proves no native provider input was attempted.
+	NudgeEffectStageNotEntered NudgeEffectStage = "not_entered"
+	// NudgeEffectStageAccepted proves that the provider transport accepted the
+	// input attempt.
+	NudgeEffectStageAccepted NudgeEffectStage = "accepted"
+	// NudgeEffectStageMayHaveEntered records irreducible provider-entry
+	// ambiguity.
+	NudgeEffectStageMayHaveEntered NudgeEffectStage = "may_have_entered"
+	// NudgeEffectStageRejected records a definite provider refusal.
+	NudgeEffectStageRejected NudgeEffectStage = "rejected"
+)
+
+// NudgeEffectCompletion records whether transport completion is known.
+type NudgeEffectCompletion string
+
+const (
+	// NudgeEffectCompletionNotCompleted proves successful transport completion
+	// did not occur.
+	NudgeEffectCompletionNotCompleted NudgeEffectCompletion = "not_completed"
+	// NudgeEffectCompletionCompleted records successful transport completion.
+	NudgeEffectCompletionCompleted NudgeEffectCompletion = "completed"
+	// NudgeEffectCompletionUnknown records an outcome that is unsafe to replay
+	// through a non-deduplicating provider.
+	NudgeEffectCompletionUnknown NudgeEffectCompletion = "unknown"
+)
+
+// NudgeEffectContract is the immutable correlation and safety precondition for
+// one durable provider attempt. It contains no message content or authority.
+type NudgeEffectContract struct {
+	OperationID            string                 `json:"operation_id"`
+	ExpectedLaunchIdentity string                 `json:"expected_launch_identity"`
+	InteractionPolicy      NudgeInteractionPolicy `json:"interaction_policy"`
+}
+
+// Validate rejects incomplete or unsupported classified-effect contracts
+// before a provider is entered.
+func (c NudgeEffectContract) Validate() error {
+	if strings.TrimSpace(c.OperationID) == "" || c.OperationID != strings.TrimSpace(c.OperationID) {
+		return fmt.Errorf("%w: operation id is required and canonical", ErrNudgeEffectInvalid)
+	}
+	if strings.TrimSpace(c.ExpectedLaunchIdentity) == "" || c.ExpectedLaunchIdentity != strings.TrimSpace(c.ExpectedLaunchIdentity) {
+		return fmt.Errorf("%w: expected launch identity is required and canonical", ErrNudgeEffectInvalid)
+	}
+	if c.InteractionPolicy != NudgeInteractionRequireUnattachedNormal {
+		return fmt.Errorf("%w: unsupported interaction policy %q", ErrNudgeEffectInvalid, c.InteractionPolicy)
+	}
+	return nil
+}
+
+// NudgeEffectRequest is the complete classified provider request. Contract
+// validation and provider-side target/interaction checks precede native input.
+type NudgeEffectRequest struct {
+	Contract NudgeEffectContract
+	Content  []ContentBlock
+}
+
+// NudgeEffectResult is the total provider outcome used by the durable command
+// owner to distinguish safe retry from terminal ambiguity.
+type NudgeEffectResult struct {
+	Stage                NudgeEffectStage      `json:"stage"`
+	Completion           NudgeEffectCompletion `json:"completion"`
+	ConsumptionConfirmed bool                  `json:"consumption_confirmed"`
+}
+
+// Validate checks that stage, completion, confirmation, and error agree. It
+// does not infer a stronger result from diagnostic error text.
+func (r NudgeEffectResult) Validate(effectErr error) error {
+	switch r.Stage {
+	case NudgeEffectStageNotEntered, NudgeEffectStageRejected:
+		if r.Completion != NudgeEffectCompletionNotCompleted || r.ConsumptionConfirmed || effectErr == nil {
+			return fmt.Errorf("%w: stage %q requires not-completed, unconfirmed error result", ErrNudgeEffectInvalid, r.Stage)
+		}
+	case NudgeEffectStageAccepted:
+		if r.Completion != NudgeEffectCompletionCompleted || effectErr != nil {
+			return fmt.Errorf("%w: accepted stage requires completed success", ErrNudgeEffectInvalid)
+		}
+	case NudgeEffectStageMayHaveEntered:
+		if r.Completion != NudgeEffectCompletionUnknown || r.ConsumptionConfirmed || effectErr == nil {
+			return fmt.Errorf("%w: ambiguous stage requires unknown, unconfirmed error result", ErrNudgeEffectInvalid)
+		}
+	default:
+		return fmt.Errorf("%w: unknown stage %q", ErrNudgeEffectInvalid, r.Stage)
+	}
+	return nil
+}
+
+// NudgeEffectProvider is the provider extension used by durable nudge owners.
+// Implementations atomically validate the exact launch and interaction policy
+// at their native entry boundary and return staged evidence for every outcome.
+type NudgeEffectProvider interface {
+	NudgeEffect(context.Context, string, NudgeEffectRequest) (NudgeEffectResult, error)
 }
 
 // InterruptedTurnResetProvider is an optional extension for runtimes that can

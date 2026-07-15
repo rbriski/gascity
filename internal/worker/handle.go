@@ -172,15 +172,17 @@ const (
 
 // NudgeRequest delivers a best-effort wake or redirect message.
 type NudgeRequest struct {
-	Text     string          `json:"text"`
-	Delivery NudgeDelivery   `json:"delivery,omitempty"`
-	Source   string          `json:"source,omitempty"`
-	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	Text     string                       `json:"text"`
+	Delivery NudgeDelivery                `json:"delivery,omitempty"`
+	Source   string                       `json:"source,omitempty"`
+	Wake     NudgeWakePolicy              `json:"wake,omitempty"`
+	Effect   *runtime.NudgeEffectContract `json:"effect,omitempty"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
 type NudgeResult struct {
-	Delivered bool `json:"delivered"`
+	Delivered bool                       `json:"delivered"`
+	Effect    *runtime.NudgeEffectResult `json:"effect,omitempty"`
 }
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.

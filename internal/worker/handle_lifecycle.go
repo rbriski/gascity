@@ -310,6 +310,14 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
+	if req.Effect != nil {
+		definitePreEntry := runtime.NudgeEffectResult{
+			Stage:      runtime.NudgeEffectStageNotEntered,
+			Completion: runtime.NudgeEffectCompletionNotCompleted,
+		}
+		err = runtime.ErrNudgeEffectUnsupported
+		return NudgeResult{Effect: &definitePreEntry}, err
+	}
 	id, err := h.ensureSessionID()
 	if err != nil {
 		return NudgeResult{}, err

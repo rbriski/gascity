@@ -23,6 +23,9 @@ type Fake struct {
 	Zombies                 map[string]bool              // sessions with dead agent processes
 	Attached                map[string]bool              // sessions with attached terminals
 	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
+	CopyMode                map[string]bool              // sessions with panes parked in copy mode
+	NudgeEffectResults      map[string]NudgeEffectResult // classified provider result by session
+	NudgeEffectErrors       map[string]error             // classified provider error by session
 	PeekOutput              map[string]string            // session → canned peek output
 	Activity                map[string]time.Time         // session → last activity time
 	StartErrors             map[string]error             // per-session Start errors for testing
@@ -58,21 +61,23 @@ type Fake struct {
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ NudgeEffectProvider = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method    string         // method name (e.g. "Start", "Stop", "SetMeta")
-	Name      string         // session name argument
-	Config    Config         // only set for Start calls
-	Message   string         // only set for Nudge/SendKeys calls (flattened text)
-	Content   []ContentBlock // only set for Nudge calls (structured content)
-	Key       string         // only set for meta calls
-	Value     string         // only set for SetMeta calls
-	Src       string         // only set for CopyTo calls
-	Dst       string         // only set for CopyTo calls
-	RequestID string         // only set for Respond calls
-	Action    string         // only set for Respond calls
+	Method      string         // method name (e.g. "Start", "Stop", "SetMeta")
+	Name        string         // session name argument
+	Config      Config         // only set for Start calls
+	Message     string         // only set for Nudge/SendKeys calls (flattened text)
+	Content     []ContentBlock // only set for Nudge calls (structured content)
+	Key         string         // only set for meta calls
+	Value       string         // only set for SetMeta calls
+	Src         string         // only set for CopyTo calls
+	Dst         string         // only set for CopyTo calls
+	RequestID   string         // only set for Respond calls
+	Action      string         // only set for Respond calls
+	OperationID string         // only set for classified effect calls
 }
 
 // FakeExecResult configures one [Fake.Exec] outcome.
@@ -116,6 +121,9 @@ func NewFake() *Fake {
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
 		AttachedSequence:        make(map[string][]bool),
+		CopyMode:                make(map[string]bool),
+		NudgeEffectResults:      make(map[string]NudgeEffectResult),
+		NudgeEffectErrors:       make(map[string]error),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
 		StopLeavesRunning:       make(map[string]bool),
@@ -144,6 +152,9 @@ func NewFailFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		CopyMode:                make(map[string]bool),
+		NudgeEffectResults:      make(map[string]NudgeEffectResult),
+		NudgeEffectErrors:       make(map[string]error),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
 		StopLeavesRunning:       make(map[string]bool),
@@ -316,6 +327,16 @@ func (f *Fake) SetAttachedSequence(name string, values ...bool) {
 	f.AttachedSequence[name] = append([]bool(nil), values...)
 }
 
+// SetCopyMode sets whether the named fake session is parked in copy mode.
+func (f *Fake) SetCopyMode(name string, value bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.CopyMode == nil {
+		f.CopyMode = make(map[string]bool)
+	}
+	f.CopyMode[name] = value
+}
+
 // IsAttached reports whether the fake session has an attached terminal.
 // When broken, always returns false.
 func (f *Fake) IsAttached(name string) bool {
@@ -402,6 +423,74 @@ func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 		return fmt.Errorf("session unavailable")
 	}
 	return nil
+}
+
+// NudgeEffect performs one atomically guarded classified nudge attempt. Guard
+// failures are returned before a native-entry call is recorded.
+func (f *Fake) NudgeEffect(ctx context.Context, name string, request NudgeEffectRequest) (NudgeEffectResult, error) {
+	if ctx == nil {
+		return nudgeEffectNotEntered(), fmt.Errorf("%w: context is nil", ErrNudgeEffectInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return nudgeEffectNotEntered(), err
+	}
+	if err := request.Contract.Validate(); err != nil {
+		return nudgeEffectNotEntered(), err
+	}
+	if FlattenText(request.Content) == "" {
+		return nudgeEffectNotEntered(), fmt.Errorf("%w: content is empty", ErrNudgeEffectInvalid)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nudgeEffectNotEntered(), err
+	}
+	if f.broken {
+		return nudgeEffectNotEntered(), fmt.Errorf("session unavailable")
+	}
+	if _, exists := f.sessions[name]; !exists {
+		return nudgeEffectNotEntered(), fmt.Errorf("%w: %q", ErrSessionNotFound, name)
+	}
+	liveLaunch := ""
+	if f.meta[name] != nil {
+		liveLaunch = strings.TrimSpace(f.meta[name]["GC_INSTANCE_TOKEN"])
+	}
+	if liveLaunch == "" || liveLaunch != request.Contract.ExpectedLaunchIdentity {
+		return nudgeEffectNotEntered(), ErrNudgeTargetChanged
+	}
+	if request.Contract.InteractionPolicy == NudgeInteractionRequireUnattachedNormal {
+		if f.Attached[name] {
+			return nudgeEffectNotEntered(), ErrNudgeHumanAttached
+		}
+		if f.CopyMode[name] {
+			return nudgeEffectNotEntered(), ErrNudgeCopyMode
+		}
+	}
+
+	f.Calls = append(f.Calls, Call{
+		Method:      "NudgeEffect",
+		Name:        name,
+		Message:     FlattenText(request.Content),
+		Content:     append([]ContentBlock(nil), request.Content...),
+		OperationID: request.Contract.OperationID,
+	})
+	result, configured := f.NudgeEffectResults[name]
+	if !configured {
+		result = NudgeEffectResult{
+			Stage:                NudgeEffectStageAccepted,
+			Completion:           NudgeEffectCompletionCompleted,
+			ConsumptionConfirmed: true,
+		}
+	}
+	return result, f.NudgeEffectErrors[name]
+}
+
+func nudgeEffectNotEntered() NudgeEffectResult {
+	return NudgeEffectResult{
+		Stage:      NudgeEffectStageNotEntered,
+		Completion: NudgeEffectCompletionNotCompleted,
+	}
 }
 
 // SetPendingInteraction configures a structured pending interaction for the

@@ -46,6 +46,15 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		f.formulaV2 = resolved[bool]{value: value, origin: OriginConfig}
 	}
 
+	// daemon.nudge_effect_owner — boot-only Mode gate, no env override.
+	if raw, defined := readDaemonNudgeEffectOwner(cfg); defined {
+		mode, err := ParseMode(raw)
+		if err != nil {
+			return Flags{}, fmt.Errorf("rollout: config %s: %w", keyDaemonNudgeEffectOwner, err)
+		}
+		f.nudgeEffectOwner = resolved[Mode]{value: mode, origin: OriginConfig}
+	}
+
 	return f, nil
 }
 

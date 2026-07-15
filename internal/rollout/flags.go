@@ -13,14 +13,16 @@ type resolved[T any] struct {
 // at it from package-level state.
 //
 // The zero value is DEGRADED-SAFE, not the builtin defaults: a never-Resolved
-// Flags reads each gate's Go zero — BeadsConditionalWrites() returns ModeUnset
-// (which ResolveCapability maps to the legacy path with a visible diagnostic),
-// and FormulaV2() returns false (the legacy v1 path, NOT the builtin default
-// true). So an unwired Flags runs legacy paths; OriginOf returns "" for a gate a
-// zero Flags never resolved. Build defaults with ForTest or Resolve, never Flags{}.
+// Flags reads each gate's Go zero — BeadsConditionalWrites() and
+// NudgeEffectOwner() return ModeUnset (which ResolveCapability maps to legacy
+// with a visible diagnostic), while FormulaV2() returns false (the legacy v1
+// path, NOT the builtin default true). So an unwired Flags runs legacy paths;
+// OriginOf returns "" for a gate a zero Flags never resolved. Build defaults
+// with ForTest or Resolve, never Flags{}.
 type Flags struct {
 	beadsConditionalWrites resolved[Mode]
 	formulaV2              resolved[bool]
+	nudgeEffectOwner       resolved[Mode]
 	notices                []Notice
 }
 
@@ -33,6 +35,8 @@ func (f Flags) OriginOf(key string) Origin {
 		return f.beadsConditionalWrites.origin
 	case keyDaemonFormulaV2:
 		return f.formulaV2.origin
+	case keyDaemonNudgeEffectOwner:
+		return f.nudgeEffectOwner.origin
 	default:
 		return ""
 	}
@@ -47,6 +51,8 @@ func (f Flags) ValueOf(key string) string {
 		return string(f.beadsConditionalWrites.value)
 	case keyDaemonFormulaV2:
 		return strconv.FormatBool(f.formulaV2.value)
+	case keyDaemonNudgeEffectOwner:
+		return string(f.nudgeEffectOwner.value)
 	default:
 		return ""
 	}

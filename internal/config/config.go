@@ -1389,6 +1389,12 @@ type BeadsConfig struct {
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
 	// defaults to "off". Any other value fails config load.
 	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// CommandSecurityProfile selects the explicit trust boundary for durable
+	// control commands. Empty means no profile is selected and can never enable
+	// a keyed effect owner. store_writer_is_controller is the local,
+	// single-tenant compatibility profile; hosted requires independently
+	// protected command credentials and namespaces.
+	CommandSecurityProfile string `toml:"command_security_profile,omitempty" jsonschema:"enum=hosted,enum=store_writer_is_controller"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -2470,6 +2476,11 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
+	// NudgeEffectOwner cold-selects the durable nudge provider-effect owner:
+	// "off" (legacy, byte-identical), "auto" (keyed only when every startup
+	// dependency is proven; otherwise loud legacy retention), or "require"
+	// (keyed or startup refusal). Empty defaults to "off".
+	NudgeEffectOwner string `toml:"nudge_effect_owner,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
 	// pack snapshot has drifted from on-disk state. Nil (unset) defaults
@@ -2616,6 +2627,17 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 	default:
 		return "legacy"
 	}
+}
+
+// NudgeEffectOwnerMode returns the configured cold ownership mode, mapping
+// only omission to the inert "off" default. Unknown non-empty values are
+// returned verbatim so validation/resolution can reject them rather than
+// silently downgrade an operator's intended safety requirement.
+func (d DaemonConfig) NudgeEffectOwnerMode() string {
+	if d.NudgeEffectOwner == "" {
+		return "off"
+	}
+	return d.NudgeEffectOwner
 }
 
 // ShutdownTimeoutDuration returns the shutdown timeout as a time.Duration.
@@ -4399,6 +4421,12 @@ func Parse(data []byte) (*City, error) {
 	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
 		return nil, err
 	}
+	if err := validateCommandSecurityProfile(cfg.Beads.CommandSecurityProfile); err != nil {
+		return nil, err
+	}
+	if err := validateNudgeEffectOwner(cfg.Daemon.NudgeEffectOwner); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -4413,6 +4441,25 @@ func validateConditionalWrites(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
+}
+
+func validateCommandSecurityProfile(raw string) error {
+	switch raw {
+	case "", "hosted", "store_writer_is_controller":
+		return nil
+	default:
+		return fmt.Errorf("beads.command_security_profile: invalid profile %q: want one of hosted, store_writer_is_controller", raw)
+	}
+}
+
+func validateNudgeEffectOwner(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("daemon.nudge_effect_owner: %w", err)
 	}
 	return nil
 }

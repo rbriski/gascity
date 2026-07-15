@@ -79,8 +79,9 @@ var pinnedRenderFiles = []string{"prompt.go", "template_resolve.go", "cmd_prime.
 // flagValuePin names an accessor the derivation MUST rediscover per gate, so a
 // config-side rename fails loudly instead of silently shrinking the guard.
 var flagValuePins = map[string]string{
-	"beads.conditional_writes": "NormalizedConditionalWrites",
-	"daemon.formula_v2":        "FormulaV2Enabled",
+	"beads.conditional_writes":  "NormalizedConditionalWrites",
+	"daemon.formula_v2":         "FormulaV2Enabled",
+	"daemon.nudge_effect_owner": "NudgeEffectOwnerMode",
 }
 
 // TestPromptRenderFilesGateRolloutFlags is the guarantee: no cmd/gc render file

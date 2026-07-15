@@ -2,12 +2,15 @@ package beads
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"maps"
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +22,8 @@ func TestNativeDoltAtomicReadWritePreservesExplicitCommandIDOutsideProjectPrefix
 	t.Parallel()
 
 	storage := newAtomicNativeDoltStorageForTest()
-	store := newNativeDoltStoreWithStorageAndPrefix(storage, "atomic-test", "project-prefix")
+	store := newNativeDoltStoreForTest(storage)
+	store.idPrefix = normalizeIDPrefix("project-prefix")
 	capability, ok := AtomicReadWriteFor(store)
 	if !ok {
 		t.Fatal("AtomicReadWriteFor(NativeDoltStore) = false, want true")
@@ -49,7 +53,92 @@ func TestNativeDoltAtomicReadWritePreservesExplicitCommandIDOutsideProjectPrefix
 	}
 }
 
-func TestNativeDoltAtomicReadWriteConcurrentDifferentCommandsAllocateDenseMetadata(t *testing.T) {
+func TestNativeDoltAtomicReadWriteFailsClosedWithoutServerSerialization(t *testing.T) {
+	t.Parallel()
+
+	store := newNativeDoltStoreWithStorage(newAtomicNativeDoltStorageForTest(), "production-shape")
+	called := false
+	err := store.AtomicReadWrite(t.Context(), "must serialize", func(AtomicReadWriteTx) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrAtomicReadWriteSerialization) {
+		t.Fatalf("AtomicReadWrite error = %v, want ErrAtomicReadWriteSerialization", err)
+	}
+	if called {
+		t.Fatal("AtomicReadWrite called callback without cross-process serialization")
+	}
+}
+
+func TestNativeDoltAtomicReadWriteFailsClosedWithSingleConnectionPool(t *testing.T) {
+	t.Parallel()
+
+	connected := false
+	db := sql.OpenDB(atomicReadWriteConnectorForTest{connected: &connected})
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("closing test database: %v", err)
+		}
+	})
+	storage := &atomicNativeDoltRawStorageForTest{
+		atomicNativeDoltStorageForTest: newAtomicNativeDoltStorageForTest(),
+		db:                             db,
+	}
+	store := newNativeDoltStoreWithStorage(storage, "production-shape")
+	called := false
+	err := store.AtomicReadWrite(t.Context(), "must not deadlock", func(AtomicReadWriteTx) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrAtomicReadWriteSerialization) {
+		t.Fatalf("AtomicReadWrite error = %v, want ErrAtomicReadWriteSerialization", err)
+	}
+	if !strings.Contains(err.Error(), "requires at least 2 open connections") {
+		t.Fatalf("AtomicReadWrite error = %v, want connection-pool capacity context", err)
+	}
+	if connected {
+		t.Fatal("AtomicReadWrite opened the single connection before rejecting the unsafe pool")
+	}
+	if called {
+		t.Fatal("AtomicReadWrite called callback with an unsafe single-connection pool")
+	}
+}
+
+func TestNativeDoltAtomicReadWriteTurnHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	store := newNativeDoltStoreForTest(newAtomicNativeDoltStorageForTest())
+	releaseFirst, err := store.acquireAtomicReadWriteTurn(t.Context())
+	if err != nil {
+		t.Fatalf("acquiring first atomic read/write turn: %v", err)
+	}
+
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	releaseSecond, err := store.acquireAtomicReadWriteTurn(waitCtx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquiring occupied atomic read/write turn error = %v, want context.Canceled", err)
+	}
+	if !errors.Is(err, ErrAtomicReadWriteSerialization) {
+		t.Fatalf("acquiring occupied atomic read/write turn error = %v, want ErrAtomicReadWriteSerialization", err)
+	}
+	if releaseSecond != nil {
+		t.Fatal("canceled atomic read/write turn returned a release function")
+	}
+
+	releaseFirst()
+	releaseThird, err := store.acquireAtomicReadWriteTurn(t.Context())
+	if err != nil {
+		t.Fatalf("reacquiring released atomic read/write turn: %v", err)
+	}
+	releaseThird()
+}
+
+// This unit test exercises dense allocation through the serialized in-memory
+// test store. The integration test with two independent NativeDoltStore pools
+// is the production proof for cross-process serialization.
+func TestNativeDoltAtomicReadWriteSerializedTestStoreAllocatesDenseMetadata(t *testing.T) {
 	t.Parallel()
 
 	storage := newAtomicNativeDoltStorageForTest()
@@ -453,6 +542,30 @@ type atomicNativeDoltStorageForTest struct {
 	mu       sync.Mutex
 	metadata map[string]string
 	commits  int
+}
+
+type atomicNativeDoltRawStorageForTest struct {
+	*atomicNativeDoltStorageForTest
+	db *sql.DB
+}
+
+func (s *atomicNativeDoltRawStorageForTest) DB() *sql.DB { return s.db }
+
+type atomicReadWriteConnectorForTest struct {
+	connected *bool
+}
+
+func (c atomicReadWriteConnectorForTest) Connect(context.Context) (driver.Conn, error) {
+	*c.connected = true
+	return nil, errors.New("unexpected atomic read/write test database connection")
+}
+
+func (atomicReadWriteConnectorForTest) Driver() driver.Driver { return atomicReadWriteDriverForTest{} }
+
+type atomicReadWriteDriverForTest struct{}
+
+func (atomicReadWriteDriverForTest) Open(string) (driver.Conn, error) {
+	return nil, errors.New("unexpected atomic read/write test driver open")
 }
 
 func newAtomicNativeDoltStorageForTest() *atomicNativeDoltStorageForTest {

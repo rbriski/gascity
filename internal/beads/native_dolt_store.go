@@ -2,7 +2,9 @@ package beads
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +61,12 @@ func repairIDDefault(db *sql.DB, table string) error {
 }
 
 const nativeDoltStoreActor = "gascity"
+
+const (
+	nativeDoltAtomicLockPrefix                = "gascity:atomic-rw:v1:"
+	nativeDoltAtomicLockAcquireAttemptSeconds = 1
+	nativeDoltAtomicLockCleanupTimeout        = 5 * time.Second
+)
 
 var nativeDoltOpenReadyStatuses = []beadslib.Status{
 	beadslib.StatusOpen,
@@ -206,6 +214,18 @@ type NativeDoltStore struct {
 	// effect today is require→typed refusal / auto→loud degrade at the
 	// seam, never a silent legacy write under require.
 	condWritesStamp
+
+	// testAtomicReadWriteLock is set only by the caller-supplied-storage test
+	// constructor. Production stores must acquire the server-scoped named lock
+	// derived from their live storage handle and fail closed when unavailable.
+	testAtomicReadWriteLock func(context.Context, func() error) error
+	// atomicReadWriteTurn prevents concurrent callers on this store from
+	// occupying every connection in its pool while waiting for the named lock.
+	// OpenNativeDoltStoreAt owns one distinct pool per production store; if a
+	// future production constructor shares one pool across store wrappers, this
+	// gate must move to that pool owner. Cross-pool and cross-process
+	// serialization is still provided by Dolt.
+	atomicReadWriteTurn chan struct{}
 }
 
 // NativeStorage is the upstream beads storage handle a NativeDoltStore wraps.
@@ -243,7 +263,9 @@ func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *Nati
 	if actor == "" {
 		actor = nativeDoltStoreActor
 	}
-	return &NativeDoltStore{storage: storage, actor: actor}
+	turn := make(chan struct{}, 1)
+	turn <- struct{}{}
+	return &NativeDoltStore{storage: storage, actor: actor, atomicReadWriteTurn: turn}
 }
 
 func newNativeDoltStoreWithStorageAndPrefix(storage beadslib.Storage, actor, idPrefix string) *NativeDoltStore {
@@ -320,12 +342,18 @@ func openAndRepairNativeStorage(ctx context.Context, scopeRoot string, env map[s
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
-	return newNativeDoltStoreWithStorage(storage, "native-test")
+	store := newNativeDoltStoreWithStorage(storage, "native-test")
+	store.testAtomicReadWriteLock = func(_ context.Context, fn func() error) error {
+		return fn()
+	}
+	return store
 }
 
-// NewNativeDoltStoreWithStorageForTesting returns an exact NativeDoltStore
-// backed by caller-supplied storage for cross-package conformance tests.
-// Production callers open scoped storage through OpenNativeDoltStoreAt.
+// NewNativeDoltStoreWithStorageForTesting returns a NativeDoltStore backed by
+// caller-supplied storage for cross-package conformance tests. It bypasses the
+// production server named lock because test storage supplies its own
+// serialization. Production callers open scoped storage through
+// OpenNativeDoltStoreAt.
 func NewNativeDoltStoreWithStorageForTesting(storage beadslib.Storage) *NativeDoltStore {
 	return newNativeDoltStoreForTest(storage)
 }
@@ -1369,7 +1397,8 @@ func (s *NativeDoltStore) AtomicTx() bool { return true }
 // AtomicReadWrite runs fn in one NativeDolt history transaction. Its adapter
 // exposes exact read-your-writes record access and durable store metadata but
 // rejects ephemeral and no-history records, which upstream commits through a
-// separate ignored-table transaction.
+// separate ignored-table transaction. An error proving named-lock release may
+// follow a successful commit, so callers must treat that result as ambiguous.
 func (s *NativeDoltStore) AtomicReadWrite(parent context.Context, commitMsg string, fn func(AtomicReadWriteTx) error) error {
 	if parent == nil {
 		return errors.New("beads atomic read/write: nil context")
@@ -1387,12 +1416,139 @@ func (s *NativeDoltStore) AtomicReadWrite(parent context.Context, commitMsg stri
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
+	releaseTurn, err := s.acquireAtomicReadWriteTurn(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseTurn()
 	if strings.TrimSpace(commitMsg) == "" {
 		commitMsg = "gc: atomic read/write"
 	}
-	return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
-		return fn(&nativeDoltAtomicReadWriteTx{store: s, ctx: ctx, tx: tx})
-	})
+	run := func() error {
+		return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+			return fn(&nativeDoltAtomicReadWriteTx{store: s, ctx: ctx, tx: tx})
+		})
+	}
+	if s.testAtomicReadWriteLock != nil {
+		return s.testAtomicReadWriteLock(ctx, run)
+	}
+	return withNativeDoltAtomicReadWriteLock(ctx, storage, run)
+}
+
+func (s *NativeDoltStore) acquireAtomicReadWriteTurn(ctx context.Context) (func(), error) {
+	if s == nil || s.atomicReadWriteTurn == nil {
+		return nil, fmt.Errorf("NativeDolt atomic read/write has no local serialization gate: %w", ErrAtomicReadWriteSerialization)
+	}
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("waiting for NativeDolt atomic read/write turn: %w", errors.Join(ErrAtomicReadWriteSerialization, ctx.Err()))
+	case <-s.atomicReadWriteTurn:
+		var once sync.Once
+		return func() {
+			once.Do(func() { s.atomicReadWriteTurn <- struct{}{} })
+		}, nil
+	}
+}
+
+// withNativeDoltAtomicReadWriteLock holds a database-scoped Dolt/MySQL named
+// lock for the complete upstream transaction, including its DOLT_COMMIT. The
+// upstream transaction isolation is repeatable-read, so the transaction alone
+// cannot make metadata read-modify-write allocation linearizable.
+func withNativeDoltAtomicReadWriteLock(ctx context.Context, storage beadslib.Storage, fn func() error) (err error) {
+	accessor, ok := storage.(rawDBGetter)
+	if !ok {
+		return fmt.Errorf("NativeDolt storage %T has no raw server connection: %w", storage, ErrAtomicReadWriteSerialization)
+	}
+	db := accessor.DB()
+	if db == nil {
+		return fmt.Errorf("NativeDolt storage %T has no raw server connection: %w", storage, ErrAtomicReadWriteSerialization)
+	}
+	if db.Stats().MaxOpenConnections == 1 {
+		return fmt.Errorf("NativeDolt atomic read/write requires at least 2 open connections, but the pool limit is 1: %w", ErrAtomicReadWriteSerialization)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring NativeDolt atomic lock connection: %w", errors.Join(ErrAtomicReadWriteSerialization, err))
+	}
+
+	lockName, err := nativeDoltAtomicReadWriteLockName(ctx, conn)
+	if err != nil {
+		discardNativeDoltAtomicLockConn(conn)
+		return err
+	}
+	if err := acquireNativeDoltAtomicReadWriteLock(ctx, conn, lockName); err != nil {
+		discardNativeDoltAtomicLockConn(conn)
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, releaseNativeDoltAtomicReadWriteLock(conn, lockName))
+	}()
+	return fn()
+}
+
+func nativeDoltAtomicReadWriteLockName(ctx context.Context, conn *sql.Conn) (string, error) {
+	var database sql.NullString
+	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&database); err != nil {
+		return "", fmt.Errorf("reading NativeDolt database for atomic lock: %w", errors.Join(ErrAtomicReadWriteSerialization, err))
+	}
+	if !database.Valid || strings.TrimSpace(database.String) == "" {
+		return "", fmt.Errorf("NativeDolt atomic lock connection has no selected database: %w", ErrAtomicReadWriteSerialization)
+	}
+	digest := sha256.Sum256([]byte(database.String))
+	return fmt.Sprintf("%s%x", nativeDoltAtomicLockPrefix, digest[:16]), nil
+}
+
+func acquireNativeDoltAtomicReadWriteLock(ctx context.Context, conn *sql.Conn, lockName string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("waiting for NativeDolt atomic lock %q: %w", lockName, errors.Join(ErrAtomicReadWriteSerialization, err))
+		}
+		var locked sql.NullInt64
+		if err := conn.QueryRowContext(
+			ctx,
+			"SELECT GET_LOCK(?, ?)",
+			lockName,
+			nativeDoltAtomicLockAcquireAttemptSeconds,
+		).Scan(&locked); err != nil {
+			return fmt.Errorf("acquiring NativeDolt atomic lock %q: %w", lockName, errors.Join(ErrAtomicReadWriteSerialization, err))
+		}
+		if !locked.Valid {
+			return fmt.Errorf("acquiring NativeDolt atomic lock %q returned NULL: %w", lockName, ErrAtomicReadWriteSerialization)
+		}
+		switch locked.Int64 {
+		case 1:
+			return nil
+		case 0:
+			continue
+		default:
+			return fmt.Errorf("acquiring NativeDolt atomic lock %q returned %d: %w", lockName, locked.Int64, ErrAtomicReadWriteSerialization)
+		}
+	}
+}
+
+func releaseNativeDoltAtomicReadWriteLock(conn *sql.Conn, lockName string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), nativeDoltAtomicLockCleanupTimeout)
+	defer cancel()
+
+	var released sql.NullInt64
+	err := conn.QueryRowContext(cleanupCtx, "SELECT RELEASE_LOCK(?)", lockName).Scan(&released)
+	if err == nil && released.Valid && released.Int64 == 1 {
+		return conn.Close()
+	}
+	discardNativeDoltAtomicLockConn(conn)
+	switch {
+	case err != nil:
+		return fmt.Errorf("releasing NativeDolt atomic lock %q: %w", lockName, errors.Join(ErrAtomicReadWriteSerialization, err))
+	case !released.Valid:
+		return fmt.Errorf("releasing NativeDolt atomic lock %q returned NULL: %w", lockName, ErrAtomicReadWriteSerialization)
+	default:
+		return fmt.Errorf("releasing NativeDolt atomic lock %q returned %d: %w", lockName, released.Int64, ErrAtomicReadWriteSerialization)
+	}
+}
+
+func discardNativeDoltAtomicLockConn(conn *sql.Conn) {
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
 }
 
 type nativeDoltAtomicReadWriteTx struct {

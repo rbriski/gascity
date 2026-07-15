@@ -24,6 +24,12 @@ var (
 	// ErrAtomicReadWriteQuery reports an unsafe history query or a backing-store
 	// result that violated its bounded, filtered, history-only contract.
 	ErrAtomicReadWriteQuery = errors.New("invalid atomic read/write history query")
+	// ErrAtomicReadWriteSerialization reports that the backing store cannot
+	// serialize read-modify-write callbacks across independent processes or
+	// cannot prove that serialization cleanup completed. Like a lost database
+	// commit response, a cleanup error may be returned after the transaction
+	// committed; retrying callers must resolve the durable result idempotently.
+	ErrAtomicReadWriteSerialization = errors.New("atomic read/write serialization unavailable")
 )
 
 // AtomicReadWriteList is one bounded structured history-row query. A query is
@@ -118,7 +124,10 @@ func validateAtomicReadWriteListResult(query AtomicReadWriteList, rows []Bead) e
 // history records and durable store metadata in one backing transaction. A
 // callback error rolls the complete transaction back. Context cancellation is
 // checked before callback entry and bounds the backing operation. Stores
-// without that guarantee do not implement this interface.
+// without that guarantee do not implement this interface. An error produced
+// after a successful callback can still be outcome-ambiguous at a backing
+// database boundary; retrying callers must use deterministic identities or
+// reread durable state rather than assume rollback.
 type AtomicReadWriteStore interface {
 	AtomicReadWrite(ctx context.Context, commitMsg string, fn func(AtomicReadWriteTx) error) error
 }

@@ -731,6 +731,40 @@ func TestCommandRepositoryProvisioningEvidenceCannotReplayAfterRestartOrRestore(
 	}
 }
 
+func TestCommandRepositoryPostCommitInitializationErrorLeavesFailClosedMissingAnchor(t *testing.T) {
+	t.Parallel()
+
+	releaseErr := errors.New("named lock release result was uncertain")
+	store := newRepositoryAtomicTestStore()
+	store.failAfterCommitNext = errors.Join(beads.ErrAtomicReadWriteSerialization, releaseErr)
+	firstVerifier := &repositoryLineageTestVerifier{}
+	first, err := NewCommandRepository(store, firstVerifier)
+	if err != nil {
+		t.Fatalf("NewCommandRepository(first): %v", err)
+	}
+	if _, err := first.Provision(t.Context()); !errors.Is(err, beads.ErrAtomicReadWriteSerialization) || !errors.Is(err, releaseErr) {
+		t.Fatalf("first Provision error = %v, want ambiguous post-commit serialization error", err)
+	}
+	if firstVerifier.provisionCallCount() != 0 {
+		t.Fatalf("first provision calls = %d, want 0 after ambiguous initialization commit", firstVerifier.provisionCallCount())
+	}
+	if state := commandRepositoryStateFromMetadata(t, store.metadataSnapshot()); state.Store.StoreUUID == "" {
+		t.Fatal("ambiguous initialization error did not leave committed database state")
+	}
+
+	restartedVerifier := &repositoryLineageTestVerifier{}
+	restarted, err := NewCommandRepository(store, restartedVerifier)
+	if err != nil {
+		t.Fatalf("NewCommandRepository(restarted): %v", err)
+	}
+	if _, err := restarted.State(t.Context()); !errors.Is(err, ErrCommandRepositoryLineage) {
+		t.Fatalf("restarted State error = %v, want missing-anchor lineage refusal", err)
+	}
+	if restartedVerifier.provisionCallCount() != 0 {
+		t.Fatalf("restarted provision calls = %d, want 0 without one-shot evidence", restartedVerifier.provisionCallCount())
+	}
+}
+
 func TestCommandRepositoryPostCommitAnchorFailureIsRepairedByIdempotentRetry(t *testing.T) {
 	t.Parallel()
 
@@ -1074,14 +1108,15 @@ func commandRepositoryStateFromMetadata(t *testing.T, metadata map[string]string
 type repositoryAtomicTestStore struct {
 	beads.Store
 
-	mu               sync.Mutex
-	rows             map[string]beads.Bead
-	metadata         map[string]string
-	failNext         error
-	nextClock        time.Time
-	afterList        func()
-	createCalls      int
-	setMetadataCalls int
+	mu                  sync.Mutex
+	rows                map[string]beads.Bead
+	metadata            map[string]string
+	failNext            error
+	failAfterCommitNext error
+	nextClock           time.Time
+	afterList           func()
+	createCalls         int
+	setMetadataCalls    int
 }
 
 func newRepositoryAtomicTestStore() *repositoryAtomicTestStore {
@@ -1123,6 +1158,11 @@ func (s *repositoryAtomicTestStore) AtomicReadWrite(ctx context.Context, _ strin
 	s.rows = tx.rows
 	s.metadata = tx.metadata
 	s.nextClock = tx.now.Add(time.Nanosecond)
+	if s.failAfterCommitNext != nil && changed {
+		err := s.failAfterCommitNext
+		s.failAfterCommitNext = nil
+		return err
+	}
 	return nil
 }
 

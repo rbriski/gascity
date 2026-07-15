@@ -60,6 +60,20 @@ func TestOpenProductionNudgeCommandSourceLeavesUnsupportedStoreLegacyOnly(t *tes
 	}
 }
 
+func TestOpenProductionNudgeCommandSourceWrapsKnownTransientProvisionFailure(t *testing.T) {
+	store := newNudgeCommandSourceAtomicStore()
+	store.failNext = context.DeadlineExceeded
+
+	source, err := openVerifiedProductionNudgeCommandSource(t.Context(), t.TempDir(), store)
+	if source != nil {
+		t.Fatalf("transient source = %T, want nil until retry", source)
+	}
+	var failure nudgeCommandSourceFailure
+	if !errors.As(err, &failure) || failure.class != nudgeCommandSourceErrorTransient || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("transient open error = %#v (%v), want retryable deadline failure", failure, err)
+	}
+}
+
 func TestProductionNudgeCommandSourceClassifiesOnlyKnownRetryableFailures(t *testing.T) {
 	source := &productionNudgeCommandSource{}
 	for _, err := range []error{context.DeadlineExceeded, nudgequeue.ErrRestoreAnchorBusy, nudgequeue.ErrRestoreAnchorConflict, nudgequeue.ErrRestoreAnchorDurabilityUncertain} {
@@ -81,6 +95,7 @@ type nudgeCommandSourceAtomicStore struct {
 	metadata       map[string]string
 	rows           map[string]beads.Bead
 	metadataWrites int
+	failNext       error
 }
 
 func newNudgeCommandSourceAtomicStore() *nudgeCommandSourceAtomicStore {
@@ -100,6 +115,11 @@ func (s *nudgeCommandSourceAtomicStore) AtomicReadWrite(ctx context.Context, _ s
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failNext != nil {
+		err := s.failNext
+		s.failNext = nil
+		return err
+	}
 	tx := &nudgeCommandSourceAtomicTx{
 		metadata:       cloneNudgeCommandSourceStrings(s.metadata),
 		rows:           cloneNudgeCommandSourceRows(s.rows),

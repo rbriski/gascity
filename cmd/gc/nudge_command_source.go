@@ -32,10 +32,14 @@ func openVerifiedProductionNudgeCommandSource(ctx context.Context, cityPath stri
 		// repair only an existing same-store/same-epoch anchor; missing, foreign,
 		// rewound, or epoch-changed lineage still fails closed.
 		if _, repairErr := repository.RepairLineage(ctx); repairErr != nil {
-			return nil, errors.Join(
+			failure := errors.Join(
 				fmt.Errorf("provisioning durable nudge command repository: %w", err),
 				fmt.Errorf("repairing durable nudge command repository lineage: %w", repairErr),
 			)
+			if source.ClassifyNudgeCommandSourceError(failure) == nudgeCommandSourceErrorTransient {
+				return nil, retryableNudgeCommandSourceFailure(failure)
+			}
+			return nil, failure
 		}
 	}
 	return source, nil

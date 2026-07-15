@@ -639,17 +639,81 @@ func (tracer *callableTargetTracer) reachableFreeVariableBindings(freeVariable *
 }
 
 func refineClosedWorldExecution(analysis *loadedAnalysis, roots []*ssa.Package) {
+	rootEntries := rootEntryFunctions(roots, true)
 	for {
 		analysis.effectFuncs = sourceFunctionsInSet(analysis.executionFuncs, analysis.sourceFuncs)
 		analysis.globalUses = collectSourceGlobalUses(analysis.effectFuncs)
 		fieldEvidence := collectSourceFieldEvidence(analysis.effectFuncs)
 		analysis.fieldStores = fieldEvidence.stores
 		analysis.fieldAddresses = fieldEvidence.addresses
-		next := functionsReachableFromEntries(analysis, rootEntryFunctions(roots, true))
+		entries := append([]*ssa.Function(nil), rootEntries...)
+		entries = append(entries, escapedCallableEntryFunctions(analysis)...)
+		next := functionsReachableFromEntries(analysis, entries)
 		if sameFunctionSet(next, analysis.executionFuncs) {
 			return
 		}
 		analysis.executionFuncs = next
+	}
+}
+
+// escapedCallableEntryFunctions returns authored functions whose values leave
+// a currently executable function. External callback registries such as Cobra
+// and HTTP routers invoke these values through dependency-owned fields that
+// cannot be resolved as closed call edges. Treating each escape as a possible
+// invocation is the conservative closed-world choice: it retains live handler
+// effects without making any framework-specific assumptions.
+func escapedCallableEntryFunctions(analysis *loadedAnalysis) []*ssa.Function {
+	entrySet := make(map[*ssa.Function]bool)
+	for function := range analysis.sourceFuncs {
+		if functionValueEscapesAuthoredUniverse(function, analysis) {
+			entrySet[function] = true
+		}
+	}
+	// Named functions used as first-class values do not always expose SSA
+	// referrers. Scan operands in the currently reachable authored bodies so a
+	// store such as cobra.Command{RunE: namedHandler} cannot disappear merely
+	// because Function.Referrers is nil. Every higher-order SSA value is rooted
+	// in either a Function or MakeClosure operand in one of these bodies.
+	for function := range analysis.effectFuncs {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				for _, operand := range instruction.Operands(nil) {
+					if operand == nil {
+						continue
+					}
+					target := callableOperandFunction(*operand)
+					if target == nil {
+						continue
+					}
+					if origin := target.Origin(); origin != nil {
+						target = origin
+					}
+					if analysis.sourceFuncs[target] {
+						entrySet[target] = true
+					}
+				}
+			}
+		}
+	}
+	entries := make([]*ssa.Function, 0, len(entrySet))
+	for function := range entrySet {
+		entries = append(entries, function)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return functionSortKey(entries[i]) < functionSortKey(entries[j])
+	})
+	return entries
+}
+
+func callableOperandFunction(value ssa.Value) *ssa.Function {
+	switch value := value.(type) {
+	case *ssa.Function:
+		return value
+	case *ssa.MakeClosure:
+		function, _ := value.Fn.(*ssa.Function)
+		return function
+	default:
+		return nil
 	}
 }
 

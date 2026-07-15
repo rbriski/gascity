@@ -45,6 +45,24 @@ func TestDiscoverClosedWorldProfileInventoriesSourcesReachableFromMain(t *testin
 	})
 }
 
+func TestDiscoverClosedWorldProfileRetainsEscapedCobraRunECallbacks(t *testing.T) {
+	const packageName = "closedworld/cobracallback"
+	config := fixtureAnalysisConfig(t, []string{
+		"./internal/reconciletest/effectinventory/testdata/analyzerfixture/" + packageName,
+	})
+	config.closedWorld = true
+	boundary := closedWorldCallbackBoundary(packageName)
+
+	observed, err := discoverProfile(context.Background(), config, fixtureLinuxProfile(), []BoundaryDefinition{boundary})
+	if err != nil {
+		t.Fatalf("discoverProfile() error: %v", err)
+	}
+	assertObservedSites(t, observed, []observedKey{
+		fixtureCall(boundary.ID, packageName, "main.go", "main", []int{1}, OperationCall, 1),
+		fixtureCall(boundary.ID, packageName, "main.go", "namedHandler", nil, OperationCall, 1),
+	})
+}
+
 func TestDiscoverClosedWorldProfileSeparatesRuntimeEffectsFromInitialization(t *testing.T) {
 	const packageName = "closedworld/initseparation"
 	config := fixtureAnalysisConfig(t, []string{

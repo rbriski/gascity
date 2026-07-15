@@ -30,6 +30,7 @@ var (
 	_ runtime.InteractionProvider           = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.NudgeEffectProvider           = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 )
@@ -225,6 +226,19 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
+}
+
+// NudgeEffect delegates a classified nudge to the routed backend. A backend
+// without the classified-effect capability is a definite pre-entry refusal;
+// it is never bypassed through the other backend or legacy Nudge.
+func (p *Provider) NudgeEffect(ctx context.Context, name string, request runtime.NudgeEffectRequest) (runtime.NudgeEffectResult, error) {
+	if provider, ok := p.route(name).(runtime.NudgeEffectProvider); ok {
+		return provider.NudgeEffect(ctx, name, request)
+	}
+	return runtime.NudgeEffectResult{
+		Stage:      runtime.NudgeEffectStageNotEntered,
+		Completion: runtime.NudgeEffectCompletionNotCompleted,
+	}, runtime.ErrNudgeEffectUnsupported
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit

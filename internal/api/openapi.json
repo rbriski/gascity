@@ -7284,6 +7284,105 @@
         ],
         "type": "object"
       },
+      "SessionNudgeAdmissionRequestBody": {
+        "additionalProperties": false,
+        "properties": {
+          "continuation_identity": {
+            "description": "Stable continuation identity, required for continuation targeting.",
+            "type": "string"
+          },
+          "deliver_after": {
+            "description": "Optional absolute earliest delivery time. Omit for authority-selected immediate eligibility.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Absolute expiry time for this nudge.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "intent_generation": {
+            "description": "Monotonic target-session intent generation.",
+            "format": "int64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "launch_identity": {
+            "description": "Exact immutable launch identity, required for exact-launch targeting.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Message to deliver to the target session.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "mode": {
+            "description": "Durable delivery mode. Queue and wait_idle require continuation targeting; immediate requires exact-launch targeting.",
+            "enum": [
+              "queue",
+              "wait_idle",
+              "immediate"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Caller-generated idempotency identity for this durable nudge.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "target_policy": {
+            "description": "Target binding policy. Use continuation with queue or wait_idle; use exact_launch with immediate.",
+            "enum": [
+              "continuation",
+              "exact_launch"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "mode",
+          "intent_generation",
+          "target_policy",
+          "message",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "SessionNudgeAdmissionResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "description": "Durable command identity.",
+            "type": "string"
+          },
+          "created": {
+            "description": "True when this call created the command; false for an idempotent replay.",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "Current durable command state.",
+            "enum": [
+              "pending",
+              "in_flight",
+              "delivered",
+              "injected_unconfirmed",
+              "delivery_unknown",
+              "expired",
+              "superseded",
+              "dead_lettered",
+              "upgrade_required"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "status",
+          "created"
+        ],
+        "type": "object"
+      },
       "SessionPatchBody": {
         "additionalProperties": false,
         "properties": {
@@ -38880,6 +38979,212 @@
           }
         },
         "summary": "Send a message to a session"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/nudges": {
+      "post": {
+        "description": "Authenticates requester evidence from the trusted request context and durably admits one idempotent session nudge without invoking the runtime provider.",
+        "operationId": "admit-session-nudge",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Canonical target session ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Canonical target session ID.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionNudgeAdmissionRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNudgeAdmissionResponseBody"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Gateway Timeout",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Admit a durable session nudge"
       }
     },
     "/v0/city/{cityName}/session/{id}/pending": {

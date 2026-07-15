@@ -1610,6 +1610,38 @@ export const zSessionMessageSucceededPayload = z.object({
     session_id: z.string()
 });
 
+export const zSessionNudgeAdmissionRequestBody = z.object({
+    continuation_identity: z.string().optional(),
+    deliver_after: z.iso.datetime().optional(),
+    expires_at: z.iso.datetime(),
+    intent_generation: z.coerce.bigint().gte(BigInt(1)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    launch_identity: z.string().optional(),
+    message: z.string().min(1),
+    mode: z.enum([
+        'queue',
+        'wait_idle',
+        'immediate'
+    ]),
+    request_id: z.string().min(1),
+    target_policy: z.enum(['continuation', 'exact_launch'])
+});
+
+export const zSessionNudgeAdmissionResponseBody = z.object({
+    command_id: z.string(),
+    created: z.boolean(),
+    status: z.enum([
+        'pending',
+        'in_flight',
+        'delivered',
+        'injected_unconfirmed',
+        'delivery_unknown',
+        'expired',
+        'superseded',
+        'dead_lettered',
+        'upgrade_required'
+    ])
+});
+
 export const zSessionPatchBody = z.object({
     alias: z.string().optional(),
     title: z.string().min(1).optional()
@@ -7281,6 +7313,22 @@ export const zSendSessionMessagePath = z.object({
  * Accepted
  */
 export const zSendSessionMessageResponse = zAsyncAcceptedBody;
+
+export const zAdmitSessionNudgeBody = zSessionNudgeAdmissionRequestBody;
+
+export const zAdmitSessionNudgeHeaders = z.object({
+    'X-GC-Request': z.string().min(1)
+});
+
+export const zAdmitSessionNudgePath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string().min(1).regex(/\S/)
+});
+
+/**
+ * Accepted
+ */
+export const zAdmitSessionNudgeResponse = zSessionNudgeAdmissionResponseBody;
 
 export const zGetV0CityByCityNameSessionByIdPendingPath = z.object({
     cityName: z.string().min(1).regex(/\S/),

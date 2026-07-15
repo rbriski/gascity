@@ -389,6 +389,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
+	cityPost(sm, "/session/{id}/nudges", (*Server).humaHandleSessionNudgeAdmission, func(op *huma.Operation) {
+		op.OperationID = "admit-session-nudge"
+		op.Summary = "Admit a durable session nudge"
+		op.Description = "Authenticates requester evidence from the trusted request context and durably admits one idempotent session nudge without invoking the runtime provider."
+		op.DefaultStatus = http.StatusAccepted
+	}, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout))
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{

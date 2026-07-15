@@ -3136,6 +3136,60 @@ export type SessionMessageSucceededPayload = {
     session_id: string;
 };
 
+export type SessionNudgeAdmissionRequestBody = {
+    /**
+     * Stable continuation identity, required for continuation targeting.
+     */
+    continuation_identity?: string;
+    /**
+     * Optional absolute earliest delivery time. Omit for authority-selected immediate eligibility.
+     */
+    deliver_after?: string;
+    /**
+     * Absolute expiry time for this nudge.
+     */
+    expires_at: string;
+    /**
+     * Monotonic target-session intent generation.
+     */
+    intent_generation: number;
+    /**
+     * Exact immutable launch identity, required for exact-launch targeting.
+     */
+    launch_identity?: string;
+    /**
+     * Message to deliver to the target session.
+     */
+    message: string;
+    /**
+     * Durable delivery mode. Queue and wait_idle require continuation targeting; immediate requires exact-launch targeting.
+     */
+    mode: 'queue' | 'wait_idle' | 'immediate';
+    /**
+     * Caller-generated idempotency identity for this durable nudge.
+     */
+    request_id: string;
+    /**
+     * Target binding policy. Use continuation with queue or wait_idle; use exact_launch with immediate.
+     */
+    target_policy: 'continuation' | 'exact_launch';
+};
+
+export type SessionNudgeAdmissionResponseBody = {
+    /**
+     * Durable command identity.
+     */
+    command_id: string;
+    /**
+     * True when this call created the command; false for an idempotent replay.
+     */
+    created: boolean;
+    /**
+     * Current durable command state.
+     */
+    status: 'pending' | 'in_flight' | 'delivered' | 'injected_unconfirmed' | 'delivery_unknown' | 'expired' | 'superseded' | 'dead_lettered' | 'upgrade_required';
+};
+
 export type SessionPatchBody = {
     /**
      * Session alias. Empty string clears the alias.
@@ -15385,6 +15439,78 @@ export type SendSessionMessageResponses = {
 };
 
 export type SendSessionMessageResponse = SendSessionMessageResponses[keyof SendSessionMessageResponses];
+
+export type AdmitSessionNudgeData = {
+    body: SessionNudgeAdmissionRequestBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Canonical target session ID.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/nudges';
+};
+
+export type AdmitSessionNudgeErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+    /**
+     * Gateway Timeout
+     */
+    504: ErrorModel;
+};
+
+export type AdmitSessionNudgeError = AdmitSessionNudgeErrors[keyof AdmitSessionNudgeErrors];
+
+export type AdmitSessionNudgeResponses = {
+    /**
+     * Accepted
+     */
+    202: SessionNudgeAdmissionResponseBody;
+};
+
+export type AdmitSessionNudgeResponse = AdmitSessionNudgeResponses[keyof AdmitSessionNudgeResponses];
 
 export type GetV0CityByCityNameSessionByIdPendingData = {
     body?: never;

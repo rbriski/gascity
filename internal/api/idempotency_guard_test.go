@@ -46,6 +46,11 @@ var pendingIdempotency = map[string]bool{
 // be classified, so a new create at ANY status (201, 202, …) that is neither
 // wired nor triaged fails the test.
 var exemptFromIdempotency = map[string]bool{
+	// admit-session-nudge creates a durable command, but its required body
+	// request_id is the domain's durable idempotency identity. Adding the
+	// process-local Idempotency-Key cache here would create two retry
+	// authorities with different lifetime and conflict semantics.
+	"admit-session-nudge": true,
 	// ensure-extmsg-group is identity-idempotent by design: the ensure
 	// semantics (same group in → same group out) make a retry safe without a
 	// key, so wiring one would be dead weight (owner decision, 2026-07-11).

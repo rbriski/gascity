@@ -119,6 +119,7 @@ type SupervisorMux struct {
 	readAuth        *citywriteauth.Verifier
 	dashboardBase   func() string
 	runCensusSource RunCensusSource
+	nudgeAdmission  SessionNudgeAdmission
 	server          *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
@@ -309,6 +310,18 @@ func (sm *SupervisorMux) WithRunCensusSource(source RunCensusSource) *Supervisor
 	return sm
 }
 
+// WithSessionNudgeAdmission installs the durable per-city session-nudge
+// admission boundary. It must be called before Serve. A nil or typed-nil
+// capability leaves the endpoint registered but fail-closed with 503.
+func (sm *SupervisorMux) WithSessionNudgeAdmission(admission SessionNudgeAdmission) *SupervisorMux {
+	if isNil(admission) {
+		sm.nudgeAdmission = nil
+		return sm
+	}
+	sm.nudgeAdmission = admission
+	return sm
+}
+
 // WithDashboardBase records where the embedded dashboard is served so
 // per-city handlers can mint dashboard deep links (e.g. the sling response's
 // dashboard_url). The provider returns the browser-reachable base URL of THIS
@@ -475,6 +488,7 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	// cached server observes the final provider.
 	srv.dashboardBase = sm.dashboardBase
 	srv.runCensusSource = sm.runCensusSource
+	srv.sessionNudgeAdmission = sm.nudgeAdmission
 
 	sm.cacheMu.Lock()
 	sm.cache[name] = cachedCityServer{state: state, srv: srv}

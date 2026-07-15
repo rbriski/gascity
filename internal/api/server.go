@@ -62,6 +62,11 @@ type Server struct {
 
 	runCensusSource RunCensusSource
 
+	// sessionNudgeAdmission is the optional durable admission capability used by
+	// POST /session/{id}/nudges. Nil fails closed; it never falls back to a
+	// runtime/provider nudge.
+	sessionNudgeAdmission SessionNudgeAdmission
+
 	backgroundTasks sync.WaitGroup
 
 	// sessionLogSearchPaths overrides the default search paths for Claude

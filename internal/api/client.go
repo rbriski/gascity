@@ -1500,14 +1500,25 @@ func checkMutation(resp interface{ StatusCode() int }, transportErr error) error
 }
 
 // isNil reports whether an interface value holds a nil concrete value.
-// Necessary because passing a typed nil pointer satisfies an interface
-// without being == nil.
+// Necessary because passing any typed nil-capable value satisfies an
+// interface without being == nil.
 func isNil(v any) bool {
 	if v == nil {
 		return true
 	}
 	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Pointer && rv.IsNil()
+	switch rv.Kind() {
+	case reflect.Chan,
+		reflect.Func,
+		reflect.Interface,
+		reflect.Map,
+		reflect.Pointer,
+		reflect.Slice,
+		reflect.UnsafePointer:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 // pdOf extracts the generated client's decoded Problem Details pointer

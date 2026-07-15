@@ -237,6 +237,84 @@ func (e RunStepStatus) Valid() bool {
 	}
 }
 
+// Defines values for SessionNudgeAdmissionRequestBodyMode.
+const (
+	Immediate SessionNudgeAdmissionRequestBodyMode = "immediate"
+	Queue     SessionNudgeAdmissionRequestBodyMode = "queue"
+	WaitIdle  SessionNudgeAdmissionRequestBodyMode = "wait_idle"
+)
+
+// Valid indicates whether the value is a known member of the SessionNudgeAdmissionRequestBodyMode enum.
+func (e SessionNudgeAdmissionRequestBodyMode) Valid() bool {
+	switch e {
+	case Immediate:
+		return true
+	case Queue:
+		return true
+	case WaitIdle:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionNudgeAdmissionRequestBodyTargetPolicy.
+const (
+	Continuation SessionNudgeAdmissionRequestBodyTargetPolicy = "continuation"
+	ExactLaunch  SessionNudgeAdmissionRequestBodyTargetPolicy = "exact_launch"
+)
+
+// Valid indicates whether the value is a known member of the SessionNudgeAdmissionRequestBodyTargetPolicy enum.
+func (e SessionNudgeAdmissionRequestBodyTargetPolicy) Valid() bool {
+	switch e {
+	case Continuation:
+		return true
+	case ExactLaunch:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionNudgeAdmissionResponseBodyStatus.
+const (
+	DeadLettered        SessionNudgeAdmissionResponseBodyStatus = "dead_lettered"
+	Delivered           SessionNudgeAdmissionResponseBodyStatus = "delivered"
+	DeliveryUnknown     SessionNudgeAdmissionResponseBodyStatus = "delivery_unknown"
+	Expired             SessionNudgeAdmissionResponseBodyStatus = "expired"
+	InFlight            SessionNudgeAdmissionResponseBodyStatus = "in_flight"
+	InjectedUnconfirmed SessionNudgeAdmissionResponseBodyStatus = "injected_unconfirmed"
+	Pending             SessionNudgeAdmissionResponseBodyStatus = "pending"
+	Superseded          SessionNudgeAdmissionResponseBodyStatus = "superseded"
+	UpgradeRequired     SessionNudgeAdmissionResponseBodyStatus = "upgrade_required"
+)
+
+// Valid indicates whether the value is a known member of the SessionNudgeAdmissionResponseBodyStatus enum.
+func (e SessionNudgeAdmissionResponseBodyStatus) Valid() bool {
+	switch e {
+	case DeadLettered:
+		return true
+	case Delivered:
+		return true
+	case DeliveryUnknown:
+		return true
+	case Expired:
+		return true
+	case InFlight:
+		return true
+	case InjectedUnconfirmed:
+		return true
+	case Pending:
+		return true
+	case Superseded:
+		return true
+	case UpgradeRequired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for StatusConditionalWriteStoreVerdictLatch.
 const (
 	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
@@ -3283,6 +3361,57 @@ type SessionMessageSucceededPayload struct {
 	// SessionId Session ID that received the message.
 	SessionId string `json:"session_id"`
 }
+
+// SessionNudgeAdmissionRequestBody defines model for SessionNudgeAdmissionRequestBody.
+type SessionNudgeAdmissionRequestBody struct {
+	// ContinuationIdentity Stable continuation identity, required for continuation targeting.
+	ContinuationIdentity *string `json:"continuation_identity,omitempty"`
+
+	// DeliverAfter Optional absolute earliest delivery time. Omit for authority-selected immediate eligibility.
+	DeliverAfter *time.Time `json:"deliver_after,omitempty"`
+
+	// ExpiresAt Absolute expiry time for this nudge.
+	ExpiresAt time.Time `json:"expires_at"`
+
+	// IntentGeneration Monotonic target-session intent generation.
+	IntentGeneration int64 `json:"intent_generation"`
+
+	// LaunchIdentity Exact immutable launch identity, required for exact-launch targeting.
+	LaunchIdentity *string `json:"launch_identity,omitempty"`
+
+	// Message Message to deliver to the target session.
+	Message string `json:"message"`
+
+	// Mode Durable delivery mode. Queue and wait_idle require continuation targeting; immediate requires exact-launch targeting.
+	Mode SessionNudgeAdmissionRequestBodyMode `json:"mode"`
+
+	// RequestId Caller-generated idempotency identity for this durable nudge.
+	RequestId string `json:"request_id"`
+
+	// TargetPolicy Target binding policy. Use continuation with queue or wait_idle; use exact_launch with immediate.
+	TargetPolicy SessionNudgeAdmissionRequestBodyTargetPolicy `json:"target_policy"`
+}
+
+// SessionNudgeAdmissionRequestBodyMode Durable delivery mode. Queue and wait_idle require continuation targeting; immediate requires exact-launch targeting.
+type SessionNudgeAdmissionRequestBodyMode string
+
+// SessionNudgeAdmissionRequestBodyTargetPolicy Target binding policy. Use continuation with queue or wait_idle; use exact_launch with immediate.
+type SessionNudgeAdmissionRequestBodyTargetPolicy string
+
+// SessionNudgeAdmissionResponseBody defines model for SessionNudgeAdmissionResponseBody.
+type SessionNudgeAdmissionResponseBody struct {
+	// CommandId Durable command identity.
+	CommandId string `json:"command_id"`
+
+	// Created True when this call created the command; false for an idempotent replay.
+	Created bool `json:"created"`
+
+	// Status Current durable command state.
+	Status SessionNudgeAdmissionResponseBodyStatus `json:"status"`
+}
+
+// SessionNudgeAdmissionResponseBodyStatus Current durable command state.
+type SessionNudgeAdmissionResponseBodyStatus string
 
 // SessionPatchBody defines model for SessionPatchBody.
 type SessionPatchBody struct {
@@ -7692,6 +7821,12 @@ type SendSessionMessageParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// AdmitSessionNudgeParams defines parameters for AdmitSessionNudge.
+type AdmitSessionNudgeParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdPermissionModeParams defines parameters for PostV0CityByCityNameSessionByIdPermissionMode.
 type PostV0CityByCityNameSessionByIdPermissionModeParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -7994,6 +8129,9 @@ type PatchV0CityByCityNameSessionByIdJSONRequestBody = SessionPatchBody
 
 // SendSessionMessageJSONRequestBody defines body for SendSessionMessage for application/json ContentType.
 type SendSessionMessageJSONRequestBody = SessionMessageInputBody
+
+// AdmitSessionNudgeJSONRequestBody defines body for AdmitSessionNudge for application/json ContentType.
+type AdmitSessionNudgeJSONRequestBody = SessionNudgeAdmissionRequestBody
 
 // PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody defines body for PostV0CityByCityNameSessionByIdPermissionMode for application/json ContentType.
 type PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody = SessionPermissionModeBody
@@ -14586,6 +14724,11 @@ type ClientInterface interface {
 
 	SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// AdmitSessionNudgeWithBody request with any body
+	AdmitSessionNudgeWithBody(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AdmitSessionNudge(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, body AdmitSessionNudgeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameSessionByIdPending request
 	GetV0CityByCityNameSessionByIdPending(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -16785,6 +16928,30 @@ func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string
 
 func (c *Client) SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSendSessionMessageRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdmitSessionNudgeWithBody(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdmitSessionNudgeRequestWithBody(c.Server, cityName, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdmitSessionNudge(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, body AdmitSessionNudgeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdmitSessionNudgeRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -25853,6 +26020,73 @@ func NewSendSessionMessageRequestWithBody(server string, cityName string, id str
 	return req, nil
 }
 
+// NewAdmitSessionNudgeRequest calls the generic AdmitSessionNudge builder with application/json body
+func NewAdmitSessionNudgeRequest(server string, cityName string, id string, params *AdmitSessionNudgeParams, body AdmitSessionNudgeJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdmitSessionNudgeRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
+}
+
+// NewAdmitSessionNudgeRequestWithBody generates requests for AdmitSessionNudge with any type of body
+func NewAdmitSessionNudgeRequestWithBody(server string, cityName string, id string, params *AdmitSessionNudgeParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/nudges", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameSessionByIdPendingRequest generates requests for GetV0CityByCityNameSessionByIdPending
 func NewGetV0CityByCityNameSessionByIdPendingRequest(server string, cityName string, id string) (*http.Request, error) {
 	var err error
@@ -28056,6 +28290,11 @@ type ClientWithResponsesInterface interface {
 	SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
 
 	SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
+
+	// AdmitSessionNudgeWithBodyWithResponse request with any body
+	AdmitSessionNudgeWithBodyWithResponse(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdmitSessionNudgeResponse, error)
+
+	AdmitSessionNudgeWithResponse(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, body AdmitSessionNudgeJSONRequestBody, reqEditors ...RequestEditorFn) (*AdmitSessionNudgeResponse, error)
 
 	// GetV0CityByCityNameSessionByIdPendingWithResponse request
 	GetV0CityByCityNameSessionByIdPendingWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdPendingResponse, error)
@@ -31936,6 +32175,37 @@ func (r SendSessionMessageResponse) StatusCode() int {
 	return 0
 }
 
+type AdmitSessionNudgeResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON202                   *SessionNudgeAdmissionResponseBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+	ApplicationproblemJSON504 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r AdmitSessionNudgeResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdmitSessionNudgeResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameSessionByIdPendingResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -34130,6 +34400,23 @@ func (c *ClientWithResponses) SendSessionMessageWithResponse(ctx context.Context
 		return nil, err
 	}
 	return ParseSendSessionMessageResponse(rsp)
+}
+
+// AdmitSessionNudgeWithBodyWithResponse request with arbitrary body returning *AdmitSessionNudgeResponse
+func (c *ClientWithResponses) AdmitSessionNudgeWithBodyWithResponse(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdmitSessionNudgeResponse, error) {
+	rsp, err := c.AdmitSessionNudgeWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdmitSessionNudgeResponse(rsp)
+}
+
+func (c *ClientWithResponses) AdmitSessionNudgeWithResponse(ctx context.Context, cityName string, id string, params *AdmitSessionNudgeParams, body AdmitSessionNudgeJSONRequestBody, reqEditors ...RequestEditorFn) (*AdmitSessionNudgeResponse, error) {
+	rsp, err := c.AdmitSessionNudge(ctx, cityName, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdmitSessionNudgeResponse(rsp)
 }
 
 // GetV0CityByCityNameSessionByIdPendingWithResponse request returning *GetV0CityByCityNameSessionByIdPendingResponse
@@ -43028,6 +43315,95 @@ func ParseSendSessionMessageResponse(rsp *http.Response) (*SendSessionMessageRes
 			return nil, err
 		}
 		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdmitSessionNudgeResponse parses an HTTP response from a AdmitSessionNudgeWithResponse call
+func ParseAdmitSessionNudgeResponse(rsp *http.Response) (*AdmitSessionNudgeResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdmitSessionNudgeResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest SessionNudgeAdmissionResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
 
 	}
 

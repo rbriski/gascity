@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -118,6 +119,54 @@ func TestGenClientRoundTripSessionList(t *testing.T) {
 	// are valid spec responses; 500 or non-Problem-Details would not be.
 	if resp.StatusCode() != http.StatusOK && resp.StatusCode() != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected status %d: %s", resp.StatusCode(), string(resp.Body))
+	}
+}
+
+func TestGenClientRoundTripSessionNudgeAdmission(t *testing.T) {
+	state := newFakeState(t)
+	admission := &recordingSessionNudgeAdmission{result: admittedSessionNudgeResult(
+		"gc-nudge-command-roundtrip",
+		true,
+	)}
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
+	sm.WithSessionNudgeAdmission(admission)
+	ts := httptest.NewServer(wrapTestSupervisorMiddleware(sm))
+	t.Cleanup(ts.Close)
+	client, err := genclient.NewClientWithResponses(ts.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	continuation := "continuation-roundtrip"
+	resp, err := client.AdmitSessionNudgeWithResponse(
+		context.Background(),
+		state.CityName(),
+		"session-roundtrip",
+		&genclient.AdmitSessionNudgeParams{XGCRequest: "true"},
+		genclient.AdmitSessionNudgeJSONRequestBody{
+			RequestId:            "request-roundtrip",
+			Mode:                 genclient.Queue,
+			IntentGeneration:     1,
+			ContinuationIdentity: &continuation,
+			TargetPolicy:         genclient.Continuation,
+			Message:              "continue",
+			ExpiresAt:            time.Now().UTC().Add(time.Hour),
+		},
+	)
+	if err != nil {
+		t.Fatalf("AdmitSessionNudge: %v", err)
+	}
+	if resp.StatusCode() != http.StatusAccepted {
+		t.Fatalf("status %d: %s", resp.StatusCode(), string(resp.Body))
+	}
+	if resp.JSON202 == nil {
+		t.Fatalf("JSON202 is nil; raw body: %s", string(resp.Body))
+	}
+	if resp.JSON202.CommandId != "gc-nudge-command-roundtrip" || !resp.JSON202.Created {
+		t.Fatalf("decoded response = %#v", resp.JSON202)
+	}
+	if !admission.called || admission.request.RequestID != "request-roundtrip" {
+		t.Fatalf("generated request did not reach durable admission: %#v", admission.request)
 	}
 }
 

@@ -127,12 +127,21 @@ func TestInstallNudgeKeyReaderBuildsSnapshotBeforePublishingController(t *testin
 		cfg:                 supervisorCfg(),
 		standaloneCityStore: cityStore,
 		stderr:              &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(_ context.Context, gotCityPath string, got beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(
+			_ context.Context,
+			gotCityPath string,
+			got beads.Store,
+			partition nudgequeue.TrustedCityPartition,
+			resolver nudgequeue.TrustedCityPartitionResolver,
+		) (nudgeCommandSource, error) {
 			if gotCityPath != cr.cityPath {
 				t.Fatalf("source opener city path = %q, want %q", gotCityPath, cr.cityPath)
 			}
 			if got != cityStore {
 				t.Fatalf("source opener store = %T %p, want city store %T %p", got, got, cityStore, cityStore)
+			}
+			if partition != (nudgequeue.TrustedCityPartition{}) || resolver != nil {
+				t.Fatalf("source opener authority = (%#v, %T), want explicit unverified zero values", partition, resolver)
 			}
 			return source, nil
 		},
@@ -177,7 +186,7 @@ func TestInstallNudgeKeyReaderUnsupportedOrUnverifiedBackendStaysLegacyOnlyAndWa
 		cfg:                 supervisorCfg(),
 		standaloneCityStore: beads.NewMemStore(),
 		stderr:              &stderr,
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			opens++
 			return nil, errNudgeCommandSourceUnverified
 		},
@@ -208,7 +217,7 @@ func TestInstallNudgeKeyReaderIsSupervisorModeOnly(t *testing.T) {
 		cityPath: t.TempDir(),
 		cfg:      cfg,
 		stderr:   &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			opens++
 			return nil, errors.New("must not be called")
 		},
@@ -227,7 +236,7 @@ func TestInstallNudgeKeyReaderHonorsCancellationBeforeOpeningRepository(t *testi
 		cityPath: t.TempDir(),
 		cfg:      supervisorCfg(),
 		stderr:   &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			opens++
 			return nil, errors.New("must not be called")
 		},
@@ -866,7 +875,7 @@ func TestNudgeKeyTransientStartupSnapshotRetriesOnBoundedTick(t *testing.T) {
 		cfg:                 supervisorCfg(),
 		standaloneCityStore: beads.NewMemStore(),
 		stderr:              &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			return source, nil
 		},
 		nudgeKeyTickerFactory: func(time.Duration) nudgeKeyPeriodicTicker {
@@ -926,7 +935,7 @@ func TestNudgeKeyTransientOpenerRetriesOnBoundedTick(t *testing.T) {
 		cfg:                 supervisorCfg(),
 		standaloneCityStore: beads.NewMemStore(),
 		stderr:              &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			opens++
 			openAttempts <- opens
 			if opens == 1 {
@@ -976,7 +985,7 @@ func TestNudgeKeyUnclassifiedOpenerFailureFailsClosedWithoutRetry(t *testing.T) 
 		cfg:                 supervisorCfg(),
 		standaloneCityStore: beads.NewMemStore(),
 		stderr:              &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			return nil, rawFailure
 		},
 		nudgeKeyTickerFactory: func(time.Duration) nudgeKeyPeriodicTicker {
@@ -1086,7 +1095,7 @@ func newInstalledNudgeKeyReaderForTest(t *testing.T, source nudgeCommandSource) 
 		cfg:                 supervisorCfg(),
 		standaloneCityStore: beads.NewMemStore(),
 		stderr:              &bytes.Buffer{},
-		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store, nudgequeue.TrustedCityPartition, nudgequeue.TrustedCityPartitionResolver) (nudgeCommandSource, error) {
 			return source, nil
 		},
 	}

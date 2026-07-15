@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -12,20 +13,13 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
-func TestOpenProductionNudgeCommandSourceProvisionsOnceAndReopensReadOnly(t *testing.T) {
+func TestOpenProductionNudgeCommandSourceProvisionsButRefusesUnverifiedCityPartition(t *testing.T) {
 	store := newNudgeCommandSourceAtomicStore()
 	cityPath := t.TempDir()
 
-	first, err := openVerifiedProductionNudgeCommandSource(t.Context(), cityPath, store)
-	if err != nil {
-		t.Fatalf("first open: %v", err)
-	}
-	firstSnapshot, err := first.Snapshot(t.Context(), 1)
-	if err != nil {
-		t.Fatalf("first Snapshot: %v", err)
-	}
-	if firstSnapshot.Store.StoreUUID == "" || firstSnapshot.Store.RestoreEpoch != 1 || firstSnapshot.Revision != 0 || firstSnapshot.SequenceHighWater != 0 {
-		t.Fatalf("first snapshot = %#v", firstSnapshot)
+	first, err := openVerifiedProductionNudgeCommandSource(t.Context(), cityPath, store, nudgequeue.TrustedCityPartition{}, nil)
+	if first != nil || !errors.Is(err, errNudgeCommandSourceUnverified) || !errors.Is(err, nudgequeue.ErrCommandRepositoryPartition) {
+		t.Fatalf("first open = %T, err=%v; want unverified partition refusal", first, err)
 	}
 	if writes := store.metadataWriteCount(); writes != 6 {
 		t.Fatalf("initial metadata writes = %d, want 6", writes)
@@ -34,29 +28,30 @@ func TestOpenProductionNudgeCommandSourceProvisionsOnceAndReopensReadOnly(t *tes
 		t.Fatalf("independent restore anchor after first open: exists=%t err=%v", exists, err)
 	}
 
-	second, err := openVerifiedProductionNudgeCommandSource(t.Context(), cityPath, store)
-	if err != nil {
-		t.Fatalf("second open: %v", err)
-	}
-	secondSnapshot, err := second.Snapshot(t.Context(), 1)
-	if err != nil {
-		t.Fatalf("second Snapshot: %v", err)
-	}
-	if secondSnapshot.Store != firstSnapshot.Store {
-		t.Fatalf("reopened store binding = %#v, want %#v", secondSnapshot.Store, firstSnapshot.Store)
+	second, err := openVerifiedProductionNudgeCommandSource(t.Context(), cityPath, store, nudgequeue.TrustedCityPartition{}, nil)
+	if second != nil || !errors.Is(err, errNudgeCommandSourceUnverified) || !errors.Is(err, nudgequeue.ErrCommandRepositoryPartition) {
+		t.Fatalf("second open = %T, err=%v; want stable unverified partition refusal", second, err)
 	}
 	if writes := store.metadataWriteCount(); writes != 6 {
-		t.Fatalf("read-only reopen metadata writes = %d, want 6", writes)
+		t.Fatalf("unverified reopen metadata writes = %d, want 6", writes)
 	}
 }
 
 func TestOpenProductionNudgeCommandSourceLeavesUnsupportedStoreLegacyOnly(t *testing.T) {
-	source, err := openVerifiedProductionNudgeCommandSource(t.Context(), t.TempDir(), beads.NewMemStore())
+	source, err := openVerifiedProductionNudgeCommandSource(t.Context(), t.TempDir(), beads.NewMemStore(), nudgequeue.TrustedCityPartition{}, nil)
 	if source != nil {
 		t.Fatalf("unsupported source = %T, want nil", source)
 	}
 	if !errors.Is(err, errNudgeCommandSourceUnverified) || !errors.Is(err, nudgequeue.ErrCommandRepositoryUnsupported) {
 		t.Fatalf("unsupported error = %v, want unverified + repository unsupported", err)
+	}
+}
+
+func TestProductionNudgeCommandSourceCanHoldOnlyPartitionedRepositoryReader(t *testing.T) {
+	typ := reflect.TypeOf(productionNudgeCommandSource{})
+	field, ok := typ.FieldByName("repository")
+	if !ok || field.Type != reflect.TypeOf((*nudgequeue.CommandPartitionReader)(nil)) {
+		t.Fatalf("production source repository field = %#v, want *nudgequeue.CommandPartitionReader", field)
 	}
 }
 

@@ -141,6 +141,8 @@ type CityRuntime struct {
 	nudgeKeyShadowScope           string
 	nudgeKeyReader                *nudgeKeyReadShadow
 	nudgeCommandSourceOpener      nudgeCommandSourceOpener
+	nudgeCityPartition            nudgequeue.TrustedCityPartition
+	nudgeCityPartitionResolver    nudgequeue.TrustedCityPartitionResolver
 	nudgeKeyInstallRetry          bool
 	nudgeKeyTickerFactory         nudgeKeyPeriodicTickerFactory
 	nudgeKeyRetryTimerFactory     nudgeKeyPeriodicTickerFactory
@@ -227,6 +229,10 @@ type CityRuntimeParams struct {
 	ManagedDoltHealth   func(string) error
 	ManagedDoltOwned    func(string) (bool, error)
 	ManagedDoltPort     func(string) string
+	// NudgeCityPartition and its resolver remain zero/nil until trusted
+	// ingress installs non-self-asserted city authority.
+	NudgeCityPartition         nudgequeue.TrustedCityPartition
+	NudgeCityPartitionResolver nudgequeue.TrustedCityPartitionResolver
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -369,16 +375,18 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh:              make(chan struct{}, 1),
-		onStarted:                p.OnStarted,
-		onStatus:                 p.OnStatus,
-		managedDoltHealth:        managedDoltHealth,
-		managedDoltOwned:         managedDoltOwned,
-		managedDoltPort:          managedDoltPort,
-		nudgeCommandSourceOpener: openProductionNudgeCommandSource,
-		logPrefix:                logPrefix,
-		stdout:                   p.Stdout,
-		stderr:                   p.Stderr,
+		nudgeWakeCh:                make(chan struct{}, 1),
+		onStarted:                  p.OnStarted,
+		onStatus:                   p.OnStatus,
+		managedDoltHealth:          managedDoltHealth,
+		managedDoltOwned:           managedDoltOwned,
+		managedDoltPort:            managedDoltPort,
+		nudgeCommandSourceOpener:   openProductionNudgeCommandSource,
+		nudgeCityPartition:         p.NudgeCityPartition,
+		nudgeCityPartitionResolver: p.NudgeCityPartitionResolver,
+		logPrefix:                  logPrefix,
+		stdout:                     p.Stdout,
+		stderr:                     p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -855,7 +863,13 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	if opener == nil {
 		opener = openProductionNudgeCommandSource
 	}
-	source, err := opener(ctx, cr.cityPath, cr.nudgesBeadStore().Store)
+	source, err := opener(
+		ctx,
+		cr.cityPath,
+		cr.nudgesBeadStore().Store,
+		cr.nudgeCityPartition,
+		cr.nudgeCityPartitionResolver,
+	)
 	if err != nil {
 		if errors.Is(err, errNudgeCommandSourceUnverified) {
 			cr.recordNudgeKeyInstallFailure(nil)

@@ -65,6 +65,68 @@ func TestAtomicReadSnapshotPageQueryRequiresBoundedIndexedKeyset(t *testing.T) {
 	}
 }
 
+func TestAtomicReadSnapshotControlSequenceQueryRequiresExactBoundedLookup(t *testing.T) {
+	t.Parallel()
+
+	valid := AtomicReadSnapshotControlSequenceQuery{
+		IDPrefix: "gc-nudge-",
+		Sequence: 7,
+		Limit:    2,
+	}
+	if err := validateAtomicReadSnapshotControlSequenceQuery(valid); err != nil {
+		t.Fatalf("valid query: %v", err)
+	}
+
+	tests := map[string]func(*AtomicReadSnapshotControlSequenceQuery){
+		"missing prefix":  func(query *AtomicReadSnapshotControlSequenceQuery) { query.IDPrefix = "" },
+		"wildcard prefix": func(query *AtomicReadSnapshotControlSequenceQuery) { query.IDPrefix = "gc-nudge-%" },
+		"zero sequence":   func(query *AtomicReadSnapshotControlSequenceQuery) { query.Sequence = 0 },
+		"zero limit":      func(query *AtomicReadSnapshotControlSequenceQuery) { query.Limit = 0 },
+		"oversized limit": func(query *AtomicReadSnapshotControlSequenceQuery) { query.Limit = MaxAtomicReadSnapshotPageSize + 1 },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			query := valid
+			mutate(&query)
+			if err := validateAtomicReadSnapshotControlSequenceQuery(query); !errors.Is(err, ErrAtomicReadSnapshotQuery) {
+				t.Fatalf("error = %v, want ErrAtomicReadSnapshotQuery", err)
+			}
+		})
+	}
+}
+
+func TestValidateAtomicReadSnapshotControlSequencePageRejectsBackendViolations(t *testing.T) {
+	t.Parallel()
+
+	query := AtomicReadSnapshotControlSequenceQuery{IDPrefix: "gc-nudge-", Sequence: 7, Limit: 2}
+	valid := AtomicReadSnapshotControlSequencePage{Rows: []Bead{
+		{ID: "gc-nudge-a", UpdatedAt: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)},
+		{ID: "gc-nudge-b", UpdatedAt: time.Date(2026, 7, 15, 12, 0, 1, 0, time.UTC)},
+	}}
+	if err := validateAtomicReadSnapshotControlSequencePage(query, valid); err != nil {
+		t.Fatalf("valid page: %v", err)
+	}
+
+	tests := map[string]func(*AtomicReadSnapshotControlSequencePage){
+		"too many rows": func(page *AtomicReadSnapshotControlSequencePage) {
+			page.Rows = append(page.Rows, Bead{ID: "gc-nudge-c", UpdatedAt: time.Now().UTC()})
+		},
+		"wrong prefix": func(page *AtomicReadSnapshotControlSequencePage) { page.Rows[0].ID = "other-a" },
+		"out of order": func(page *AtomicReadSnapshotControlSequencePage) { page.Rows[1].ID = "gc-nudge-0" },
+		"non-history":  func(page *AtomicReadSnapshotControlSequencePage) { page.Rows[0].NoHistory = true },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			page := valid
+			page.Rows = append([]Bead(nil), valid.Rows...)
+			mutate(&page)
+			if err := validateAtomicReadSnapshotControlSequencePage(query, page); !errors.Is(err, ErrAtomicReadSnapshotQuery) {
+				t.Fatalf("error = %v, want ErrAtomicReadSnapshotQuery", err)
+			}
+		})
+	}
+}
+
 func TestValidateAtomicReadSnapshotPageRejectsBackendCursorAndSelectorViolations(t *testing.T) {
 	t.Parallel()
 

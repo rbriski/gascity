@@ -82,6 +82,7 @@ type CommandIndexPage struct {
 type CommandIndexResolution struct {
 	Store                  CommandStoreBinding
 	Revision               uint64
+	SequenceHighWater      uint64
 	CompletedAuditRevision uint64
 	Entry                  CommandIndexEntry
 	Found                  bool

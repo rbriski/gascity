@@ -6,30 +6,39 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 const (
 	nativeDoltStatusIDSnapshotIndex         = "gc_idx_issues_status_id"
 	nativeDoltAssigneeStatusIDSnapshotIndex = "gc_idx_issues_assignee_status_id"
+	nativeDoltControlSequenceColumn         = "gc_control_sequence"
+	nativeDoltControlSequenceSnapshotIndex  = "gc_idx_issues_control_sequence_id"
+	nativeDoltControlSequenceUniqueIndex    = "gc_uq_issues_control_sequence"
 )
 
 type nativeDoltSnapshotIndexSpec struct {
 	name    string
 	columns string
+	unique  bool
 }
 
-func nativeDoltOwnedSnapshotIndexSpecs() [2]nativeDoltSnapshotIndexSpec {
-	return [2]nativeDoltSnapshotIndexSpec{
+func nativeDoltOwnedSnapshotIndexSpecs() []nativeDoltSnapshotIndexSpec {
+	return []nativeDoltSnapshotIndexSpec{
 		{name: nativeDoltStatusIDSnapshotIndex, columns: "status,id"},
 		{name: nativeDoltAssigneeStatusIDSnapshotIndex, columns: "assignee,status,id"},
+		{name: nativeDoltControlSequenceSnapshotIndex, columns: nativeDoltControlSequenceColumn + ",id"},
+		{name: nativeDoltControlSequenceUniqueIndex, columns: nativeDoltControlSequenceColumn, unique: true},
 	}
 }
 
-// PrepareAtomicReadSnapshot installs the Gas City-owned companion indexes used
-// for bounded global and exact-assignee current-state reads. It is deliberately
+// PrepareAtomicReadSnapshot installs the Gas City-owned indexes and generated
+// command-sequence projection used by bounded snapshot reads. It is deliberately
 // separate from AtomicReadSnapshot so read paths remain side-effect free. An
-// index with an owned name but different columns is schema skew and fails
+// owned index with different columns or uniqueness is schema skew and fails
 // closed.
 func (s *NativeDoltStore) PrepareAtomicReadSnapshot(parent context.Context) error {
 	if parent == nil {
@@ -50,27 +59,94 @@ func (s *NativeDoltStore) PrepareAtomicReadSnapshot(parent context.Context) erro
 		return err
 	}
 	defer func() { _ = cleanup() }()
+	if err := prepareNativeDoltControlSequenceColumn(ctx, db); err != nil {
+		return err
+	}
 	for _, index := range nativeDoltOwnedSnapshotIndexSpecs() {
-		columns, present, err := nativeDoltSnapshotIndexColumns(ctx, db, index.name)
+		columns, unique, present, err := nativeDoltSnapshotIndexDefinition(ctx, db, index.name)
 		if err != nil {
 			return fmt.Errorf("checking NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 		}
 		if present {
-			if columns != index.columns {
-				return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns, index.columns, ErrAtomicReadSnapshotUnsupported)
+			if columns != index.columns || unique != index.unique {
+				return fmt.Errorf("NativeDolt atomic snapshot paging index %q definition = columns:%q unique:%t, want columns:%s unique:%t: %w", index.name, columns, unique, index.columns, index.unique, ErrAtomicReadSnapshotUnsupported)
 			}
 			continue
 		}
-		if _, err := db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS "+index.name+" ON issues ("+index.columns+")"); err != nil {
+		create := "CREATE INDEX IF NOT EXISTS "
+		if index.unique {
+			create = "CREATE UNIQUE INDEX IF NOT EXISTS "
+		}
+		if _, err := db.ExecContext(ctx, create+index.name+" ON issues ("+index.columns+")"); err != nil {
 			return fmt.Errorf("installing NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 		}
-		columns, present, err = nativeDoltSnapshotIndexColumns(ctx, db, index.name)
+		columns, unique, present, err = nativeDoltSnapshotIndexDefinition(ctx, db, index.name)
 		if err != nil {
 			return fmt.Errorf("verifying installed NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 		}
-		if !present || columns != index.columns {
-			return fmt.Errorf("installed NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns, index.columns, ErrAtomicReadSnapshotUnsupported)
+		if !present || columns != index.columns || unique != index.unique {
+			return fmt.Errorf("installed NativeDolt atomic snapshot paging index %q definition = columns:%q unique:%t, want columns:%s unique:%t: %w", index.name, columns, unique, index.columns, index.unique, ErrAtomicReadSnapshotUnsupported)
 		}
+	}
+	return nil
+}
+
+func prepareNativeDoltControlSequenceColumn(ctx context.Context, db *sql.DB) error {
+	present, err := nativeDoltControlSequenceColumnPresent(ctx, db)
+	if err != nil {
+		return fmt.Errorf("checking NativeDolt control-sequence projection: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	if !present {
+		statement := fmt.Sprintf(`ALTER TABLE issues ADD COLUMN %s BIGINT UNSIGNED GENERATED ALWAYS AS (
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."%s"')), '$.order.sequence')) AS UNSIGNED)
+		) STORED`, nativeDoltControlSequenceColumn, beadmeta.ControlCommandWireMetadataKey)
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("installing NativeDolt control-sequence projection: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+		}
+	}
+	if err := verifyNativeDoltControlSequenceColumn(ctx, db); err != nil {
+		return err
+	}
+	return nil
+}
+
+type nativeDoltSnapshotColumnQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func nativeDoltControlSequenceColumnPresent(ctx context.Context, queryer nativeDoltSnapshotColumnQueryer) (bool, error) {
+	var count int
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_NAME = 'issues'
+		  AND COLUMN_NAME = ?
+	`, nativeDoltControlSequenceColumn).Scan(&count); err != nil {
+		return false, err
+	}
+	return count == 1, nil
+}
+
+func verifyNativeDoltControlSequenceColumn(ctx context.Context, queryer nativeDoltSnapshotColumnQueryer) error {
+	var tableName, definition string
+	if err := queryer.QueryRowContext(ctx, "SHOW CREATE TABLE issues").Scan(&tableName, &definition); err != nil {
+		return fmt.Errorf("verifying NativeDolt control-sequence projection: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	var columnLine string
+	for _, line := range strings.Split(definition, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "`"+nativeDoltControlSequenceColumn+"`") {
+			columnLine = strings.ToLower(strings.Join(strings.Fields(line), " "))
+			break
+		}
+	}
+	expected := strings.ToLower(strings.Join(strings.Fields(fmt.Sprintf(
+		"`%s` bigint unsigned generated always as (convert(json_unquote(json_extract(json_unquote(json_extract(`metadata`, '$.\"%s\"')), '$.order.sequence')), unsigned)) stored,",
+		nativeDoltControlSequenceColumn, beadmeta.ControlCommandWireMetadataKey,
+	)), " "))
+	if columnLine != expected {
+		return fmt.Errorf("NativeDolt control-sequence projection definition = %q, want %q: %w", columnLine, expected, ErrAtomicReadSnapshotUnsupported)
 	}
 	return nil
 }
@@ -141,34 +217,44 @@ type nativeDoltSnapshotIndexQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func nativeDoltSnapshotIndexColumns(ctx context.Context, queryer nativeDoltSnapshotIndexQueryer, indexName string) (string, bool, error) {
-	var columns sql.NullString
+func nativeDoltSnapshotIndexDefinition(ctx context.Context, queryer nativeDoltSnapshotIndexQueryer, indexName string) (string, bool, bool, error) {
+	var columns, nonUnique sql.NullString
 	err := queryer.QueryRowContext(ctx, `
-		SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',')
+		SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ','),
+		       GROUP_CONCAT(DISTINCT NON_UNIQUE ORDER BY NON_UNIQUE SEPARATOR ',')
 		FROM INFORMATION_SCHEMA.STATISTICS
 		WHERE TABLE_SCHEMA = DATABASE()
 		  AND TABLE_NAME = 'issues'
 		  AND INDEX_NAME = ?
-	`, indexName).Scan(&columns)
+	`, indexName).Scan(&columns, &nonUnique)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
-	return columns.String, columns.Valid, nil
+	if !columns.Valid && !nonUnique.Valid {
+		return "", false, false, nil
+	}
+	if !columns.Valid || !nonUnique.Valid || (nonUnique.String != "0" && nonUnique.String != "1") {
+		return "", false, false, fmt.Errorf("NativeDolt index %q has inconsistent uniqueness metadata %q", indexName, nonUnique.String)
+	}
+	return columns.String, nonUnique.String == "0", true, nil
 }
 
 func (t *nativeDoltAtomicReadSnapshotTx) verifyPagingIndexes() error {
+	if err := verifyNativeDoltControlSequenceColumn(t.ctx, t.tx); err != nil {
+		return err
+	}
 	indexes := []nativeDoltSnapshotIndexSpec{
 		{name: "idx_issues_status_updated_at", columns: "status,updated_at"},
 	}
 	ownedIndexes := nativeDoltOwnedSnapshotIndexSpecs()
-	indexes = append(indexes, ownedIndexes[:]...)
+	indexes = append(indexes, ownedIndexes...)
 	for _, index := range indexes {
-		columns, present, err := nativeDoltSnapshotIndexColumns(t.ctx, t.tx, index.name)
+		columns, unique, present, err := nativeDoltSnapshotIndexDefinition(t.ctx, t.tx, index.name)
 		if err != nil {
 			return fmt.Errorf("verifying NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 		}
-		if !present || columns != index.columns {
-			return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns, index.columns, ErrAtomicReadSnapshotUnsupported)
+		if !present || columns != index.columns || unique != index.unique {
+			return fmt.Errorf("NativeDolt atomic snapshot paging index %q definition = columns:%q unique:%t, want columns:%s unique:%t: %w", index.name, columns, unique, index.columns, index.unique, ErrAtomicReadSnapshotUnsupported)
 		}
 	}
 	return nil
@@ -271,6 +357,45 @@ func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryPage(query AtomicReadSnapsho
 	}
 	if err := validateAtomicReadSnapshotPage(query, page); err != nil {
 		return AtomicReadSnapshotPage{}, err
+	}
+	return page, nil
+}
+
+func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryByControlSequence(query AtomicReadSnapshotControlSequenceQuery) (page AtomicReadSnapshotControlSequencePage, err error) {
+	if err := validateAtomicReadSnapshotControlSequenceQuery(query); err != nil {
+		return AtomicReadSnapshotControlSequencePage{}, err
+	}
+	rows, err := t.tx.QueryContext(t.ctx, fmt.Sprintf(`
+		SELECT id, title, status, issue_type, created_at, updated_at,
+		       COALESCE(assignee, ''), metadata,
+		       COALESCE(ephemeral, 0), COALESCE(no_history, 0)
+		FROM issues FORCE INDEX (%s)
+		WHERE %s = ? AND id LIKE ?
+		ORDER BY %s ASC, id ASC
+		LIMIT ?
+	`, nativeDoltControlSequenceSnapshotIndex, nativeDoltControlSequenceColumn, nativeDoltControlSequenceColumn),
+		strconv.FormatUint(query.Sequence, 10), query.IDPrefix+"%", query.Limit)
+	if err != nil {
+		return AtomicReadSnapshotControlSequencePage{}, fmt.Errorf("listing NativeDolt control-sequence snapshot: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing NativeDolt control-sequence snapshot: %w", closeErr))
+		}
+	}()
+	page.Rows = make([]Bead, 0, query.Limit)
+	for rows.Next() {
+		bead, err := scanNativeDoltAtomicSnapshotBead(rows)
+		if err != nil {
+			return AtomicReadSnapshotControlSequencePage{}, fmt.Errorf("scanning NativeDolt control-sequence snapshot: %w", err)
+		}
+		page.Rows = append(page.Rows, bead)
+	}
+	if err := rows.Err(); err != nil {
+		return AtomicReadSnapshotControlSequencePage{}, fmt.Errorf("iterating NativeDolt control-sequence snapshot: %w", err)
+	}
+	if err := validateAtomicReadSnapshotControlSequencePage(query, page); err != nil {
+		return AtomicReadSnapshotControlSequencePage{}, err
 	}
 	return page, nil
 }

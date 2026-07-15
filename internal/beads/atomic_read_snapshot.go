@@ -69,11 +69,29 @@ type AtomicReadSnapshotPage struct {
 	Next AtomicReadSnapshotCursor
 }
 
+// AtomicReadSnapshotControlSequenceQuery selects the at-most-two history rows
+// whose provider-maintained control-command sequence projection equals one
+// exact sequence. IDPrefix and Limit keep the duplicate probe bounded; callers
+// must decode the authoritative command wire and verify the projected sequence.
+type AtomicReadSnapshotControlSequenceQuery struct {
+	IDPrefix string
+	Sequence uint64
+	Limit    int
+}
+
+// AtomicReadSnapshotControlSequencePage is one exact-sequence duplicate probe
+// ordered by ID. It has no continuation because callers request one sequence at
+// a time and use Limit=2 to distinguish missing, unique, and conflicting rows.
+type AtomicReadSnapshotControlSequencePage struct {
+	Rows []Bead
+}
+
 // AtomicReadSnapshotTx is a read-only transaction surface. GetIssue and
 // GetMetadata observe the same snapshot as every ListHistoryPage call.
 type AtomicReadSnapshotTx interface {
 	GetIssue(id string) (Bead, error)
 	ListHistoryPage(query AtomicReadSnapshotPageQuery) (AtomicReadSnapshotPage, error)
+	ListHistoryByControlSequence(query AtomicReadSnapshotControlSequenceQuery) (AtomicReadSnapshotControlSequencePage, error)
 	GetMetadata(key string) (string, error)
 }
 
@@ -157,6 +175,22 @@ func validateAtomicReadSnapshotPageQuery(query AtomicReadSnapshotPageQuery) erro
 	return nil
 }
 
+func validateAtomicReadSnapshotControlSequenceQuery(query AtomicReadSnapshotControlSequenceQuery) error {
+	if query.Limit <= 0 || query.Limit > MaxAtomicReadSnapshotPageSize {
+		return fmt.Errorf("control-sequence snapshot limit %d is outside 1..%d: %w", query.Limit, MaxAtomicReadSnapshotPageSize, ErrAtomicReadSnapshotQuery)
+	}
+	if err := validateAtomicReadSnapshotSelector("id prefix", query.IDPrefix); err != nil {
+		return err
+	}
+	if strings.ContainsAny(query.IDPrefix, "%_\\") {
+		return fmt.Errorf("control-sequence snapshot id prefix contains a SQL pattern character: %w", ErrAtomicReadSnapshotQuery)
+	}
+	if query.Sequence == 0 {
+		return fmt.Errorf("control-sequence snapshot sequence is zero: %w", ErrAtomicReadSnapshotQuery)
+	}
+	return nil
+}
+
 func validateAtomicReadSnapshotSelector(name, value string) error {
 	if value == "" || strings.TrimSpace(value) != value {
 		return fmt.Errorf("snapshot %s is empty or non-canonical: %w", name, ErrAtomicReadSnapshotQuery)
@@ -202,6 +236,29 @@ func validateAtomicReadSnapshotPage(query AtomicReadSnapshotPageQuery, page Atom
 	}
 	if page.Next != wantNext {
 		return fmt.Errorf("snapshot page continuation %#v does not match %#v: %w", page.Next, wantNext, ErrAtomicReadSnapshotQuery)
+	}
+	return nil
+}
+
+func validateAtomicReadSnapshotControlSequencePage(query AtomicReadSnapshotControlSequenceQuery, page AtomicReadSnapshotControlSequencePage) error {
+	if err := validateAtomicReadSnapshotControlSequenceQuery(query); err != nil {
+		return err
+	}
+	if len(page.Rows) > query.Limit {
+		return fmt.Errorf("control-sequence snapshot returned %d rows above limit %d: %w", len(page.Rows), query.Limit, ErrAtomicReadSnapshotQuery)
+	}
+	previousID := ""
+	for _, row := range page.Rows {
+		if err := requireAtomicReadWriteHistory(row); err != nil {
+			return fmt.Errorf("control-sequence snapshot returned a non-history row: %w", errors.Join(ErrAtomicReadSnapshotQuery, err))
+		}
+		if !strings.HasPrefix(row.ID, query.IDPrefix) || (previousID != "" && row.ID <= previousID) {
+			return fmt.Errorf("control-sequence snapshot row %q violates prefix or ID order: %w", row.ID, ErrAtomicReadSnapshotQuery)
+		}
+		if row.UpdatedAt.IsZero() || row.UpdatedAt.Location() != time.UTC {
+			return fmt.Errorf("control-sequence snapshot row %q has zero or non-UTC updated_at: %w", row.ID, ErrAtomicReadSnapshotQuery)
+		}
+		previousID = row.ID
 	}
 	return nil
 }

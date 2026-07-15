@@ -3,6 +3,7 @@ package nudgequeue
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
@@ -284,6 +285,65 @@ func TestCommandRepositoryCreateIsIdempotentAndReadsExactDurableAuthority(t *tes
 	}
 	if _, err := BuildCommandIndex(snapshot); err != nil {
 		t.Fatalf("BuildCommandIndex(repository snapshot): %v", err)
+	}
+}
+
+func TestCommandRepositoryResolveSequenceUsesExactTwoRowIndexProbe(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	state, err := repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	for sequence := uint64(1); sequence <= 3; sequence++ {
+		requestID := fmt.Sprintf("sequence-probe-request-%d", sequence)
+		command := repositoryCommandForRequest(t, state.Store, requestID, requestID)
+		if _, created, err := repository.createForTest(t.Context(), requestID, command); err != nil || !created {
+			t.Fatalf("create sequence %d: created=%t err=%v", sequence, created, err)
+		}
+	}
+
+	resolved, err := repository.ResolveSequence(t.Context(), 2)
+	if err != nil || !resolved.Found || resolved.Entry.Command == nil {
+		t.Fatalf("ResolveSequence(2) = %#v, err=%v", resolved, err)
+	}
+	if resolved.Sequence != 2 || resolved.SequenceHighWater != 3 || resolved.Entry.Command.Order.Sequence != 2 {
+		t.Fatalf("ResolveSequence(2) = %#v", resolved)
+	}
+	queries := store.controlSequenceQueriesForTest()
+	if len(queries) != 1 || queries[0] != (beads.AtomicReadSnapshotControlSequenceQuery{
+		IDPrefix: commandIDPrefix, Sequence: 2, Limit: 2,
+	}) {
+		t.Fatalf("control-sequence queries = %#v, want one exact duplicate probe", queries)
+	}
+}
+
+func TestCommandRepositoryResolveSequenceRejectsDuplicateProjection(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	state, err := repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	requestID := "duplicate-sequence-projection"
+	command := repositoryCommandForRequest(t, state.Store, requestID, requestID)
+	entry, created, err := repository.createForTest(t.Context(), requestID, command)
+	if err != nil || !created || entry.Command == nil {
+		t.Fatalf("create sequence owner = %#v, created=%t err=%v", entry, created, err)
+	}
+
+	store.mu.Lock()
+	row := cloneRepositoryRow(store.rows[entry.Command.ID])
+	row.ID = commandIDPrefix + strings.Repeat("f", sha256.Size*2)
+	store.rows[row.ID] = row
+	store.mu.Unlock()
+
+	if _, err := repository.ResolveSequence(t.Context(), entry.Command.Order.Sequence); !errors.Is(err, ErrCommandRepositoryRecord) {
+		t.Fatalf("ResolveSequence duplicate error = %v, want record refusal", err)
+	}
+	queries := store.controlSequenceQueriesForTest()
+	if len(queries) != 1 || queries[0].Limit != 2 {
+		t.Fatalf("duplicate probe queries = %#v, want one two-row probe", queries)
 	}
 }
 
@@ -616,6 +676,35 @@ func TestCommandRepositoryProvisionPreparesPagingBeforeAuthority(t *testing.T) {
 	}
 	if store.prepareCalls != 2 {
 		t.Fatalf("preparation calls after retry = %d, want 2", store.prepareCalls)
+	}
+}
+
+func TestCommandRepositoryProvisionRefusesOlderWriterBeforePreparingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store := newRepositoryAtomicTestStore()
+	store.seedMetadata(CommandRepositoryState{
+		Store:         CommandStoreBinding{StoreUUID: uuid.NewString(), RestoreEpoch: 1},
+		SchemaVersion: CommandRepositorySchemaVersion - 1,
+		WriterVersion: CommandRepositoryWriterVersion - 1,
+	})
+	before := store.metadataSnapshot()
+	repo, err := NewCommandRepository(store, &repositoryLineageTestVerifier{})
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
+
+	if _, err := repo.Provision(t.Context()); !errors.Is(err, ErrCommandRepositorySchemaSkew) {
+		t.Fatalf("Provision older repository error = %v, want schema skew", err)
+	}
+	if store.prepareCalls != 0 {
+		t.Fatalf("snapshot preparation calls = %d, want zero before compatibility is proven", store.prepareCalls)
+	}
+	if after := store.metadataSnapshot(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("older repository metadata mutated: before=%#v after=%#v", before, after)
+	}
+	if store.hasAnyRows() {
+		t.Fatal("older repository refusal created a command row")
 	}
 }
 
@@ -1163,6 +1252,7 @@ type repositoryAtomicTestStore struct {
 	prepareErr          error
 	snapshotPageLimits  []int
 	snapshotPageQueries []beads.AtomicReadSnapshotPageQuery
+	sequenceQueries     []beads.AtomicReadSnapshotControlSequenceQuery
 	afterSnapshotPage   func()
 }
 
@@ -1201,6 +1291,11 @@ func (s *repositoryAtomicTestStore) AtomicReadSnapshot(ctx context.Context, fn f
 			if after != nil {
 				after()
 			}
+		},
+		onControlSequence: func(query beads.AtomicReadSnapshotControlSequenceQuery) {
+			s.mu.Lock()
+			s.sequenceQueries = append(s.sequenceQueries, query)
+			s.mu.Unlock()
 		},
 	}
 	s.mu.Unlock()
@@ -1394,14 +1489,15 @@ func (s *repositoryAtomicTestStore) seedCommands(t *testing.T, state CommandRepo
 }
 
 type repositoryAtomicTestTx struct {
-	rows           map[string]beads.Bead
-	metadata       map[string]string
-	now            time.Time
-	afterList      func()
-	onCreate       func()
-	onSetMetadata  func()
-	onUpdate       func() error
-	onSnapshotPage func(beads.AtomicReadSnapshotPageQuery)
+	rows              map[string]beads.Bead
+	metadata          map[string]string
+	now               time.Time
+	afterList         func()
+	onCreate          func()
+	onSetMetadata     func()
+	onUpdate          func() error
+	onSnapshotPage    func(beads.AtomicReadSnapshotPageQuery)
+	onControlSequence func(beads.AtomicReadSnapshotControlSequenceQuery)
 }
 
 func (tx *repositoryAtomicTestTx) GetIssue(id string) (beads.Bead, error) {
@@ -1499,6 +1595,31 @@ func (tx *repositoryAtomicTestTx) ListHistoryPage(query beads.AtomicReadSnapshot
 	return page, nil
 }
 
+func (tx *repositoryAtomicTestTx) ListHistoryByControlSequence(query beads.AtomicReadSnapshotControlSequenceQuery) (beads.AtomicReadSnapshotControlSequencePage, error) {
+	if tx.onControlSequence != nil {
+		tx.onControlSequence(query)
+	}
+	if query.Limit <= 0 || query.Limit > beads.MaxAtomicReadSnapshotPageSize || query.IDPrefix == "" || query.Sequence == 0 {
+		return beads.AtomicReadSnapshotControlSequencePage{}, beads.ErrAtomicReadSnapshotQuery
+	}
+	rows := make([]beads.Bead, 0, query.Limit)
+	for _, row := range tx.rows {
+		if row.Ephemeral || row.NoHistory || !strings.HasPrefix(row.ID, query.IDPrefix) {
+			continue
+		}
+		decoded := DecodeCommand([]byte(row.Metadata[commandRecordWireMetadataKey]))
+		if decoded.Routing.Sequence != query.Sequence {
+			continue
+		}
+		rows = append(rows, cloneRepositoryRow(row))
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	if len(rows) > query.Limit {
+		rows = rows[:query.Limit]
+	}
+	return beads.AtomicReadSnapshotControlSequencePage{Rows: rows}, nil
+}
+
 func (s *repositoryAtomicTestStore) snapshotPageLimitsForTest() []int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1509,6 +1630,12 @@ func (s *repositoryAtomicTestStore) snapshotPageQueriesForTest() []beads.AtomicR
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]beads.AtomicReadSnapshotPageQuery(nil), s.snapshotPageQueries...)
+}
+
+func (s *repositoryAtomicTestStore) controlSequenceQueriesForTest() []beads.AtomicReadSnapshotControlSequenceQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]beads.AtomicReadSnapshotControlSequenceQuery(nil), s.sequenceQueries...)
 }
 
 func (tx *repositoryAtomicTestTx) Create(row beads.Bead) (beads.Bead, error) {

@@ -134,7 +134,7 @@ func TestNativeDoltAtomicReadSnapshotFiltersExactAssigneeWithOwnedIndex(t *testi
 	if err != nil {
 		t.Fatalf("open snapshot database for index verification: %v", err)
 	}
-	columns, present, err := nativeDoltSnapshotIndexColumns(ctx, db, nativeDoltAssigneeStatusIDSnapshotIndex)
+	columns, _, present, err := nativeDoltSnapshotIndexDefinition(ctx, db, nativeDoltAssigneeStatusIDSnapshotIndex)
 	if err != nil {
 		t.Fatalf("read partition snapshot index: %v", err)
 	}

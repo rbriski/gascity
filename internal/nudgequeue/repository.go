@@ -23,10 +23,10 @@ import (
 const (
 	// CommandRepositorySchemaVersion is the exact durable row and metadata
 	// contract understood by this repository implementation.
-	CommandRepositorySchemaVersion uint32 = 1
+	CommandRepositorySchemaVersion uint32 = 2
 	// CommandRepositoryWriterVersion identifies the writer protocol that owns
 	// dense command sequence and repository revision allocation.
-	CommandRepositoryWriterVersion uint32 = 2
+	CommandRepositoryWriterVersion uint32 = 3
 	// MaxCommandRepositorySnapshotCommands is the maximum exact active command
 	// set returned by one reconstruction. Terminal lifetime is represented by a
 	// bounded checkpoint and does not consume this limit.
@@ -91,6 +91,19 @@ type CommandRepositoryState struct {
 	WriterVersion     uint32
 	Revision          uint64
 	SequenceHighWater uint64
+}
+
+// CommandSequenceResolution is one transaction-consistent exact-sequence
+// lookup used only by authority recovery. Found=false means the backing index
+// returned no row for Sequence at the reported repository watermark. More than
+// one row for the same sequence is a repository invariant error, never a page.
+type CommandSequenceResolution struct {
+	Store             CommandStoreBinding
+	Revision          uint64
+	SequenceHighWater uint64
+	Sequence          uint64
+	Entry             CommandIndexEntry
+	Found             bool
 }
 
 // CommandRepositoryLineageVerifier checks independently retained store
@@ -359,6 +372,81 @@ func (r commandRepositoryReader) get(ctx context.Context, commandID string) (Com
 	return r.getPartition(ctx, commandID, nil)
 }
 
+// ResolveSequence returns the unique command occupying one exact durable
+// sequence using the provider-owned generated sequence index. It probes at
+// most two rows so a duplicate cannot be mistaken for a valid winner and never
+// falls back to a lifetime-sized command scan.
+func (r *CommandRepository) ResolveSequence(ctx context.Context, sequence uint64) (CommandSequenceResolution, error) {
+	if r == nil {
+		return CommandSequenceResolution{}, fmt.Errorf("%w: command repository is nil", ErrCommandRepositoryInvalidRequest)
+	}
+	return r.reader.resolveSequence(ctx, sequence)
+}
+
+func (r commandRepositoryReader) resolveSequence(ctx context.Context, sequence uint64) (CommandSequenceResolution, error) {
+	if err := validateRepositoryContext(ctx); err != nil {
+		return CommandSequenceResolution{}, err
+	}
+	if sequence == 0 {
+		return CommandSequenceResolution{}, fmt.Errorf("%w: command sequence is zero", ErrCommandRepositoryInvalidRequest)
+	}
+	before, err := r.state(ctx)
+	if err != nil {
+		return CommandSequenceResolution{}, err
+	}
+	var (
+		state CommandRepositoryState
+		entry CommandIndexEntry
+		found bool
+	)
+	err = r.snapshots.AtomicReadSnapshot(ctx, func(tx beads.AtomicReadSnapshotTx) error {
+		var err error
+		state, err = readCommandRepositoryState(tx)
+		if err != nil {
+			return err
+		}
+		if err := validateCommandRepositoryStateAdvance(before, state); err != nil {
+			return err
+		}
+		if sequence > state.SequenceHighWater {
+			return fmt.Errorf("%w: requested sequence %d exceeds repository high-water %d", ErrCommandRepositoryInvalidRequest, sequence, state.SequenceHighWater)
+		}
+		page, err := tx.ListHistoryByControlSequence(beads.AtomicReadSnapshotControlSequenceQuery{
+			IDPrefix: commandIDPrefix,
+			Sequence: sequence,
+			Limit:    2,
+		})
+		if err != nil {
+			return fmt.Errorf("resolving durable nudge command sequence %d: %w", sequence, err)
+		}
+		if len(page.Rows) > 1 {
+			return fmt.Errorf("%w: sequence %d is occupied by multiple command rows", ErrCommandRepositoryRecord, sequence)
+		}
+		if len(page.Rows) == 0 {
+			return nil
+		}
+		entry, _, err = decodeCommandRecord(page.Rows[0], state)
+		if err != nil {
+			return err
+		}
+		if routing := commandIndexEntryRouting(entry); routing.Sequence != sequence {
+			return &CommandRepositoryRecordError{CommandID: page.Rows[0].ID, Err: fmt.Errorf("indexed sequence %d differs from command sequence %d", sequence, routing.Sequence)}
+		}
+		found = true
+		return nil
+	})
+	if err != nil {
+		return CommandSequenceResolution{}, err
+	}
+	if err := r.verify(ctx, "exact sequence read", state); err != nil {
+		return CommandSequenceResolution{}, err
+	}
+	return CommandSequenceResolution{
+		Store: state.Store, Revision: state.Revision, SequenceHighWater: state.SequenceHighWater,
+		Sequence: sequence, Entry: entry, Found: found,
+	}, nil
+}
+
 type commandRepositoryExactValidator func(context.Context, beads.Bead, CommandIndexEntry) (bool, error)
 
 func (r commandRepositoryReader) getPartition(ctx context.Context, commandID string, validate commandRepositoryExactValidator) (CommandIndexResolution, error) {
@@ -417,10 +505,11 @@ func (r commandRepositoryReader) getPartition(ctx context.Context, commandID str
 		return CommandIndexResolution{}, err
 	}
 	return CommandIndexResolution{
-		Store:    state.Store,
-		Revision: state.Revision,
-		Entry:    entry,
-		Found:    found,
+		Store:             state.Store,
+		Revision:          state.Revision,
+		SequenceHighWater: state.SequenceHighWater,
+		Entry:             entry,
+		Found:             found,
 	}, nil
 }
 
@@ -576,6 +665,17 @@ func (r commandRepositoryReader) snapshotPartition(ctx context.Context, maxComma
 // fresh authority.
 func (r *CommandRepository) Provision(ctx context.Context) (CommandRepositoryState, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
+		return CommandRepositoryState{}, err
+	}
+	// Refuse incompatible durable metadata before asking the provider to install
+	// or repair any physical snapshot projection. This keeps an older or newer
+	// repository byte-for-byte untouched by a binary that cannot own its writer
+	// protocol. The provisioning transaction below performs the same check again
+	// after preparation so a concurrent metadata winner still fails closed.
+	if err := atomicCommandRepositoryRead(ctx, r.reader.store, "gc: verify durable nudge command repository before snapshot preparation", func(tx commandRepositoryReadTx) error {
+		_, _, err := readOptionalCommandRepositoryState(tx)
+		return err
+	}); err != nil {
 		return CommandRepositoryState{}, err
 	}
 	if r.preparer != nil {

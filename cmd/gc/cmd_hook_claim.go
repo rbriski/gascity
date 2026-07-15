@@ -575,6 +575,47 @@ func writeRunMap(runID, beadID string, sessionKeys ...string) {
 			_ = os.Rename(tmp, filepath.Join(dir, name+".json"))
 		}
 	}
+	// Reap dead sessions' entries so the dir doesn't leak one stale file per
+	// ended session on a long-uptime box (tmpfs clears /run only on reboot).
+	pruneRunMap(dir, time.Now(), runMapTTL())
+}
+
+// runMapTTL bounds how long a run-map file survives without a refreshing claim
+// before pruneRunMap reaps it. The file's mtime is refreshed on every claim, so
+// only sessions that have STOPPED claiming go stale; the default is generous
+// enough to exceed the longest a live session goes between claims (one
+// long-running work bead) so a working session is never pruned out from under
+// the proxy. Overridable via GC_RUNMAP_TTL (Go duration).
+func runMapTTL() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("GC_RUNMAP_TTL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 48 * time.Hour
+}
+
+// pruneRunMap best-effort removes run-map files not refreshed within ttl — the
+// files of sessions that have stopped claiming — so the dir stays bounded by
+// the live session set rather than growing one file per session ever seen.
+// Never blocks or fails the claim.
+func pruneRunMap(dir string, now time.Time, ttl time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > ttl {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // hookResolveWorkBranch returns the current git branch of dir, or "" when dir

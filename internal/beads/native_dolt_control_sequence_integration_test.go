@@ -14,7 +14,7 @@ import (
 )
 
 func TestNativeDoltControlSequenceProjectionRejectsExactSchemaSkew(t *testing.T) {
-	for _, skew := range []string{"generated expression", "index columns", "non-unique sequence constraint"} {
+	for _, skew := range []string{"generated expression", "index columns", "retired index shape"} {
 		t.Run(skew, func(t *testing.T) {
 			store, storage := newNativeDoltControlSequenceTestStore(t)
 			ctx := t.Context()
@@ -46,12 +46,18 @@ func TestNativeDoltControlSequenceProjectionRejectsExactSchemaSkew(t *testing.T)
 				if _, err := db.ExecContext(ctx, "CREATE INDEX "+nativeDoltControlSequenceSnapshotIndex+" ON issues (id,"+nativeDoltControlSequenceColumn+")"); err != nil {
 					t.Fatalf("install skewed control-sequence index: %v", err)
 				}
-			case "non-unique sequence constraint":
-				if _, err := db.ExecContext(ctx, "DROP INDEX "+nativeDoltControlSequenceUniqueIndex+" ON issues"); err != nil {
-					t.Fatalf("drop unique control-sequence constraint: %v", err)
+			case "retired index shape":
+				_, _, present, err := nativeDoltSnapshotIndexDefinition(ctx, db, nativeDoltLegacyControlSequenceUniqueIndex)
+				if err != nil {
+					t.Fatalf("inspect retired control-sequence index: %v", err)
 				}
-				if _, err := db.ExecContext(ctx, "CREATE INDEX "+nativeDoltControlSequenceUniqueIndex+" ON issues ("+nativeDoltControlSequenceColumn+")"); err != nil {
-					t.Fatalf("install non-unique control-sequence constraint: %v", err)
+				if present {
+					if _, err := db.ExecContext(ctx, "DROP INDEX "+nativeDoltLegacyControlSequenceUniqueIndex+" ON issues"); err != nil {
+						t.Fatalf("drop retired control-sequence index: %v", err)
+					}
+				}
+				if _, err := db.ExecContext(ctx, "CREATE INDEX "+nativeDoltLegacyControlSequenceUniqueIndex+" ON issues ("+nativeDoltControlSequenceColumn+")"); err != nil {
+					t.Fatalf("install malformed retired control-sequence index: %v", err)
 				}
 			default:
 				t.Fatalf("unknown skew %q", skew)
@@ -114,15 +120,95 @@ func TestNativeDoltControlSequenceLookupDistinguishesMissingAndUnique(t *testing
 	}
 }
 
-func TestNativeDoltControlSequenceProjectionRejectsDuplicateSequence(t *testing.T) {
+func TestNativeDoltControlSequenceLegacyUniqueIndexIsRepairedWithoutLosingRows(t *testing.T) {
+	store, storage := newNativeDoltControlSequenceTestStore(t)
+	createNativeDoltControlSequenceTestBead(t, store, "gc-command-a", 7)
+	createNativeDoltControlSequenceTestBead(t, store, "gc-command-b", 8)
+
+	ctx := t.Context()
+	db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
+	if err != nil {
+		t.Fatalf("open snapshot database for legacy control-sequence index: %v", err)
+	}
+	columns, unique, present, err := nativeDoltSnapshotIndexDefinition(ctx, db, nativeDoltLegacyControlSequenceUniqueIndex)
+	if err != nil {
+		t.Fatalf("inspect legacy control-sequence index: %v", err)
+	}
+	if !present {
+		if _, err := db.ExecContext(ctx, "CREATE UNIQUE INDEX "+nativeDoltLegacyControlSequenceUniqueIndex+" ON issues ("+nativeDoltControlSequenceColumn+")"); err != nil {
+			t.Fatalf("install legacy unique control-sequence index: %v", err)
+		}
+	} else if columns != nativeDoltControlSequenceColumn || !unique {
+		t.Fatalf("legacy control-sequence index definition = columns:%q unique:%t", columns, unique)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("close snapshot database after legacy index installation: %v", err)
+	}
+
+	if err := store.PrepareAtomicReadSnapshot(ctx); err != nil {
+		t.Fatalf("repair legacy unique control-sequence index: %v", err)
+	}
+	db, cleanup, err = openNativeDoltSnapshotDB(ctx, storage)
+	if err != nil {
+		t.Fatalf("reopen snapshot database after legacy repair: %v", err)
+	}
+	_, _, present, err = nativeDoltSnapshotIndexDefinition(ctx, db, nativeDoltLegacyControlSequenceUniqueIndex)
+	if err != nil {
+		t.Fatalf("inspect retired control-sequence index after repair: %v", err)
+	}
+	if present {
+		t.Fatal("retired unique control-sequence index remains after repair")
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("close snapshot database after legacy repair verification: %v", err)
+	}
+
+	if err := store.Close("gc-command-a"); err != nil {
+		t.Fatalf("terminalize row after legacy index repair: %v", err)
+	}
+	got, err := store.Get("gc-command-a")
+	if err != nil {
+		t.Fatalf("read terminal row after legacy index repair: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("terminal row status = %q, want closed", got.Status)
+	}
+	err = store.AtomicReadSnapshot(ctx, func(tx AtomicReadSnapshotTx) error {
+		page, err := tx.ListHistoryByControlSequence(AtomicReadSnapshotControlSequenceQuery{
+			IDPrefix: "gc-command-", Sequence: 8, Limit: 2,
+		})
+		if err != nil {
+			return err
+		}
+		if len(page.Rows) != 1 || page.Rows[0].ID != "gc-command-b" {
+			return fmt.Errorf("sequence 8 rows = %#v, want gc-command-b", page.Rows)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("exact lookup after legacy index repair: %v", err)
+	}
+}
+
+func TestNativeDoltControlSequenceLookupReturnsDuplicateRawProjections(t *testing.T) {
 	store, _ := newNativeDoltControlSequenceTestStore(t)
 	createNativeDoltControlSequenceTestBead(t, store, "gc-command-a", 7)
-	wire := `{"version":1,"order":{"sequence":7}}`
-	if _, err := store.Create(Bead{
-		ID: "gc-command-b", Title: "gc-command-b",
-		Metadata: map[string]string{beadmeta.ControlCommandWireMetadataKey: wire},
-	}); err == nil {
-		t.Fatal("duplicate projected command sequence was accepted")
+	createNativeDoltControlSequenceTestBead(t, store, "gc-command-b", 7)
+
+	err := store.AtomicReadSnapshot(t.Context(), func(tx AtomicReadSnapshotTx) error {
+		page, err := tx.ListHistoryByControlSequence(AtomicReadSnapshotControlSequenceQuery{
+			IDPrefix: "gc-command-", Sequence: 7, Limit: 2,
+		})
+		if err != nil {
+			return err
+		}
+		if len(page.Rows) != 2 || page.Rows[0].ID != "gc-command-a" || page.Rows[1].ID != "gc-command-b" {
+			return fmt.Errorf("duplicate sequence rows = %#v, want [gc-command-a gc-command-b]", page.Rows)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("AtomicReadSnapshot duplicate control-sequence lookup: %v", err)
 	}
 }
 

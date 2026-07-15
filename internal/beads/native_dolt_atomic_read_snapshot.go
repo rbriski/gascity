@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	nativeDoltStatusIDSnapshotIndex         = "gc_idx_issues_status_id"
-	nativeDoltAssigneeStatusIDSnapshotIndex = "gc_idx_issues_assignee_status_id"
-	nativeDoltControlSequenceColumn         = "gc_control_sequence"
-	nativeDoltControlSequenceSnapshotIndex  = "gc_idx_issues_control_sequence_id"
-	nativeDoltControlSequenceUniqueIndex    = "gc_uq_issues_control_sequence"
+	nativeDoltStatusIDSnapshotIndex            = "gc_idx_issues_status_id"
+	nativeDoltAssigneeStatusIDSnapshotIndex    = "gc_idx_issues_assignee_status_id"
+	nativeDoltControlSequenceColumn            = "gc_control_sequence"
+	nativeDoltControlSequenceSnapshotIndex     = "gc_idx_issues_control_sequence_id"
+	nativeDoltLegacyControlSequenceUniqueIndex = "gc_uq_issues_control_sequence"
 )
 
 type nativeDoltSnapshotIndexSpec struct {
@@ -31,7 +31,6 @@ func nativeDoltOwnedSnapshotIndexSpecs() []nativeDoltSnapshotIndexSpec {
 		{name: nativeDoltStatusIDSnapshotIndex, columns: "status,id"},
 		{name: nativeDoltAssigneeStatusIDSnapshotIndex, columns: "assignee,status,id"},
 		{name: nativeDoltControlSequenceSnapshotIndex, columns: nativeDoltControlSequenceColumn + ",id"},
-		{name: nativeDoltControlSequenceUniqueIndex, columns: nativeDoltControlSequenceColumn, unique: true},
 	}
 }
 
@@ -59,6 +58,9 @@ func (s *NativeDoltStore) PrepareAtomicReadSnapshot(parent context.Context) erro
 		return err
 	}
 	defer func() { _ = cleanup() }()
+	if err := repairNativeDoltLegacyControlSequenceUniqueIndex(ctx, db); err != nil {
+		return err
+	}
 	if err := prepareNativeDoltControlSequenceColumn(ctx, db); err != nil {
 		return err
 	}
@@ -91,15 +93,118 @@ func (s *NativeDoltStore) PrepareAtomicReadSnapshot(parent context.Context) erro
 	return nil
 }
 
+func repairNativeDoltLegacyControlSequenceUniqueIndex(ctx context.Context, db *sql.DB) error {
+	columns, unique, present, err := nativeDoltSnapshotIndexDefinition(ctx, db, nativeDoltLegacyControlSequenceUniqueIndex)
+	if err != nil {
+		return fmt.Errorf("checking retired NativeDolt control-sequence unique index: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	if !present {
+		return nil
+	}
+	if columns != nativeDoltControlSequenceColumn || !unique {
+		return fmt.Errorf(
+			"retired NativeDolt control-sequence index %q definition = columns:%q unique:%t, want legacy columns:%s unique:true: %w",
+			nativeDoltLegacyControlSequenceUniqueIndex,
+			columns,
+			unique,
+			nativeDoltControlSequenceColumn,
+			ErrAtomicReadSnapshotUnsupported,
+		)
+	}
+	if err := verifyNativeDoltControlSequenceColumn(ctx, db); err != nil {
+		return fmt.Errorf("refusing to repair retired NativeDolt control-sequence index over a skewed projection: %w", err)
+	}
+	columns, unique, present, err = nativeDoltSnapshotIndexDefinition(ctx, db, nativeDoltControlSequenceSnapshotIndex)
+	if err != nil {
+		return fmt.Errorf("checking NativeDolt control-sequence paging index before legacy repair: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	wantColumns := nativeDoltControlSequenceColumn + ",id"
+	if !present || columns != wantColumns || unique {
+		return fmt.Errorf(
+			"NativeDolt control-sequence paging index %q definition before legacy repair = present:%t columns:%q unique:%t, want present:true columns:%s unique:false: %w",
+			nativeDoltControlSequenceSnapshotIndex,
+			present,
+			columns,
+			unique,
+			wantColumns,
+			ErrAtomicReadSnapshotUnsupported,
+		)
+	}
+
+	// Dolt's unique-index table rewrite over this stored generated column
+	// corrupts later upstream status transitions even after DROP INDEX. Rebuild
+	// the projection and its non-unique lookup index in one DDL statement so a
+	// crash cannot expose a half-repaired schema.
+	statement := fmt.Sprintf(`ALTER TABLE issues
+		DROP INDEX %s,
+		DROP INDEX %s,
+		DROP COLUMN %s,
+		ADD COLUMN %s,
+		ADD INDEX %s (%s,id)`,
+		nativeDoltLegacyControlSequenceUniqueIndex,
+		nativeDoltControlSequenceSnapshotIndex,
+		nativeDoltControlSequenceColumn,
+		nativeDoltControlSequenceColumnDDL(),
+		nativeDoltControlSequenceSnapshotIndex,
+		nativeDoltControlSequenceColumn,
+	)
+	if _, err := db.ExecContext(ctx, statement); err != nil {
+		return fmt.Errorf("repairing retired NativeDolt control-sequence unique index: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	if err := rejectNativeDoltLegacyControlSequenceUniqueIndex(ctx, db); err != nil {
+		return err
+	}
+	if err := verifyNativeDoltControlSequenceColumn(ctx, db); err != nil {
+		return err
+	}
+	columns, unique, present, err = nativeDoltSnapshotIndexDefinition(ctx, db, nativeDoltControlSequenceSnapshotIndex)
+	if err != nil {
+		return fmt.Errorf("verifying NativeDolt control-sequence paging index after legacy repair: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	if !present || columns != wantColumns || unique {
+		return fmt.Errorf(
+			"repaired NativeDolt control-sequence paging index %q definition = present:%t columns:%q unique:%t, want present:true columns:%s unique:false: %w",
+			nativeDoltControlSequenceSnapshotIndex,
+			present,
+			columns,
+			unique,
+			wantColumns,
+			ErrAtomicReadSnapshotUnsupported,
+		)
+	}
+	return nil
+}
+
+func rejectNativeDoltLegacyControlSequenceUniqueIndex(ctx context.Context, queryer nativeDoltSnapshotIndexQueryer) error {
+	columns, unique, present, err := nativeDoltSnapshotIndexDefinition(ctx, queryer, nativeDoltLegacyControlSequenceUniqueIndex)
+	if err != nil {
+		return fmt.Errorf("checking retired NativeDolt control-sequence unique index: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	if present {
+		return fmt.Errorf(
+			"retired NativeDolt control-sequence index %q remains with columns:%q unique:%t: %w",
+			nativeDoltLegacyControlSequenceUniqueIndex,
+			columns,
+			unique,
+			ErrAtomicReadSnapshotUnsupported,
+		)
+	}
+	return nil
+}
+
+func nativeDoltControlSequenceColumnDDL() string {
+	return fmt.Sprintf(`%s BIGINT UNSIGNED GENERATED ALWAYS AS (
+		CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."%s"')), '$.order.sequence')) AS UNSIGNED)
+	) STORED`, nativeDoltControlSequenceColumn, beadmeta.ControlCommandWireMetadataKey)
+}
+
 func prepareNativeDoltControlSequenceColumn(ctx context.Context, db *sql.DB) error {
 	present, err := nativeDoltControlSequenceColumnPresent(ctx, db)
 	if err != nil {
 		return fmt.Errorf("checking NativeDolt control-sequence projection: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 	}
 	if !present {
-		statement := fmt.Sprintf(`ALTER TABLE issues ADD COLUMN %s BIGINT UNSIGNED GENERATED ALWAYS AS (
-			CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."%s"')), '$.order.sequence')) AS UNSIGNED)
-		) STORED`, nativeDoltControlSequenceColumn, beadmeta.ControlCommandWireMetadataKey)
+		statement := "ALTER TABLE issues ADD COLUMN " + nativeDoltControlSequenceColumnDDL()
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("installing NativeDolt control-sequence projection: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 		}
@@ -240,6 +345,9 @@ func nativeDoltSnapshotIndexDefinition(ctx context.Context, queryer nativeDoltSn
 }
 
 func (t *nativeDoltAtomicReadSnapshotTx) verifyPagingIndexes() error {
+	if err := rejectNativeDoltLegacyControlSequenceUniqueIndex(t.ctx, t.tx); err != nil {
+		return err
+	}
 	if err := verifyNativeDoltControlSequenceColumn(t.ctx, t.tx); err != nil {
 		return err
 	}

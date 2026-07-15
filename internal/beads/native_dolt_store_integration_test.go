@@ -14,6 +14,60 @@ import (
 	beadslib "github.com/steveyegge/beads"
 )
 
+func TestNativeDoltAtomicReadWriteTerminalUpdateOnRealBackend(t *testing.T) {
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	storage, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := NewNativeDoltStoreWithStorageForTesting(storage)
+	capability, ok := AtomicReadWriteFor(store)
+	if !ok {
+		t.Fatal("AtomicReadWriteFor(real NativeDolt) = false")
+	}
+	if err := store.PrepareAtomicReadSnapshot(ctx); err != nil {
+		t.Fatalf("PrepareAtomicReadSnapshot: %v", err)
+	}
+
+	const id = "gc-atomic-terminal"
+	if err := capability.AtomicReadWrite(ctx, "test: create durable row", func(tx AtomicReadWriteTx) error {
+		_, err := tx.Create(Bead{
+			ID:       id,
+			Title:    "atomic terminal row",
+			Status:   "open",
+			Type:     "task",
+			Assignee: "gc-partition-test",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("create durable row: %v", err)
+	}
+
+	closed := "closed"
+	if err := capability.AtomicReadWrite(ctx, "test: terminalize durable row", func(tx AtomicReadWriteTx) error {
+		return tx.Update(id, UpdateOpts{Status: &closed})
+	}); err != nil {
+		t.Fatalf("terminalize durable row: %v", err)
+	}
+
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("read terminal row: %v", err)
+	}
+	if got.Status != closed {
+		t.Fatalf("terminal row status = %q, want %q", got.Status, closed)
+	}
+}
+
 func TestNativeDoltAtomicReadSnapshotRealBackendIsStableAcrossPages(t *testing.T) {
 	ctx := t.Context()
 	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))

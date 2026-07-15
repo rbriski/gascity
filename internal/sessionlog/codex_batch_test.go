@@ -11,7 +11,21 @@ import (
 	"time"
 )
 
+// isolateCodexDefaultSearchPath keeps the always-merged default root inside
+// test-owned HOME. Individual tests still use distinct configured roots.
+func isolateCodexDefaultSearchPath(t *testing.T) {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
+		t.Fatalf("MkdirAll default codex sessions: %v", err)
+	}
+}
+
 func TestFindCodexSessionFilesByIDPreservesScalarSemantics(t *testing.T) {
+	isolateCodexDefaultSearchPath(t)
+
 	now := time.Date(2026, 6, 10, 14, 30, 0, 0, time.Local)
 
 	t.Run("four-digit lifecycle years are not restricted to the current century", func(t *testing.T) {
@@ -357,6 +371,8 @@ func TestFindCodexSessionFilesByIDPreservesScalarSemantics(t *testing.T) {
 }
 
 func TestFindCodexSessionFilesByIDReadsEachRootDayOnce(t *testing.T) {
+	isolateCodexDefaultSearchPath(t)
+
 	root := t.TempDir()
 	now := time.Date(2026, 6, 10, 14, 30, 0, 0, time.Local)
 	const workDir = "/work/batch-scan-count"
@@ -483,6 +499,8 @@ func TestFindCodexSessionFilesByIDSharesCandidateInspectionAcrossDuplicateSessio
 }
 
 func TestFindCodexSessionFilesByIDCapsDayReadsPerRoot(t *testing.T) {
+	isolateCodexDefaultSearchPath(t)
+
 	root := t.TempDir()
 	now := time.Date(2026, 6, 10, 14, 30, 0, 0, time.Local)
 	for year := 2025; year <= 2026; year++ {

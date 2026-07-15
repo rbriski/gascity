@@ -31,6 +31,19 @@ func writeCodexRolloutForAnchor(t *testing.T, root, workDir, sessionID string, s
 	return path
 }
 
+// newHermeticCodexSessionSearchPath keeps Codex's always-merged default root
+// inside test-owned HOME while preserving a separate configured search path.
+func newHermeticCodexSessionSearchPath(t *testing.T) string {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
+		t.Fatalf("MkdirAll default codex sessions: %v", err)
+	}
+	return t.TempDir()
+}
+
 // TestResolveCodexTranscriptBySessionOrderAnchorsOnAwakeStartedAt proves the
 // same-workdir Codex fallback anchors each session's transcript window on the
 // immutable awake_started_at rather than the later creation_complete_at. Once a
@@ -41,7 +54,7 @@ func writeCodexRolloutForAnchor(t *testing.T, root, workDir, sessionID string, s
 // [start-2s, end) window, which is exactly the historical session this fallback
 // exists to recover.
 func TestResolveCodexTranscriptBySessionOrderAnchorsOnAwakeStartedAt(t *testing.T) {
-	root := t.TempDir()
+	root := newHermeticCodexSessionSearchPath(t)
 	workDir := "/data/projects/myproject"
 	const provider = "codex"
 
@@ -68,7 +81,7 @@ func TestResolveCodexTranscriptBySessionOrderAnchorsOnAwakeStartedAt(t *testing.
 }
 
 func TestResolveKeyedTranscriptPathCodexUsesExactSessionKey(t *testing.T) {
-	root := t.TempDir()
+	root := newHermeticCodexSessionSearchPath(t)
 	workDir := "/data/projects/keyed-codex"
 	startedAt := time.Date(2026, 7, 15, 14, 30, 0, 0, time.UTC)
 	const (
@@ -93,7 +106,7 @@ func TestResolveKeyedTranscriptPathCodexUsesExactSessionKey(t *testing.T) {
 }
 
 func TestResolveKeyedTranscriptPathsResolvesCodexPageByExactSessionKey(t *testing.T) {
-	root := t.TempDir()
+	root := newHermeticCodexSessionSearchPath(t)
 	workDir := "/data/projects/keyed-codex-page"
 	startedAt := time.Date(2026, 7, 15, 14, 30, 0, 0, time.UTC)
 	const (
@@ -122,7 +135,7 @@ func TestResolveKeyedTranscriptPathsResolvesCodexPageByExactSessionKey(t *testin
 }
 
 func TestResolveKeyedTranscriptPathsUsesFallbackProvider(t *testing.T) {
-	root := t.TempDir()
+	root := newHermeticCodexSessionSearchPath(t)
 	workDir := "/data/projects/keyed-codex-workspace-default"
 	startedAt := time.Date(2026, 7, 15, 14, 30, 0, 0, time.UTC)
 	const sessionKey = "019e9966-3333-7000-8000-26a2dd7e15b3"
@@ -142,7 +155,7 @@ func TestResolveKeyedTranscriptPathsUsesFallbackProvider(t *testing.T) {
 }
 
 func TestResolveKeyedTranscriptPathDoesNotFallBack(t *testing.T) {
-	root := t.TempDir()
+	root := newHermeticCodexSessionSearchPath(t)
 	workDir := "/data/projects/keyed-no-fallback"
 	startedAt := time.Date(2026, 7, 15, 15, 0, 0, 0, time.UTC)
 	const decoyKey = "019e9966-cccc-7000-8000-26a2dd7e15b3"

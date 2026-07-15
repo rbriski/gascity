@@ -943,6 +943,20 @@ func TestHandleSessionListUsesCachedSessionBeadsWhenAvailable(t *testing.T) {
 	}
 }
 
+// newHermeticCodexSessionSearchPath keeps Codex's always-merged default root
+// inside test-owned HOME while preserving a separate configured search path.
+func newHermeticCodexSessionSearchPath(t *testing.T) string {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
+		t.Fatalf("MkdirAll default codex sessions: %v", err)
+	}
+	return t.TempDir()
+}
+
 const codexTestContextWindow = 258_400
 
 // writeCanonicalCodexTelemetryRollout writes the three real Codex rollout
@@ -982,10 +996,7 @@ func writeCanonicalCodexTelemetryRollout(t *testing.T, root string, ts time.Time
 
 func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *testing.T) {
 	fs := newSessionFakeState(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	workDir := t.TempDir()
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 
@@ -1083,13 +1094,7 @@ func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *te
 
 func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
 	fs := newSessionFakeState(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
-	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
-		t.Fatalf("MkdirAll default codex sessions: %v", err)
-	}
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -1129,13 +1134,7 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 
 func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
 	fs := newSessionFakeState(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
-	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
-		t.Fatalf("MkdirAll default codex sessions: %v", err)
-	}
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -7164,7 +7163,7 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 
 func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
@@ -7228,7 +7227,7 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 
 func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
@@ -7286,7 +7285,7 @@ func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T
 
 func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 

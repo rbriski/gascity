@@ -83,19 +83,31 @@ type CommandRepositoryState struct {
 	SequenceHighWater uint64
 }
 
-// CommandRepositoryLineageVerifier checks the independently retained store
-// identity and monotonic high waters. Provision is called only by the exact
-// process that committed an all-absent repository initialization; its evidence
-// is never persisted and cannot be reconstructed by a later repository.
+// CommandRepositoryLineageVerifier checks independently retained store
+// identity and monotonic high waters without mutating that evidence.
 type CommandRepositoryLineageVerifier interface {
 	VerifyCommandRepositoryLineage(context.Context, CommandRepositoryState) error
+}
+
+// CommandRepositoryLineageWriter owns every mutation of independently retained
+// lineage evidence. Provision requires the one-shot capability produced by the
+// exact all-absent repository initialization winner. Advance may only repair or
+// advance an existing anchor within the same store UUID and restore epoch.
+type CommandRepositoryLineageWriter interface {
 	ProvisionCommandRepositoryLineage(context.Context, CommandRepositoryState, CommandRepositoryProvisioningEvidence) error
+	AdvanceCommandRepositoryLineage(context.Context, CommandRepositoryState) error
+}
+
+// CommandRepositoryLineageController supplies both the read-only verifier and
+// explicit writer capabilities required by a writable command repository.
+type CommandRepositoryLineageController interface {
+	CommandRepositoryLineageVerifier
+	CommandRepositoryLineageWriter
 }
 
 // CommandRepositoryLineageVerifierFunc adapts one function for local tests or
-// callers whose verifier uses the same operation for idempotent provisioning
-// and ordinary verify/advance. Production restore anchors normally implement
-// CommandRepositoryLineageVerifier directly.
+// read-only callers. It deliberately cannot satisfy the lineage writer
+// interface.
 type CommandRepositoryLineageVerifierFunc func(context.Context, CommandRepositoryState) error
 
 // VerifyCommandRepositoryLineage invokes f.
@@ -104,12 +116,6 @@ func (f CommandRepositoryLineageVerifierFunc) VerifyCommandRepositoryLineage(ctx
 		return errors.New("nil command repository lineage verifier function")
 	}
 	return f(ctx, state)
-}
-
-// ProvisionCommandRepositoryLineage invokes f. The adapter deliberately does
-// not expose or serialize the one-shot provisioning evidence.
-func (f CommandRepositoryLineageVerifierFunc) ProvisionCommandRepositoryLineage(ctx context.Context, state CommandRepositoryState, _ CommandRepositoryProvisioningEvidence) error {
-	return f.VerifyCommandRepositoryLineage(ctx, state)
 }
 
 // CommandRepositoryProvisioningEvidence is a one-shot, in-memory capability
@@ -222,18 +228,28 @@ func (e *CommandRepositoryRecordError) Unwrap() []error {
 // CommandRepository persists and reads one durable nudge command ledger. It
 // owns no provider effects and never reads the legacy file queue.
 type CommandRepository struct {
+	reader commandRepositoryReader
+	writer CommandRepositoryLineageWriter
+	random io.Reader
+}
+
+// commandRepositoryReader contains no lineage writer capability. Keeping the
+// complete State/Get/Snapshot implementations on this type makes durable
+// lineage mutation unavailable to read paths by construction.
+type commandRepositoryReader struct {
 	store    beads.AtomicReadWriteStore
 	verifier CommandRepositoryLineageVerifier
-	random   io.Reader
 }
 
 // NewCommandRepository constructs a repository only for a store with the
-// required atomic capability and an independent lineage verifier.
-func NewCommandRepository(store beads.Store, verifier CommandRepositoryLineageVerifier) (*CommandRepository, error) {
-	return newCommandRepositoryWithRandom(store, verifier, rand.Reader)
+// required atomic capability and an independent lineage controller. The
+// controller is narrowed to separate verifier and writer capabilities inside
+// the repository.
+func NewCommandRepository(store beads.Store, controller CommandRepositoryLineageController) (*CommandRepository, error) {
+	return newCommandRepositoryWithRandom(store, controller, rand.Reader)
 }
 
-func newCommandRepositoryWithRandom(store beads.Store, verifier CommandRepositoryLineageVerifier, random io.Reader) (*CommandRepository, error) {
+func newCommandRepositoryWithRandom(store beads.Store, controller CommandRepositoryLineageController, random io.Reader) (*CommandRepository, error) {
 	atomicStore, ok := beads.AtomicReadWriteFor(store)
 	if !ok {
 		storeType := "<nil>"
@@ -242,13 +258,17 @@ func newCommandRepositoryWithRandom(store beads.Store, verifier CommandRepositor
 		}
 		return nil, &CommandRepositoryUnsupportedError{StoreType: storeType}
 	}
-	if isNilRepositoryDependency(verifier) {
-		return nil, &CommandRepositoryLineageError{Operation: "construction", Err: errors.New("independent lineage verifier is required")}
+	if isNilRepositoryDependency(controller) {
+		return nil, &CommandRepositoryLineageError{Operation: "construction", Err: errors.New("independent lineage controller is required")}
 	}
 	if random == nil {
 		return nil, &CommandRepositoryLineageError{Operation: "construction", Err: errors.New("cryptographic random source is required")}
 	}
-	return &CommandRepository{store: atomicStore, verifier: verifier, random: random}, nil
+	return &CommandRepository{
+		reader: commandRepositoryReader{store: atomicStore, verifier: controller},
+		writer: controller,
+		random: random,
+	}, nil
 }
 
 func isNilRepositoryDependency(value any) bool {
@@ -283,24 +303,20 @@ func CommandIDForRequest(binding CommandStoreBinding, requestID string) string {
 	return commandIDPrefix + hex.EncodeToString(digest.Sum(nil))
 }
 
-// State returns initialized, independently verified repository authority.
-// Fresh initialization uses a cryptorandom UUID and restore epoch one; no path,
-// project ID, or configuration value is accepted as identity.
+// State returns existing, independently verified repository authority without
+// initializing metadata or mutating independent lineage evidence. Missing
+// metadata or an anchor behind the database fails closed.
 func (r *CommandRepository) State(ctx context.Context) (CommandRepositoryState, error) {
+	return r.reader.state(ctx)
+}
+
+func (r commandRepositoryReader) state(ctx context.Context) (CommandRepositoryState, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandRepositoryState{}, err
 	}
-	state, initializedHere, evidence, err := r.readOrInitializeState(ctx)
+	state, err := r.loadState(ctx, "gc: read durable nudge command repository")
 	if err != nil {
 		return CommandRepositoryState{}, err
-	}
-	if initializedHere {
-		if !evidence.validFor(state) {
-			return CommandRepositoryState{}, &CommandRepositoryLineageError{Operation: "provision", State: state, Err: errors.New("invalid one-shot provisioning evidence")}
-		}
-		if err := r.verifier.ProvisionCommandRepositoryLineage(ctx, state, evidence); err != nil {
-			return CommandRepositoryState{}, &CommandRepositoryLineageError{Operation: "provision", State: state, Err: err}
-		}
 	}
 	if err := r.verify(ctx, "verify", state); err != nil {
 		return CommandRepositoryState{}, err
@@ -312,13 +328,17 @@ func (r *CommandRepository) State(ctx context.Context) (CommandRepositoryState, 
 // successful Found=false result at the returned repository watermark; a row
 // with the same ID but the wrong type/metadata/wire is an error.
 func (r *CommandRepository) Get(ctx context.Context, commandID string) (CommandIndexResolution, error) {
+	return r.reader.get(ctx, commandID)
+}
+
+func (r commandRepositoryReader) get(ctx context.Context, commandID string) (CommandIndexResolution, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandIndexResolution{}, err
 	}
 	if err := validateCommandIdentity("command id", commandID); err != nil {
 		return CommandIndexResolution{}, fmt.Errorf("%w: %w", ErrCommandRepositoryInvalidRequest, err)
 	}
-	before, err := r.State(ctx)
+	before, err := r.state(ctx)
 	if err != nil {
 		return CommandIndexResolution{}, err
 	}
@@ -327,7 +347,7 @@ func (r *CommandRepository) Get(ctx context.Context, commandID string) (CommandI
 		entry CommandIndexEntry
 		found bool
 	)
-	err = r.store.AtomicReadWrite(ctx, "gc: read durable nudge command", func(tx beads.AtomicReadWriteTx) error {
+	err = atomicCommandRepositoryRead(ctx, r.store, "gc: read durable nudge command", func(tx commandRepositoryReadTx) error {
 		var err error
 		state, err = readCommandRepositoryState(tx)
 		if err != nil {
@@ -367,18 +387,22 @@ func (r *CommandRepository) Get(ctx context.Context, commandID string) (CommandI
 // Snapshot returns a complete transaction-consistent decoded command set or a
 // typed bound error. It never truncates, skips poison, or fabricates tombstones.
 func (r *CommandRepository) Snapshot(ctx context.Context, maxCommands int) (CommandIndexSnapshot, error) {
+	return r.reader.snapshot(ctx, maxCommands)
+}
+
+func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) (CommandIndexSnapshot, error) {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandIndexSnapshot{}, err
 	}
 	if maxCommands <= 0 || maxCommands > MaxCommandRepositorySnapshotCommands {
 		return CommandIndexSnapshot{}, fmt.Errorf("snapshot command bound %d is outside 1..%d: %w", maxCommands, MaxCommandRepositorySnapshotCommands, ErrCommandRepositorySnapshotLimit)
 	}
-	before, err := r.State(ctx)
+	before, err := r.state(ctx)
 	if err != nil {
 		return CommandIndexSnapshot{}, err
 	}
 	var snapshot CommandIndexSnapshot
-	err = r.store.AtomicReadWrite(ctx, "gc: snapshot durable nudge commands", func(tx beads.AtomicReadWriteTx) error {
+	err = atomicCommandRepositoryRead(ctx, r.store, "gc: snapshot durable nudge commands", func(tx commandRepositoryReadTx) error {
 		state, err := readCommandRepositoryState(tx)
 		if err != nil {
 			return err
@@ -432,6 +456,40 @@ func (r *CommandRepository) Snapshot(ctx context.Context, maxCommands int) (Comm
 	return snapshot, nil
 }
 
+// Provision creates repository metadata only when the complete command ledger
+// and metadata set are absent, then provisions the independent lineage anchor
+// with one-shot in-memory evidence. It never treats an existing database as
+// fresh authority.
+func (r *CommandRepository) Provision(ctx context.Context) (CommandRepositoryState, error) {
+	if err := validateRepositoryContext(ctx); err != nil {
+		return CommandRepositoryState{}, err
+	}
+	state, initializedHere, evidence, err := r.provisionState(ctx)
+	if err != nil {
+		return CommandRepositoryState{}, err
+	}
+	if initializedHere {
+		if !evidence.validFor(state) {
+			return CommandRepositoryState{}, &CommandRepositoryLineageError{Operation: "provision", State: state, Err: errors.New("invalid one-shot provisioning evidence")}
+		}
+		if err := r.writer.ProvisionCommandRepositoryLineage(ctx, state, evidence); err != nil {
+			return CommandRepositoryState{}, &CommandRepositoryLineageError{Operation: "provision", State: state, Err: err}
+		}
+	}
+	if err := r.reader.verify(ctx, "verify provisioned repository", state); err != nil {
+		return CommandRepositoryState{}, err
+	}
+	return state, nil
+}
+
+// RepairLineage explicitly confirms or advances independent lineage evidence
+// to the current database high-water within the same store UUID and restore
+// epoch. Missing metadata or anchor, rewind, foreign identity, and epoch
+// changes fail closed; explicit recovery-epoch changes are a separate flow.
+func (r *CommandRepository) RepairLineage(ctx context.Context) (CommandRepositoryState, error) {
+	return r.repairLineage(ctx, "repair lineage")
+}
+
 // Create durably admits a new pending command or returns the existing exact
 // command for an idempotent retry. Store binding, sequence, and revision are
 // allocated by the repository in the same transaction as the command row.
@@ -441,18 +499,20 @@ func (r *CommandRepository) Create(ctx context.Context, requestID string, comman
 	}
 	before, err := r.State(ctx)
 	if err != nil {
-		return CommandIndexEntry{}, false, err
+		before, err = r.repairLineage(ctx, "pre-create lineage repair")
+		if err != nil {
+			return CommandIndexEntry{}, false, err
+		}
 	}
 	if err := validateCommandCreateRequest(before.Store, requestID, command); err != nil {
 		return CommandIndexEntry{}, false, err
 	}
 
 	var (
-		result      CommandIndexEntry
-		created     bool
-		commitState CommandRepositoryState
+		result  CommandIndexEntry
+		created bool
 	)
-	err = r.store.AtomicReadWrite(ctx, "gc: create durable nudge command", func(tx beads.AtomicReadWriteTx) error {
+	err = r.reader.store.AtomicReadWrite(ctx, "gc: create durable nudge command", func(tx beads.AtomicReadWriteTx) error {
 		state, err := readCommandRepositoryState(tx)
 		if err != nil {
 			return err
@@ -460,7 +520,6 @@ func (r *CommandRepository) Create(ctx context.Context, requestID string, comman
 		if err := validateCommandRepositoryStateAdvance(before, state); err != nil {
 			return err
 		}
-		commitState = state
 		expectedID := CommandIDForRequest(state.Store, requestID)
 		if expectedID == "" || command.ID != expectedID {
 			return fmt.Errorf("command id %q does not match current store/request binding: %w", command.ID, ErrCommandRepositoryInvalidRequest)
@@ -520,8 +579,6 @@ func (r *CommandRepository) Create(ctx context.Context, requestID string, comman
 		if err := setCommandRepositoryHighWaters(tx, stamped.Order.Revision, stamped.Order.Sequence); err != nil {
 			return err
 		}
-		commitState.Revision = stamped.Order.Revision
-		commitState.SequenceHighWater = stamped.Order.Sequence
 		owned := stamped
 		result = CommandIndexEntry{Command: &owned}
 		created = true
@@ -529,25 +586,28 @@ func (r *CommandRepository) Create(ctx context.Context, requestID string, comman
 	})
 	if err != nil {
 		// A concurrent same-request winner or commit-with-lost-response can make
-		// the transaction return an error after durable authority exists. Reread
-		// the exact deterministic ID; never allocate a replacement identity.
-		resolved, resolveErr := r.Get(ctx, command.ID)
-		if resolveErr == nil && resolved.Found {
-			if retryErr := validateIdempotentCommandRetry(requestID, command, requestID, resolved.Entry); retryErr == nil {
-				return resolved.Entry, false, nil
+		// the transaction return an error after durable authority exists. Because
+		// this is a writer path, repair the same-epoch anchor before the read-only
+		// exact reread; never allocate a replacement identity.
+		if _, repairErr := r.repairLineage(ctx, "ambiguous create lineage repair"); repairErr == nil {
+			resolved, resolveErr := r.Get(ctx, command.ID)
+			if resolveErr == nil && resolved.Found {
+				if retryErr := validateIdempotentCommandRetry(requestID, command, requestID, resolved.Entry); retryErr == nil {
+					return resolved.Entry, false, nil
+				}
 			}
 		}
 		return CommandIndexEntry{}, false, err
 	}
-	if err := r.verify(ctx, "post-create advance", commitState); err != nil {
+	if _, err := r.repairLineage(ctx, "post-create lineage advance"); err != nil {
 		return CommandIndexEntry{}, false, err
 	}
 	return result, created, nil
 }
 
-func (r *CommandRepository) readOrInitializeState(ctx context.Context) (CommandRepositoryState, bool, CommandRepositoryProvisioningEvidence, error) {
+func (r *CommandRepository) provisionState(ctx context.Context) (CommandRepositoryState, bool, CommandRepositoryProvisioningEvidence, error) {
 	var existing CommandRepositoryState
-	err := r.store.AtomicReadWrite(ctx, "gc: read durable nudge command repository", func(tx beads.AtomicReadWriteTx) error {
+	err := atomicCommandRepositoryRead(ctx, r.reader.store, "gc: read durable nudge command repository before provisioning", func(tx commandRepositoryReadTx) error {
 		state, present, err := readOptionalCommandRepositoryState(tx)
 		if err != nil {
 			return err
@@ -581,7 +641,7 @@ func (r *CommandRepository) readOrInitializeState(ctx context.Context) (CommandR
 		state           CommandRepositoryState
 		initializedHere bool
 	)
-	err = r.store.AtomicReadWrite(ctx, "gc: initialize durable nudge command repository", func(tx beads.AtomicReadWriteTx) error {
+	err = r.reader.store.AtomicReadWrite(ctx, "gc: initialize durable nudge command repository", func(tx beads.AtomicReadWriteTx) error {
 		var present bool
 		var err error
 		state, present, err = readOptionalCommandRepositoryState(tx)
@@ -615,7 +675,34 @@ func (r *CommandRepository) readOrInitializeState(ctx context.Context) (CommandR
 	return state, initializedHere, evidence, nil
 }
 
-func (r *CommandRepository) verify(ctx context.Context, operation string, state CommandRepositoryState) error {
+func (r *CommandRepository) repairLineage(ctx context.Context, operation string) (CommandRepositoryState, error) {
+	if err := validateRepositoryContext(ctx); err != nil {
+		return CommandRepositoryState{}, err
+	}
+	state, err := r.reader.loadState(ctx, "gc: read durable nudge command repository for lineage repair")
+	if err != nil {
+		return CommandRepositoryState{}, err
+	}
+	if err := r.writer.AdvanceCommandRepositoryLineage(ctx, state); err != nil {
+		return CommandRepositoryState{}, &CommandRepositoryLineageError{Operation: operation, State: state, Err: err}
+	}
+	if err := r.reader.verify(ctx, operation+" verification", state); err != nil {
+		return CommandRepositoryState{}, err
+	}
+	return state, nil
+}
+
+func (r commandRepositoryReader) loadState(ctx context.Context, commitMessage string) (CommandRepositoryState, error) {
+	var state CommandRepositoryState
+	err := atomicCommandRepositoryRead(ctx, r.store, commitMessage, func(tx commandRepositoryReadTx) error {
+		var err error
+		state, err = readCommandRepositoryState(tx)
+		return err
+	})
+	return state, err
+}
+
+func (r commandRepositoryReader) verify(ctx context.Context, operation string, state CommandRepositoryState) error {
 	if err := validateRepositoryContext(ctx); err != nil {
 		return err
 	}
@@ -639,7 +726,22 @@ func commandRecordListQuery(limit int) beads.AtomicReadWriteList {
 	}
 }
 
-func readCommandRepositoryState(tx beads.AtomicReadWriteTx) (CommandRepositoryState, error) {
+// commandRepositoryReadTx intentionally omits every mutation exposed by
+// beads.AtomicReadWriteTx. Read callbacks receive only this surface, so adding
+// a metadata or record write to State/Get/Snapshot is a compile-time error.
+type commandRepositoryReadTx interface {
+	GetIssue(string) (beads.Bead, error)
+	ListHistory(beads.AtomicReadWriteList) ([]beads.Bead, error)
+	GetMetadata(string) (string, error)
+}
+
+func atomicCommandRepositoryRead(ctx context.Context, store beads.AtomicReadWriteStore, commitMessage string, fn func(commandRepositoryReadTx) error) error {
+	return store.AtomicReadWrite(ctx, commitMessage, func(tx beads.AtomicReadWriteTx) error {
+		return fn(tx)
+	})
+}
+
+func readCommandRepositoryState(tx commandRepositoryReadTx) (CommandRepositoryState, error) {
 	state, present, err := readOptionalCommandRepositoryState(tx)
 	if err != nil {
 		return CommandRepositoryState{}, err
@@ -650,7 +752,7 @@ func readCommandRepositoryState(tx beads.AtomicReadWriteTx) (CommandRepositorySt
 	return state, nil
 }
 
-func readOptionalCommandRepositoryState(tx beads.AtomicReadWriteTx) (CommandRepositoryState, bool, error) {
+func readOptionalCommandRepositoryState(tx commandRepositoryReadTx) (CommandRepositoryState, bool, error) {
 	keys := []string{
 		commandRepositorySchemaVersionMetadataKey,
 		commandRepositoryWriterVersionMetadataKey,

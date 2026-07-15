@@ -50,6 +50,185 @@ func TestCommandRepositoryInitializesAndReusesCryptographicStoreBinding(t *testi
 	}
 }
 
+func TestCommandRepositoryReadsNeverInitializeOrMutateLineage(t *testing.T) {
+	operations := map[string]func(context.Context, *CommandRepository) error{
+		"state": func(ctx context.Context, repo *CommandRepository) error {
+			_, err := repo.State(ctx)
+			return err
+		},
+		"get": func(ctx context.Context, repo *CommandRepository) error {
+			_, err := repo.Get(ctx, "missing-command")
+			return err
+		},
+		"snapshot": func(ctx context.Context, repo *CommandRepository) error {
+			_, err := repo.Snapshot(ctx, 1)
+			return err
+		},
+	}
+
+	for name, operation := range operations {
+		t.Run(name+" with equal durable lineage", func(t *testing.T) {
+			store := newRepositoryAtomicTestStore()
+			verifier := &repositoryLineageTestVerifier{}
+			repo, err := NewCommandRepository(store, verifier)
+			if err != nil {
+				t.Fatalf("NewCommandRepository: %v", err)
+			}
+			if _, err := repo.Provision(t.Context()); err != nil {
+				t.Fatalf("Provision: %v", err)
+			}
+			beforeCreate, beforeMetadata := store.durableMutationCallCounts()
+			beforeProvision := verifier.provisionCallCount()
+			beforeAdvance := verifier.advanceCallCount()
+
+			if err := operation(t.Context(), repo); err != nil {
+				t.Fatalf("%s equal-lineage read: %v", name, err)
+			}
+			afterCreate, afterMetadata := store.durableMutationCallCounts()
+			if afterCreate != beforeCreate || afterMetadata != beforeMetadata {
+				t.Fatalf("%s successful read called durable mutations: Create=%d->%d SetMetadata=%d->%d", name, beforeCreate, afterCreate, beforeMetadata, afterMetadata)
+			}
+			if got := verifier.provisionCallCount(); got != beforeProvision {
+				t.Fatalf("%s successful read provision calls = %d->%d", name, beforeProvision, got)
+			}
+			if got := verifier.advanceCallCount(); got != beforeAdvance {
+				t.Fatalf("%s successful read advance calls = %d->%d", name, beforeAdvance, got)
+			}
+		})
+
+		t.Run(name+" with all repository metadata absent", func(t *testing.T) {
+			store := newRepositoryAtomicTestStore()
+			verifier := &repositoryLineageTestVerifier{}
+			repo, err := NewCommandRepository(store, verifier)
+			if err != nil {
+				t.Fatalf("NewCommandRepository: %v", err)
+			}
+
+			if err := operation(t.Context(), repo); !errors.Is(err, ErrCommandRepositoryLineage) {
+				t.Fatalf("%s error = %v, want fail-closed lineage error", name, err)
+			}
+			createCalls, metadataWriteCalls := store.durableMutationCallCounts()
+			if createCalls != 0 || metadataWriteCalls != 0 {
+				t.Fatalf("%s called durable mutations: Create=%d SetMetadata=%d", name, createCalls, metadataWriteCalls)
+			}
+			if verifier.provisionCallCount() != 0 {
+				t.Fatalf("%s provision calls = %d, want zero", name, verifier.provisionCallCount())
+			}
+			if verifier.advanceCallCount() != 0 {
+				t.Fatalf("%s advance calls = %d, want zero", name, verifier.advanceCallCount())
+			}
+			if len(store.metadataSnapshot()) != 0 || store.hasAnyRows() {
+				t.Fatalf("%s changed absent repository: metadata=%#v rows=%v", name, store.metadataSnapshot(), store.hasAnyRows())
+			}
+		})
+
+		t.Run(name+" with database ahead of lineage", func(t *testing.T) {
+			anchor := CommandRepositoryState{
+				Store:             CommandStoreBinding{StoreUUID: uuid.NewString(), RestoreEpoch: 1},
+				SchemaVersion:     CommandRepositorySchemaVersion,
+				WriterVersion:     CommandRepositoryWriterVersion,
+				Revision:          0,
+				SequenceHighWater: 0,
+			}
+			database := anchor
+			database.Revision = 1
+			store := newRepositoryAtomicTestStore()
+			store.seedMetadata(database)
+			anchored := anchor
+			verifier := &repositoryLineageTestVerifier{anchor: &anchored}
+			repo, err := NewCommandRepository(store, verifier)
+			if err != nil {
+				t.Fatalf("NewCommandRepository: %v", err)
+			}
+
+			if err := operation(t.Context(), repo); !errors.Is(err, ErrCommandRepositoryLineage) {
+				t.Fatalf("%s error = %v, want fail-closed lineage error", name, err)
+			}
+			createCalls, metadataWriteCalls := store.durableMutationCallCounts()
+			if createCalls != 0 || metadataWriteCalls != 0 {
+				t.Fatalf("%s called durable mutations: Create=%d SetMetadata=%d", name, createCalls, metadataWriteCalls)
+			}
+			if got := verifier.anchorSnapshot(); got == nil || *got != anchor {
+				t.Fatalf("%s advanced lineage during read: got %#v, want %#v", name, got, anchor)
+			}
+			if verifier.advanceCallCount() != 0 {
+				t.Fatalf("%s advance calls = %d, want zero", name, verifier.advanceCallCount())
+			}
+		})
+	}
+}
+
+func TestCommandRepositoryProvisionAndRepairAreExplicitWriterOperations(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	verifier := &repositoryLineageTestVerifier{}
+	repo, err := NewCommandRepository(store, verifier)
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
+
+	state, err := repo.Provision(t.Context())
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if state.Store.RestoreEpoch != 1 || state.Revision != 0 || state.SequenceHighWater != 0 {
+		t.Fatalf("fresh provisioned state = %#v", state)
+	}
+	createCalls, metadataWriteCalls := store.durableMutationCallCounts()
+	if createCalls != 0 || metadataWriteCalls != 6 {
+		t.Fatalf("Provision mutation calls: Create=%d SetMetadata=%d, want 0/6", createCalls, metadataWriteCalls)
+	}
+	if verifier.provisionCallCount() != 1 || verifier.advanceCallCount() != 0 {
+		t.Fatalf("Provision lineage calls: provision=%d advance=%d, want 1/0", verifier.provisionCallCount(), verifier.advanceCallCount())
+	}
+
+	if got, err := repo.Provision(t.Context()); err != nil || got != state {
+		t.Fatalf("idempotent Provision = (%#v, %v), want original state", got, err)
+	}
+	createCalls, metadataWriteCalls = store.durableMutationCallCounts()
+	if createCalls != 0 || metadataWriteCalls != 6 || verifier.provisionCallCount() != 1 || verifier.advanceCallCount() != 0 {
+		t.Fatalf("idempotent Provision wrote again: Create=%d SetMetadata=%d provision=%d advance=%d", createCalls, metadataWriteCalls, verifier.provisionCallCount(), verifier.advanceCallCount())
+	}
+
+	databaseAhead := state
+	databaseAhead.Revision = 1
+	store.seedMetadata(databaseAhead)
+	if _, err := repo.State(t.Context()); !errors.Is(err, ErrCommandRepositoryLineage) {
+		t.Fatalf("State database-ahead error = %v, want lineage refusal", err)
+	}
+	if got, err := repo.RepairLineage(t.Context()); err != nil || got != databaseAhead {
+		t.Fatalf("RepairLineage = (%#v, %v), want %#v", got, err, databaseAhead)
+	}
+	if verifier.advanceCallCount() != 1 {
+		t.Fatalf("RepairLineage advance calls = %d, want 1", verifier.advanceCallCount())
+	}
+	if got, err := repo.State(t.Context()); err != nil || got != databaseAhead {
+		t.Fatalf("State after RepairLineage = (%#v, %v), want %#v", got, err, databaseAhead)
+	}
+	createCalls, metadataWriteCalls = store.durableMutationCallCounts()
+	if createCalls != 0 || metadataWriteCalls != 6 {
+		t.Fatalf("lineage repair mutated repository: Create=%d SetMetadata=%d", createCalls, metadataWriteCalls)
+	}
+}
+
+func TestCommandRepositoryCreateNeverImplicitlyProvisions(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	verifier := &repositoryLineageTestVerifier{}
+	repo, err := NewCommandRepository(store, verifier)
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
+	requestID := "request-before-provision"
+	command := repositoryCommandForRequest(t, CommandStoreBinding{}, requestID, "before provision")
+
+	if _, _, err := repo.Create(t.Context(), requestID, command); !errors.Is(err, ErrCommandRepositoryLineage) {
+		t.Fatalf("Create before Provision error = %v, want lineage refusal", err)
+	}
+	createCalls, metadataWriteCalls := store.durableMutationCallCounts()
+	if createCalls != 0 || metadataWriteCalls != 0 || verifier.provisionCallCount() != 0 || verifier.advanceCallCount() != 0 {
+		t.Fatalf("Create implicitly provisioned: Create=%d SetMetadata=%d provision=%d advance=%d", createCalls, metadataWriteCalls, verifier.provisionCallCount(), verifier.advanceCallCount())
+	}
+}
+
 func TestCommandRepositoryCreateIsIdempotentAndReadsExactDurableAuthority(t *testing.T) {
 	t.Parallel()
 
@@ -245,6 +424,9 @@ func TestCommandRepositorySnapshotIsCompleteOrBoundedError(t *testing.T) {
 		}
 	}
 	store.seedCommands(t, state, MaxCommandRepositorySnapshotCommands+1)
+	if _, err := repo.RepairLineage(t.Context()); err != nil {
+		t.Fatalf("RepairLineage after seeding overflow: %v", err)
+	}
 	if _, err := repo.Snapshot(t.Context(), MaxCommandRepositorySnapshotCommands); !errors.Is(err, ErrCommandRepositorySnapshotLimit) {
 		t.Fatalf("overflow Snapshot error = %v, want ErrCommandRepositorySnapshotLimit", err)
 	}
@@ -262,6 +444,9 @@ func TestCommandRepositoryPreservesOpaqueNewerCommandByteForByte(t *testing.T) {
 	commandID := CommandIDForRequest(state.Store, "future-request")
 	raw := []byte(fmt.Sprintf("  {\n\"version\":2,\"id\":%q,\"target\":{\"session_id\":\"session-future\",\"intent_generation\":9},\"store\":{\"store_uuid\":%q,\"restore_epoch\":%d},\"order\":{\"sequence\":1,\"revision\":1},\"future\":{\"marker\":\"preserve whitespace\"}}  \n", commandID, state.Store.StoreUUID, state.Store.RestoreEpoch))
 	store.seedRawCommand(t, state, "future-request", commandID, raw, 1, 1)
+	if _, err := repo.RepairLineage(t.Context()); err != nil {
+		t.Fatalf("RepairLineage after seeding opaque command: %v", err)
+	}
 
 	resolution, err := repo.Get(t.Context(), commandID)
 	if err != nil {
@@ -282,7 +467,7 @@ func TestCommandRepositoryPreservesOpaqueNewerCommandByteForByte(t *testing.T) {
 func TestCommandRepositoryRejectsUnsupportedSchemaSkewAndLineage(t *testing.T) {
 	t.Parallel()
 
-	verifier := CommandRepositoryLineageVerifierFunc(func(context.Context, CommandRepositoryState) error { return nil })
+	verifier := &repositoryLineageTestVerifier{}
 	if _, err := NewCommandRepository(beads.NewMemStore(), verifier); !errors.Is(err, ErrCommandRepositoryUnsupported) {
 		t.Fatalf("NewCommandRepository(MemStore) error = %v, want unsupported", err)
 	} else {
@@ -365,9 +550,18 @@ func TestCommandRepositoryRejectsUnsupportedSchemaSkewAndLineage(t *testing.T) {
 
 	lineageCause := errors.New("independent anchor is ahead")
 	lineageStore := newRepositoryAtomicTestStore()
-	lineageRepo, err := NewCommandRepository(lineageStore, CommandRepositoryLineageVerifierFunc(func(context.Context, CommandRepositoryState) error {
-		return lineageCause
-	}))
+	lineageState := CommandRepositoryState{
+		Store:         CommandStoreBinding{StoreUUID: uuid.NewString(), RestoreEpoch: 1},
+		SchemaVersion: CommandRepositorySchemaVersion,
+		WriterVersion: CommandRepositoryWriterVersion,
+	}
+	lineageStore.seedMetadata(lineageState)
+	lineageAnchor := lineageState
+	lineageRepo, err := NewCommandRepository(lineageStore, &repositoryLineageTestVerifier{
+		anchor:           &lineageAnchor,
+		verifyErr:        lineageCause,
+		advanceAlwaysErr: lineageCause,
+	})
 	if err != nil {
 		t.Fatalf("NewCommandRepository(lineage): %v", err)
 	}
@@ -392,7 +586,10 @@ func TestCommandRepositoryCancellationDoesNotInitializeOrAdmit(t *testing.T) {
 	t.Parallel()
 
 	store := newRepositoryAtomicTestStore()
-	repo := newVerifiedCommandRepository(t, store)
+	repo, err := NewCommandRepository(store, &repositoryLineageTestVerifier{})
+	if err != nil {
+		t.Fatalf("NewCommandRepository: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := repo.State(ctx); !errors.Is(err, context.Canceled) {
@@ -417,6 +614,9 @@ func TestCommandRepositorySnapshotHonorsCancellationDuringDecode(t *testing.T) {
 		t.Fatalf("State: %v", err)
 	}
 	store.seedCommands(t, state, 2)
+	if _, err := repo.RepairLineage(t.Context()); err != nil {
+		t.Fatalf("RepairLineage after seeding cancellation fixture: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	store.mu.Lock()
 	store.afterList = cancel
@@ -484,8 +684,8 @@ func TestCommandRepositoryProvisioningEvidenceCannotReplayAfterRestartOrRestore(
 	if err != nil {
 		t.Fatalf("NewCommandRepository(first): %v", err)
 	}
-	if _, err := first.State(t.Context()); !errors.Is(err, ErrCommandRepositoryLineage) || !errors.Is(err, provisionFailure) {
-		t.Fatalf("first State error = %v, want typed provision failure", err)
+	if _, err := first.Provision(t.Context()); !errors.Is(err, ErrCommandRepositoryLineage) || !errors.Is(err, provisionFailure) {
+		t.Fatalf("first Provision error = %v, want typed provision failure", err)
 	}
 	if firstVerifier.provisionCallCount() != 1 {
 		t.Fatalf("first provision calls = %d, want 1", firstVerifier.provisionCallCount())
@@ -504,6 +704,9 @@ func TestCommandRepositoryProvisioningEvidenceCannotReplayAfterRestartOrRestore(
 	}
 	if _, err := restarted.State(t.Context()); !errors.Is(err, ErrCommandRepositoryLineage) {
 		t.Fatalf("restarted State error = %v, want missing-anchor lineage refusal", err)
+	}
+	if _, err := restarted.Provision(t.Context()); !errors.Is(err, ErrCommandRepositoryLineage) {
+		t.Fatalf("restarted Provision error = %v, want missing-anchor lineage refusal", err)
 	}
 	if restartedVerifier.provisionCallCount() != 0 {
 		t.Fatalf("restarted provision calls = %d, want 0", restartedVerifier.provisionCallCount())
@@ -537,9 +740,9 @@ func TestCommandRepositoryPostCommitAnchorFailureIsRepairedByIdempotentRetry(t *
 	if err != nil {
 		t.Fatalf("NewCommandRepository: %v", err)
 	}
-	state, err := repo.State(t.Context())
+	state, err := repo.Provision(t.Context())
 	if err != nil {
-		t.Fatalf("State: %v", err)
+		t.Fatalf("Provision: %v", err)
 	}
 	anchorErr := errors.New("anchor write interrupted")
 	verifier.failNextAdvance(anchorErr)
@@ -700,6 +903,9 @@ func TestCommandRepositoryExactReadRejectsSameIDWrongContractRow(t *testing.T) {
 	state.SequenceHighWater = 1
 	store.metadata = repositoryMetadataForTest(state)
 	store.mu.Unlock()
+	if _, err := repo.RepairLineage(t.Context()); err != nil {
+		t.Fatalf("RepairLineage after seeding poison row: %v", err)
+	}
 
 	if _, err := repo.Get(t.Context(), command.ID); !errors.Is(err, ErrCommandRepositoryRecord) {
 		t.Fatalf("Get poison error = %v, want ErrCommandRepositoryRecord", err)
@@ -711,11 +917,12 @@ func TestCommandRepositoryExactReadRejectsSameIDWrongContractRow(t *testing.T) {
 
 func newVerifiedCommandRepository(t *testing.T, store beads.Store) *CommandRepository {
 	t.Helper()
-	repo, err := NewCommandRepository(store, CommandRepositoryLineageVerifierFunc(func(context.Context, CommandRepositoryState) error {
-		return nil
-	}))
+	repo, err := NewCommandRepository(store, &repositoryLineageTestVerifier{})
 	if err != nil {
 		t.Fatalf("NewCommandRepository: %v", err)
+	}
+	if _, err := repo.Provision(t.Context()); err != nil {
+		t.Fatalf("Provision command repository: %v", err)
 	}
 	return repo
 }
@@ -735,10 +942,13 @@ func repositoryCommandForRequest(t *testing.T, binding CommandStoreBinding, requ
 type repositoryLineageTestVerifier struct {
 	mu sync.Mutex
 
-	anchor         *CommandRepositoryState
-	provisionErr   error
-	advanceErr     error
-	provisionCalls int
+	anchor           *CommandRepositoryState
+	provisionErr     error
+	advanceErr       error
+	advanceAlwaysErr error
+	verifyErr        error
+	provisionCalls   int
+	advanceCalls     int
 }
 
 func (v *repositoryLineageTestVerifier) ProvisionCommandRepositoryLineage(_ context.Context, state CommandRepositoryState, evidence CommandRepositoryProvisioningEvidence) error {
@@ -765,6 +975,31 @@ func (v *repositoryLineageTestVerifier) ProvisionCommandRepositoryLineage(_ cont
 func (v *repositoryLineageTestVerifier) VerifyCommandRepositoryLineage(_ context.Context, state CommandRepositoryState) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.verifyErr != nil {
+		return v.verifyErr
+	}
+	if v.anchor == nil {
+		return errors.New("restore anchor is missing")
+	}
+	if v.anchor.Store != state.Store || v.anchor.SchemaVersion != state.SchemaVersion || v.anchor.WriterVersion != state.WriterVersion {
+		return errors.New("restore anchor binding or version differs")
+	}
+	if state.Revision < v.anchor.Revision || state.SequenceHighWater < v.anchor.SequenceHighWater {
+		return errors.New("database high water regressed below restore anchor")
+	}
+	if state.Revision > v.anchor.Revision || state.SequenceHighWater > v.anchor.SequenceHighWater {
+		return errors.New("database high water is ahead of restore anchor")
+	}
+	return nil
+}
+
+func (v *repositoryLineageTestVerifier) AdvanceCommandRepositoryLineage(_ context.Context, state CommandRepositoryState) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.advanceCalls++
+	if v.advanceAlwaysErr != nil {
+		return v.advanceAlwaysErr
+	}
 	if v.anchor == nil {
 		return errors.New("restore anchor is missing")
 	}
@@ -796,6 +1031,12 @@ func (v *repositoryLineageTestVerifier) provisionCallCount() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.provisionCalls
+}
+
+func (v *repositoryLineageTestVerifier) advanceCallCount() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.advanceCalls
 }
 
 func (v *repositoryLineageTestVerifier) anchorSnapshot() *CommandRepositoryState {
@@ -833,12 +1074,14 @@ func commandRepositoryStateFromMetadata(t *testing.T, metadata map[string]string
 type repositoryAtomicTestStore struct {
 	beads.Store
 
-	mu        sync.Mutex
-	rows      map[string]beads.Bead
-	metadata  map[string]string
-	failNext  error
-	nextClock time.Time
-	afterList func()
+	mu               sync.Mutex
+	rows             map[string]beads.Bead
+	metadata         map[string]string
+	failNext         error
+	nextClock        time.Time
+	afterList        func()
+	createCalls      int
+	setMetadataCalls int
 }
 
 func newRepositoryAtomicTestStore() *repositoryAtomicTestStore {
@@ -861,6 +1104,12 @@ func (s *repositoryAtomicTestStore) AtomicReadWrite(ctx context.Context, _ strin
 		metadata:  cloneRepositoryMetadata(s.metadata),
 		now:       s.nextClock,
 		afterList: s.afterList,
+		onCreate: func() {
+			s.createCalls++
+		},
+		onSetMetadata: func() {
+			s.setMetadataCalls++
+		},
 	}
 	if err := fn(tx); err != nil {
 		return err
@@ -928,6 +1177,12 @@ func (s *repositoryAtomicTestStore) metadataSnapshot() map[string]string {
 	return cloneRepositoryMetadata(s.metadata)
 }
 
+func (s *repositoryAtomicTestStore) durableMutationCallCounts() (create, setMetadata int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createCalls, s.setMetadataCalls
+}
+
 func (s *repositoryAtomicTestStore) seedMetadata(state CommandRepositoryState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -986,10 +1241,12 @@ func (s *repositoryAtomicTestStore) seedCommands(t *testing.T, state CommandRepo
 }
 
 type repositoryAtomicTestTx struct {
-	rows      map[string]beads.Bead
-	metadata  map[string]string
-	now       time.Time
-	afterList func()
+	rows          map[string]beads.Bead
+	metadata      map[string]string
+	now           time.Time
+	afterList     func()
+	onCreate      func()
+	onSetMetadata func()
 }
 
 func (tx *repositoryAtomicTestTx) GetIssue(id string) (beads.Bead, error) {
@@ -1041,6 +1298,9 @@ func (tx *repositoryAtomicTestTx) ListHistory(query beads.AtomicReadWriteList) (
 }
 
 func (tx *repositoryAtomicTestTx) Create(row beads.Bead) (beads.Bead, error) {
+	if tx.onCreate != nil {
+		tx.onCreate()
+	}
 	if _, exists := tx.rows[row.ID]; exists {
 		return beads.Bead{}, fmt.Errorf("bead %q already exists", row.ID)
 	}
@@ -1086,6 +1346,9 @@ func (tx *repositoryAtomicTestTx) GetMetadata(key string) (string, error) {
 }
 
 func (tx *repositoryAtomicTestTx) SetMetadata(key, value string) error {
+	if tx.onSetMetadata != nil {
+		tx.onSetMetadata()
+	}
 	tx.metadata[key] = value
 	return nil
 }

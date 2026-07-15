@@ -22,7 +22,11 @@ type RestoreAnchorRepositoryVerifier struct {
 	needsDurabilityConfirmation bool
 }
 
-var _ CommandRepositoryLineageVerifier = (*RestoreAnchorRepositoryVerifier)(nil)
+var (
+	_ CommandRepositoryLineageVerifier   = (*RestoreAnchorRepositoryVerifier)(nil)
+	_ CommandRepositoryLineageWriter     = (*RestoreAnchorRepositoryVerifier)(nil)
+	_ CommandRepositoryLineageController = (*RestoreAnchorRepositoryVerifier)(nil)
+)
 
 // NewRestoreAnchorRepositoryVerifier constructs the production local verifier
 // for cityPath. cityPath selects the independent file location only; it never
@@ -36,16 +40,17 @@ func newRestoreAnchorRepositoryVerifier(path string, ops restoreAnchorFileOps) *
 }
 
 // VerifyCommandRepositoryLineage verifies existing repository authority. It
-// never provisions a missing anchor. A safe same-epoch database advance is
-// CAS-persisted and reread before returning; every rewind, foreign store,
-// unaccepted epoch change, corruption, or missing anchor fails closed.
+// performs no file write, fsync, rename, provisioning, or anchor advancement.
+// Only an exact durable-anchor match succeeds; every database-ahead state,
+// rewind, foreign store, epoch change, corruption, or missing anchor fails
+// closed until an explicit writer operation runs.
 func (v *RestoreAnchorRepositoryVerifier) VerifyCommandRepositoryLineage(ctx context.Context, state CommandRepositoryState) error {
 	if v == nil {
 		return restoreAnchorVerifierInvalidError(nil, errors.New("restore anchor repository verifier is nil"))
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.verifyLocked(ctx, state, false)
+	return v.verifyReadLocked(ctx, state)
 }
 
 // ProvisionCommandRepositoryLineage initializes a missing anchor only for the
@@ -61,10 +66,66 @@ func (v *RestoreAnchorRepositoryVerifier) ProvisionCommandRepositoryLineage(ctx 
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.verifyLocked(ctx, state, true)
+	return v.writeLocked(ctx, state, restoreAnchorRepositoryWriteProvision)
 }
 
-func (v *RestoreAnchorRepositoryVerifier) verifyLocked(ctx context.Context, state CommandRepositoryState, allowProvision bool) error {
+// AdvanceCommandRepositoryLineage explicitly repairs durability uncertainty or
+// advances an existing anchor to a database-ahead high-water in the same store
+// UUID and restore epoch. It never provisions a missing anchor or accepts an
+// epoch transition.
+func (v *RestoreAnchorRepositoryVerifier) AdvanceCommandRepositoryLineage(ctx context.Context, state CommandRepositoryState) error {
+	if v == nil {
+		return restoreAnchorVerifierInvalidError(nil, errors.New("restore anchor repository verifier is nil"))
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.writeLocked(ctx, state, restoreAnchorRepositoryWriteAdvance)
+}
+
+func (v *RestoreAnchorRepositoryVerifier) verifyReadLocked(ctx context.Context, state CommandRepositoryState) error {
+	database, err := restoreAnchorFromRepositoryStateChecked(state)
+	if err != nil {
+		return restoreAnchorVerifierInvalidError(v.previouslyAccepted, err)
+	}
+	persisted, exists, err := LoadRestoreAnchor(ctx, v.path)
+	if err != nil {
+		return restoreAnchorVerifierInvalidError(v.previouslyAccepted, err)
+	}
+	var persistedPtr *RestoreAnchor
+	if exists {
+		persistedCopy := persisted
+		persistedPtr = &persistedCopy
+	}
+	decision := DecideRestoreAnchor(RestoreAnchorCheck{
+		Persisted:                 persistedPtr,
+		PreviouslyAccepted:        v.previouslyAccepted,
+		DatabaseStore:             database.Store,
+		DatabaseRevision:          database.HighestAcceptedRevision,
+		DatabaseSequenceHighWater: database.HighestAcceptedSequence,
+	})
+	if decision.Disposition != RestoreAnchorEqual || !decision.EffectsAllowed {
+		return decision.AdmissionError()
+	}
+	if v.needsDurabilityConfirmation {
+		return errors.Join(
+			invalidRestoreAnchorDecision(v.previouslyAccepted).AdmissionError(),
+			ErrRestoreAnchorDurabilityUncertain,
+			errors.New("explicit lineage repair is required before accepting an ambiguously published anchor"),
+		)
+	}
+	accepted := persisted
+	v.previouslyAccepted = &accepted
+	return nil
+}
+
+type restoreAnchorRepositoryWriteOperation uint8
+
+const (
+	restoreAnchorRepositoryWriteProvision restoreAnchorRepositoryWriteOperation = iota + 1
+	restoreAnchorRepositoryWriteAdvance
+)
+
+func (v *RestoreAnchorRepositoryVerifier) writeLocked(ctx context.Context, state CommandRepositoryState, operation restoreAnchorRepositoryWriteOperation) error {
 	database, err := restoreAnchorFromRepositoryStateChecked(state)
 	if err != nil {
 		return restoreAnchorVerifierInvalidError(v.previouslyAccepted, err)
@@ -113,6 +174,9 @@ func (v *RestoreAnchorRepositoryVerifier) verifyLocked(ctx context.Context, stat
 			return nil
 
 		case RestoreAnchorAdvanceRequired:
+			if operation != restoreAnchorRepositoryWriteAdvance {
+				return errors.Join(decision.AdmissionError(), errors.New("repository provisioning cannot advance an existing restore anchor"))
+			}
 			if decision.Candidate == nil || persistedPtr == nil {
 				return errors.Join(decision.AdmissionError(), errors.New("restore anchor advance has no exact candidate or prior"))
 			}
@@ -131,7 +195,7 @@ func (v *RestoreAnchorRepositoryVerifier) verifyLocked(ctx context.Context, stat
 			continue
 
 		case RestoreAnchorFirstInitialization:
-			if !allowProvision {
+			if operation != restoreAnchorRepositoryWriteProvision {
 				return decision.AdmissionError()
 			}
 			if decision.Candidate == nil || persistedPtr != nil {

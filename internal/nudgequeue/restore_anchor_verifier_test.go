@@ -55,6 +55,114 @@ func TestRestoreAnchorRepositoryVerifierProvisioningIsOneShot(t *testing.T) {
 	}
 }
 
+func TestRestoreAnchorRepositoryVerifierVerifyNeverWrites(t *testing.T) {
+	tests := []struct {
+		name       string
+		database   CommandRepositoryState
+		wantErr    bool
+		wantAnchor CommandRepositoryState
+	}{
+		{
+			name:       "equal",
+			database:   restoreAnchorRepositoryState("store-a", 1, 2, 1),
+			wantAnchor: restoreAnchorRepositoryState("store-a", 1, 2, 1),
+		},
+		{
+			name:       "database ahead",
+			database:   restoreAnchorRepositoryState("store-a", 1, 3, 2),
+			wantErr:    true,
+			wantAnchor: restoreAnchorRepositoryState("store-a", 1, 2, 1),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			path := RestoreAnchorPath(cityPath)
+			anchor := restoreAnchorFromRepositoryState(tc.wantAnchor)
+			if err := WriteRestoreAnchor(context.Background(), path, nil, anchor, RestoreAnchorWriteInitialize); err != nil {
+				t.Fatalf("WriteRestoreAnchor(initial): %v", err)
+			}
+
+			var syncFileCalls, renameCalls, syncDirectoryCalls int
+			ops := osRestoreAnchorFileOps
+			originalSyncFile := ops.syncFile
+			ops.syncFile = func(file *os.File) error {
+				syncFileCalls++
+				return originalSyncFile(file)
+			}
+			originalRename := ops.rename
+			ops.rename = func(oldPath, newPath string) error {
+				renameCalls++
+				return originalRename(oldPath, newPath)
+			}
+			originalSyncDirectory := ops.syncDirectory
+			ops.syncDirectory = func(path string) error {
+				syncDirectoryCalls++
+				return originalSyncDirectory(path)
+			}
+			verifier := newRestoreAnchorRepositoryVerifier(path, ops)
+
+			err := verifier.VerifyCommandRepositoryLineage(context.Background(), tc.database)
+			if tc.wantErr && !errors.Is(err, ErrRestoreAnchorAdmission) {
+				t.Fatalf("Verify error = %v, want ErrRestoreAnchorAdmission", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("Verify equal: %v", err)
+			}
+			if syncFileCalls != 0 || renameCalls != 0 || syncDirectoryCalls != 0 {
+				t.Fatalf("Verify performed anchor writes: syncFile=%d rename=%d syncDirectory=%d", syncFileCalls, renameCalls, syncDirectoryCalls)
+			}
+			assertLoadedRestoreAnchor(t, path, anchor)
+		})
+	}
+}
+
+func TestRestoreAnchorRepositoryVerifierWriterOperationsAreSeparated(t *testing.T) {
+	t.Run("Provision cannot advance an existing anchor", func(t *testing.T) {
+		cityPath := t.TempDir()
+		verifier := NewRestoreAnchorRepositoryVerifier(cityPath)
+		initial := restoreAnchorRepositoryState("store-a", 1, 0, 0)
+		if err := verifier.ProvisionCommandRepositoryLineage(context.Background(), initial, restoreAnchorProvisioningEvidence(initial)); err != nil {
+			t.Fatalf("Provision initial: %v", err)
+		}
+		advanced := restoreAnchorRepositoryState("store-a", 1, 1, 1)
+		if err := verifier.ProvisionCommandRepositoryLineage(context.Background(), advanced, restoreAnchorProvisioningEvidence(advanced)); !errors.Is(err, ErrRestoreAnchorAdmission) {
+			t.Fatalf("Provision advanced error = %v, want admission refusal", err)
+		}
+		assertLoadedRestoreAnchor(t, RestoreAnchorPath(cityPath), restoreAnchorFromRepositoryState(initial))
+		if err := verifier.AdvanceCommandRepositoryLineage(context.Background(), advanced); err != nil {
+			t.Fatalf("Advance existing anchor: %v", err)
+		}
+		assertLoadedRestoreAnchor(t, RestoreAnchorPath(cityPath), restoreAnchorFromRepositoryState(advanced))
+	})
+
+	t.Run("Advance cannot provision a missing anchor", func(t *testing.T) {
+		cityPath := t.TempDir()
+		verifier := NewRestoreAnchorRepositoryVerifier(cityPath)
+		state := restoreAnchorRepositoryState("store-a", 1, 0, 0)
+		if err := verifier.AdvanceCommandRepositoryLineage(context.Background(), state); !errors.Is(err, ErrRestoreAnchorAdmission) {
+			t.Fatalf("Advance missing anchor error = %v, want admission refusal", err)
+		}
+		if _, exists, err := LoadRestoreAnchor(context.Background(), RestoreAnchorPath(cityPath)); err != nil || exists {
+			t.Fatalf("Advance provisioned missing anchor: exists=%t err=%v", exists, err)
+		}
+	})
+
+	t.Run("Advance cannot perform restore epoch recovery", func(t *testing.T) {
+		cityPath := t.TempDir()
+		verifier := NewRestoreAnchorRepositoryVerifier(cityPath)
+		initial := restoreAnchorRepositoryState("store-a", 1, 4, 2)
+		if err := verifier.ProvisionCommandRepositoryLineage(context.Background(), initial, restoreAnchorProvisioningEvidence(initial)); err != nil {
+			t.Fatalf("Provision initial: %v", err)
+		}
+		recovered := restoreAnchorRepositoryState("store-a", 2, 0, 0)
+		err := verifier.AdvanceCommandRepositoryLineage(context.Background(), recovered)
+		requireRestoreAnchorDisposition(t, err, RestoreAnchorEpochAdvance)
+		assertLoadedRestoreAnchor(t, RestoreAnchorPath(cityPath), restoreAnchorFromRepositoryState(initial))
+	})
+}
+
 func TestRestoreAnchorRepositoryVerifierFreezesOnAmbiguousPublishThenRepairs(t *testing.T) {
 	cityPath := t.TempDir()
 	verifier := NewRestoreAnchorRepositoryVerifier(cityPath)
@@ -73,9 +181,9 @@ func TestRestoreAnchorRepositoryVerifierFreezesOnAmbiguousPublishThenRepairs(t *
 	}
 	verifier.ops = ops
 	advanced := restoreAnchorRepositoryState("store-a", 1, 1, 1)
-	err := verifier.VerifyCommandRepositoryLineage(context.Background(), advanced)
+	err := verifier.AdvanceCommandRepositoryLineage(context.Background(), advanced)
 	if !errors.Is(err, ErrRestoreAnchorAdmission) || !errors.Is(err, ErrRestoreAnchorDurabilityUncertain) || !errors.Is(err, injected) {
-		t.Fatalf("ambiguous Verify error = %v, want admission + durability-uncertain + injected", err)
+		t.Fatalf("ambiguous Advance error = %v, want admission + durability-uncertain + injected", err)
 	}
 	assertLoadedRestoreAnchor(t, RestoreAnchorPath(cityPath), restoreAnchorFromRepositoryState(advanced))
 	if verifier.previouslyAccepted == nil || *verifier.previouslyAccepted != restoreAnchorFromRepositoryState(initial) {
@@ -83,11 +191,14 @@ func TestRestoreAnchorRepositoryVerifierFreezesOnAmbiguousPublishThenRepairs(t *
 	}
 
 	verifier.ops = osRestoreAnchorFileOps
-	if err := verifier.VerifyCommandRepositoryLineage(context.Background(), advanced); err != nil {
-		t.Fatalf("Verify did not resync and repair ambiguous publish: %v", err)
+	if err := verifier.VerifyCommandRepositoryLineage(context.Background(), advanced); !errors.Is(err, ErrRestoreAnchorAdmission) || !errors.Is(err, ErrRestoreAnchorDurabilityUncertain) {
+		t.Fatalf("read-only Verify after ambiguous publish = %v, want fail-closed durability uncertainty", err)
+	}
+	if err := verifier.AdvanceCommandRepositoryLineage(context.Background(), advanced); err != nil {
+		t.Fatalf("Advance did not resync and repair ambiguous publish: %v", err)
 	}
 	if verifier.previouslyAccepted == nil || *verifier.previouslyAccepted != restoreAnchorFromRepositoryState(advanced) {
-		t.Fatalf("repaired Verify floor = %#v, want advanced", verifier.previouslyAccepted)
+		t.Fatalf("repaired Advance floor = %#v, want advanced", verifier.previouslyAccepted)
 	}
 }
 
@@ -123,7 +234,7 @@ func TestRestoreAnchorRepositoryVerifierRereadsBeforeAcceptingWrites(t *testing.
 		corruptAfterRename(&ops)
 		verifier.ops = ops
 		advanced := restoreAnchorRepositoryState("store-a", 1, 1, 1)
-		err := verifier.VerifyCommandRepositoryLineage(context.Background(), advanced)
+		err := verifier.AdvanceCommandRepositoryLineage(context.Background(), advanced)
 		requireRestoreAnchorDisposition(t, err, RestoreAnchorInvalid)
 		if verifier.previouslyAccepted == nil || *verifier.previouslyAccepted != restoreAnchorFromRepositoryState(initial) {
 			t.Fatalf("corrupt advance changed in-process floor: %#v", verifier.previouslyAccepted)
@@ -140,8 +251,8 @@ func TestRestoreAnchorRepositoryVerifierAdvancesAndRepairsDatabaseAhead(t *testi
 	}
 
 	advanced := restoreAnchorRepositoryState("store-a", 1, 2, 1)
-	if err := verifier.VerifyCommandRepositoryLineage(context.Background(), advanced); err != nil {
-		t.Fatalf("Verify normal advance: %v", err)
+	if err := verifier.AdvanceCommandRepositoryLineage(context.Background(), advanced); err != nil {
+		t.Fatalf("Advance normal high-water: %v", err)
 	}
 	assertLoadedRestoreAnchor(t, RestoreAnchorPath(cityPath), restoreAnchorFromRepositoryState(advanced))
 
@@ -149,8 +260,11 @@ func TestRestoreAnchorRepositoryVerifierAdvancesAndRepairsDatabaseAhead(t *testi
 	// after the database commit but before the post-commit verifier completed.
 	committedAhead := restoreAnchorRepositoryState("store-a", 1, 3, 2)
 	restarted := NewRestoreAnchorRepositoryVerifier(cityPath)
-	if err := restarted.VerifyCommandRepositoryLineage(context.Background(), committedAhead); err != nil {
-		t.Fatalf("Verify repairs safe same-epoch database-ahead window: %v", err)
+	if err := restarted.VerifyCommandRepositoryLineage(context.Background(), committedAhead); !errors.Is(err, ErrRestoreAnchorAdmission) {
+		t.Fatalf("read-only Verify database-ahead error = %v, want admission refusal", err)
+	}
+	if err := restarted.AdvanceCommandRepositoryLineage(context.Background(), committedAhead); err != nil {
+		t.Fatalf("Advance repairs safe same-epoch database-ahead window: %v", err)
 	}
 	assertLoadedRestoreAnchor(t, RestoreAnchorPath(cityPath), restoreAnchorFromRepositoryState(committedAhead))
 
@@ -215,8 +329,8 @@ func TestRestoreAnchorRepositoryVerifierConcurrentCASNeverMovesBackward(t *testi
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
 	for _, call := range []func() error{
-		func() error { return low.VerifyCommandRepositoryLineage(context.Background(), lowState) },
-		func() error { return high.VerifyCommandRepositoryLineage(context.Background(), highState) },
+		func() error { return low.AdvanceCommandRepositoryLineage(context.Background(), lowState) },
+		func() error { return high.AdvanceCommandRepositoryLineage(context.Background(), highState) },
 	} {
 		wg.Add(1)
 		go func(call func() error) {
@@ -232,10 +346,10 @@ func TestRestoreAnchorRepositoryVerifierConcurrentCASNeverMovesBackward(t *testi
 		if err == nil || errors.Is(err, ErrRestoreAnchorBusy) || errors.Is(err, ErrRestoreAnchorConflict) || errors.Is(err, ErrRestoreAnchorAdmission) {
 			continue
 		}
-		t.Fatalf("concurrent Verify returned unexpected error: %v", err)
+		t.Fatalf("concurrent Advance returned unexpected error: %v", err)
 	}
-	if err := high.VerifyCommandRepositoryLineage(context.Background(), highState); err != nil {
-		t.Fatalf("final high Verify: %v", err)
+	if err := high.AdvanceCommandRepositoryLineage(context.Background(), highState); err != nil {
+		t.Fatalf("final high Advance: %v", err)
 	}
 	assertLoadedRestoreAnchor(t, RestoreAnchorPath(cityPath), restoreAnchorFromRepositoryState(highState))
 	err := low.VerifyCommandRepositoryLineage(context.Background(), lowState)

@@ -64,7 +64,7 @@ func TestClaimAuthorizedRevocationDeniesDurablyBeforeProviderEntry(t *testing.T)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
-	assertAuthorizationDeniedCommand(t, result, testClaimDecisionID, testClaimPolicyVersion)
+	assertAuthorizationDeniedCommand(t, result)
 	if calls := fixture.authority.claimCalls(); calls != 1 {
 		t.Fatalf("claim authorization calls = %d, want one", calls)
 	}
@@ -73,7 +73,7 @@ func TestClaimAuthorizedRevocationDeniesDurablyBeforeProviderEntry(t *testing.T)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized denied retry: %v", err)
 	}
-	assertAuthorizationDeniedCommand(t, retry, testClaimDecisionID, testClaimPolicyVersion)
+	assertAuthorizationDeniedCommand(t, retry)
 	if calls := fixture.authority.claimCalls(); calls != 1 {
 		t.Fatalf("denied retry re-entered policy: calls=%d", calls)
 	}
@@ -137,7 +137,7 @@ func TestClaimAuthorizedRejectsDirectStoreStampAndCrossCityReplay(t *testing.T) 
 			if err != nil {
 				t.Fatalf("ClaimAuthorized: %v", err)
 			}
-			assertAuthorizationDeniedCommand(t, result, testClaimDecisionID, testClaimPolicyVersion)
+			assertAuthorizationDeniedCommand(t, result)
 		})
 	}
 }
@@ -227,6 +227,32 @@ func TestClaimAuthorizedLeaseRaceHasOneWinner(t *testing.T) {
 	}
 }
 
+func TestClaimAuthorizedExpiredInFlightLeaseRemainsBusyWithoutDefiniteNotEnteredEvidence(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	firstRequest := fixture.claimRequest("claim-first", "owner-first", "attempt-first", fixture.now.Add(time.Second))
+	first, err := fixture.repository.ClaimAuthorized(t.Context(), firstRequest, fixture.authority)
+	if err != nil || first.Disposition != CommandClaimAllowed {
+		t.Fatalf("first ClaimAuthorized = %#v, err=%v; want allowed", first, err)
+	}
+
+	reclaimAt := firstRequest.LeaseUntil.Add(time.Second)
+	replacementRequest := fixture.claimRequest("claim-replacement", "owner-replacement", "attempt-replacement", reclaimAt)
+	replacement, err := fixture.repository.ClaimAuthorized(t.Context(), replacementRequest, fixture.authority)
+	if err != nil {
+		t.Fatalf("replacement ClaimAuthorized: %v", err)
+	}
+	if replacement.Disposition != CommandClaimBusy || !reflect.DeepEqual(replacement.Command, first.Command) {
+		t.Fatalf("replacement after expired lease = %#v, want busy with unchanged in-flight command %#v", replacement, first.Command)
+	}
+	if calls := fixture.authority.claimCalls(); calls != 1 {
+		t.Fatalf("expired lease re-entered authorization policy: calls=%d, want 1", calls)
+	}
+	resolution, err := fixture.repository.Get(t.Context(), fixture.command.ID)
+	if err != nil || resolution.Entry.Command == nil || !reflect.DeepEqual(*resolution.Entry.Command, first.Command) {
+		t.Fatalf("durable command changed after expired-lease reclaim: %#v err=%v", resolution, err)
+	}
+}
+
 func TestClaimAuthorizedAcceptsCurrentAndPreviousPrincipalSchema(t *testing.T) {
 	for _, schema := range []uint32{NudgePrincipalSchemaVersion, NudgePrincipalSchemaVersion - 1} {
 		fixture := newAuthorizedClaimFixture(t)
@@ -238,14 +264,14 @@ func TestClaimAuthorizedAcceptsCurrentAndPreviousPrincipalSchema(t *testing.T) {
 	}
 }
 
-func assertAuthorizationDeniedCommand(t *testing.T, result CommandClaimResult, decisionID, policyVersion string) {
+func assertAuthorizationDeniedCommand(t *testing.T, result CommandClaimResult) {
 	t.Helper()
 	if result.Disposition != CommandClaimDenied || result.Command.State != CommandStateDeadLettered || result.Command.Terminal == nil {
 		t.Fatalf("denied result = %#v, want durable terminal denial", result)
 	}
 	terminal := result.Command.Terminal
 	if terminal.ActionResult != CommandActionResultAuthorizationDenied || terminal.ErrorClass != CommandErrorClassAuthorizationDenied ||
-		terminal.AuthorizationDecisionID != decisionID || terminal.AuthorizationPolicyVersion != policyVersion ||
+		terminal.AuthorizationDecisionID != testClaimDecisionID || terminal.AuthorizationPolicyVersion != testClaimPolicyVersion ||
 		terminal.ProviderStage != ProviderStageNotEntered || terminal.Completion != CompletionStateNotCompleted ||
 		result.Command.Claim != nil || result.Command.Retry != nil {
 		t.Fatalf("denial evidence = command %#v terminal %#v", result.Command, terminal)

@@ -20,7 +20,8 @@ type CommandClaimDisposition string
 
 const (
 	// CommandClaimAllowed returns the authoritative in-flight command whose
-	// exact durable claim may proceed to the separate provider-entry gate.
+	// exact durable Claim+Retry is permission to proceed to the separate
+	// provider-entry gate, not proof that provider entry occurred.
 	CommandClaimAllowed CommandClaimDisposition = "allowed"
 	// CommandClaimDenied returns a durable terminal command with proof that no
 	// provider was entered by this claim.
@@ -29,7 +30,9 @@ const (
 	// command parked for an authorization-health or policy-version wake.
 	CommandClaimAuthorizationUnknown CommandClaimDisposition = "authorization_unknown"
 	// CommandClaimBusy returns the unchanged authoritative command when it is
-	// not eligible or another claim/terminal outcome already owns it.
+	// not eligible or another claim/terminal outcome already owns it. An
+	// in-flight claim stays busy after lease expiry unless durable evidence
+	// proves that its provider attempt definitely did not enter.
 	CommandClaimBusy CommandClaimDisposition = "busy"
 )
 
@@ -88,7 +91,10 @@ type CommandClaimResult struct {
 // ClaimAuthorized atomically re-reads one durable command, revalidates current
 // policy, and records either its exact bounded claim or a typed denial. Policy
 // unknown leaves the command byte-for-byte unchanged. The method owns no
-// provider/runtime capability and an allowed claim is not provider entry.
+// provider/runtime capability and an allowed claim is not provider entry. Its
+// committed Claim+Retry is durable may-enter permission: a crash can occur
+// after provider entry but before later evidence is recorded, so lease expiry
+// alone never releases the in-flight command for an automatic competing claim.
 func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request CommandClaimRequest, authorizer NudgeClaimAuthorizer) (CommandClaimResult, error) {
 	if r == nil || isNilRepositoryDependency(r.reader.store) || isNilRepositoryDependency(r.reader.verifier) {
 		return CommandClaimResult{}, fmt.Errorf("%w: command repository is not fully bound", ErrCommandClaimInvalid)

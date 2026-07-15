@@ -42,7 +42,7 @@ func TestClaimAuthorizedDirectStoreWriterCannotSelfAuthorize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
-	assertAuthorizationDeniedCommand(t, result, testClaimDecisionID, testClaimPolicyVersion)
+	assertAuthorizationDeniedCommand(t, result)
 }
 
 func TestClaimAuthorizedCopiedStampCannotAuthorizeDifferentPayload(t *testing.T) {
@@ -78,7 +78,7 @@ func TestClaimAuthorizedCopiedStampCannotAuthorizeDifferentPayload(t *testing.T)
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
-	assertAuthorizationDeniedCommand(t, result, testClaimDecisionID, testClaimPolicyVersion)
+	assertAuthorizationDeniedCommand(t, result)
 }
 
 func TestClaimAuthorizedRejectsUnsupportedClaimPrincipalSchemaWithoutMutation(t *testing.T) {
@@ -135,7 +135,7 @@ func TestClaimAuthorizedExactLaunchSubstitutionDenies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimAuthorized: %v", err)
 	}
-	assertAuthorizationDeniedCommand(t, claimed, testClaimDecisionID, testClaimPolicyVersion)
+	assertAuthorizationDeniedCommand(t, claimed)
 }
 
 func TestClaimAuthorizedLocalPeerSubstitutionIsPolicyDenied(t *testing.T) {
@@ -151,7 +151,7 @@ func TestClaimAuthorizedLocalPeerSubstitutionIsPolicyDenied(t *testing.T) {
 			t.Fatalf("verified peer result = %#v, want allowed", result)
 		}
 		if peer == "substituted-peer" {
-			assertAuthorizationDeniedCommand(t, result, testClaimDecisionID, testClaimPolicyVersion)
+			assertAuthorizationDeniedCommand(t, result)
 		}
 	}
 }

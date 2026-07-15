@@ -277,8 +277,8 @@ func TestNewFileRecorderMigratedLegacyArchiveSurvivesRetainAgeAfterRotation(t *t
 	if err != nil {
 		t.Fatalf("ForceRotate: %v", err)
 	}
-	if res.Done != nil {
-		<-res.Done
+	if res.CompressionDone() != nil {
+		<-res.CompressionDone()
 	}
 
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {

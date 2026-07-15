@@ -109,23 +109,25 @@ func (lw *logFileWatcher) UpdatePath(path string) {
 	lw.watchPath(path, true)
 }
 
-// RunOpts configures optional callbacks for the Run loop.
-type RunOpts struct {
-	// OnStall is called when the log file hasn't grown for StallTimeout.
-	// After the first stall fires, it re-fires every StallTimeout until
+// logFileWatcherRunOpts configures optional callbacks for the watcher loop.
+// It stays package-private because every channel source must come from an
+// authored API-package caller.
+type logFileWatcherRunOpts struct {
+	// onStall is called when the log file hasn't grown for stallTimeout.
+	// After the first stall fires, it re-fires every stallTimeout until
 	// readAndEmit produces new data (which resets the timer).
 	// Used to detect stuck sessions (e.g., waiting for tool approval).
-	OnStall      func()
-	StallTimeout time.Duration // defaults to 5s
-	// Wake triggers an immediate readAndEmit outside file-write or poll ticks.
+	onStall      func()
+	stallTimeout time.Duration // defaults to 5s
+	// wake triggers an immediate readAndEmit outside file-write or poll ticks.
 	// Used to fold external signals like worker operation events into the same
 	// stream loop without adding another ticker.
-	Wake <-chan struct{}
+	wake <-chan struct{}
 }
 
-// Run executes the main event loop. It calls readAndEmit on file changes
+// run executes the main event loop. It calls readAndEmit on file changes
 // and writeKeepalive on keepalive ticks. Blocks until ctx is canceled.
-func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func() bool, writeKeepalive func(), opts ...RunOpts) {
+func (lw *logFileWatcher) run(ctx context.Context, readAndEmit func() bool, writeKeepalive func(), opts ...logFileWatcherRunOpts) {
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
 	watcherPoll := time.NewTicker(outputStreamPollInterval)
@@ -137,14 +139,14 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func() bool, writ
 	var onStall func()
 	stallTimeout := 5 * time.Second
 	var wake <-chan struct{}
-	if len(opts) > 0 && opts[0].OnStall != nil {
-		onStall = opts[0].OnStall
-		if opts[0].StallTimeout > 0 {
-			stallTimeout = opts[0].StallTimeout
+	if len(opts) > 0 && opts[0].onStall != nil {
+		onStall = opts[0].onStall
+		if opts[0].stallTimeout > 0 {
+			stallTimeout = opts[0].stallTimeout
 		}
 	}
 	if len(opts) > 0 {
-		wake = opts[0].Wake
+		wake = opts[0].wake
 	}
 	stallTicker := time.NewTicker(stallTimeout)
 	stallTicker.Stop() // start stopped — armed after first data

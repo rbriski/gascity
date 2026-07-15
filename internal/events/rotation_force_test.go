@@ -36,6 +36,9 @@ func TestForceRotateEmptyActiveLogIsNoOp(t *testing.T) {
 	if res.ArchivePath != "" {
 		t.Errorf("ArchivePath = %q on no-op, want empty", res.ArchivePath)
 	}
+	if res.CompressionDone() != nil {
+		t.Error("CompressionDone channel on no-op is non-nil")
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -80,13 +83,13 @@ func TestForceRotateMovesEventsToArchiveAndWritesAnchor(t *testing.T) {
 	if !res.CompressionPending {
 		t.Error("CompressionPending = false, want true on success")
 	}
-	if res.Done == nil {
-		t.Fatal("Done channel is nil")
+	if res.CompressionDone() == nil {
+		t.Fatal("CompressionDone channel is nil")
 	}
 	select {
-	case <-res.Done:
+	case <-res.CompressionDone():
 	case <-time.After(2 * time.Second):
-		t.Fatal("Done not closed within 2s")
+		t.Fatal("CompressionDone not closed within 2s")
 	}
 
 	if _, err := os.Stat(res.ArchivePath); err != nil {
@@ -170,8 +173,8 @@ func TestForceRotateConcurrentWithRecord(t *testing.T) {
 		}
 		if res.Rotated {
 			rotated++
-			if res.Done != nil {
-				<-res.Done
+			if res.CompressionDone() != nil {
+				<-res.CompressionDone()
 			}
 		}
 	}
@@ -181,8 +184,8 @@ func TestForceRotateConcurrentWithRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForceRotate(final): %v", err)
 	}
-	if res.Rotated && res.Done != nil {
-		<-res.Done
+	if res.Rotated && res.CompressionDone() != nil {
+		<-res.CompressionDone()
 	}
 	if rotated == 0 {
 		t.Fatal("no rotations occurred during concurrency test")
@@ -248,8 +251,8 @@ func TestRotateLockedReadsArchiveSeqWindowFromTail(t *testing.T) {
 	if res.FirstSeq != 1 || res.LastSeq != uint64(n) {
 		t.Errorf("seq window = [%d,%d], want [1,%d]", res.FirstSeq, res.LastSeq, n)
 	}
-	if res.Done != nil {
-		<-res.Done
+	if res.CompressionDone() != nil {
+		<-res.CompressionDone()
 	}
 
 	// Use the watcher Close path implicitly via context cancellation.

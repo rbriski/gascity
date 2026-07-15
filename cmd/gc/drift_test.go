@@ -408,9 +408,9 @@ func TestRestartSupervisor_DirectKillFailureSurfaces(t *testing.T) {
 // restartHelpers contract.
 func restartHelpersFromFake(f *fakeRestartHelpers) restartHelpers {
 	return restartHelpers{
-		Systemctl: f.Systemctl,
-		Launchctl: f.Launchctl,
-		Kill:      f.Kill,
-		Spawn:     f.Spawn,
+		systemctl: f.Systemctl,
+		launchctl: f.Launchctl,
+		kill:      f.Kill,
+		spawn:     f.Spawn,
 	}
 }

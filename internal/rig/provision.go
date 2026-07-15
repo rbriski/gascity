@@ -547,7 +547,7 @@ func initRigBeadsStore(deps Deps, req ProvisionRequest, rigPath, prefix string, 
 			}
 		}
 		if storeContract() {
-			deferred, err = deps.InitStore(cityPath, rigPath, prefix)
+			deferred, err = deps.initStore(cityPath, rigPath, prefix)
 			if err != nil {
 				return false, err
 			}
@@ -556,7 +556,7 @@ func initRigBeadsStore(deps Deps, req ProvisionRequest, rigPath, prefix string, 
 		return deferred, nil
 	}
 
-	deferred, err = deps.InitStore(cityPath, rigPath, prefix)
+	deferred, err = deps.initStore(cityPath, rigPath, prefix)
 	if err != nil {
 		return false, err
 	}

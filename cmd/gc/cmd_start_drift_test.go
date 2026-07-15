@@ -266,10 +266,10 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 	readSupervisorExePathHook = func(int) (string, error) { return "/tmp/gc-test-supervisor", nil }
 	restartHelpersHook = func() restartHelpers {
 		return restartHelpers{
-			Systemctl: func(...string) error { return nil },
-			Kill:      func(int) error { return nil },
-			WaitExit:  func(int) error { return nil },
-			Spawn:     func(string, ...string) error { return nil },
+			systemctl: func(...string) error { return nil },
+			kill:      func(int) error { return nil },
+			waitExit:  func(int) error { return nil },
+			spawn:     func(string, ...string) error { return nil },
 		}
 	}
 
@@ -356,20 +356,20 @@ func TestRunStartDriftCheck_DarwinLaunchdRestartDoesNotRequireProcExe(t *testing
 	var launchctlArgs []string
 	restartHelpersHook = func() restartHelpers {
 		return restartHelpers{
-			Launchctl: func(args ...string) error {
+			launchctl: func(args ...string) error {
 				launchctlArgs = append([]string(nil), args...)
 				return nil
 			},
-			Systemctl: func(...string) error {
+			systemctl: func(...string) error {
 				t.Fatal("systemctl should not handle a Darwin launchd supervisor")
 				return nil
 			},
-			Kill: func(int) error {
+			kill: func(int) error {
 				t.Fatal("direct kill should not handle a Darwin launchd supervisor")
 				return nil
 			},
-			WaitExit: func(int) error { return nil },
-			Spawn: func(string, ...string) error {
+			waitExit: func(int) error { return nil },
+			spawn: func(string, ...string) error {
 				t.Fatal("direct spawn should not handle a Darwin launchd supervisor")
 				return nil
 			},

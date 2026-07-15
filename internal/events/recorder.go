@@ -137,13 +137,20 @@ type RotationResult struct {
 
 	// CompressionPending is true on success: the rename of the old
 	// active file is synchronous, but gzip compression runs in a
-	// background goroutine. Use Done to wait for completion.
+	// background goroutine. Use CompressionDone to wait for completion.
 	CompressionPending bool
 
-	// Done is closed when the background gzip + rename completes
-	// (whether the gzip itself succeeded or failed). Nil when
-	// Rotated is false. Not serialized on the wire.
-	Done <-chan struct{} `json:"-"`
+	done <-chan struct{}
+}
+
+// CompressionDone returns a channel that closes when the background gzip +
+// rename completes, whether the gzip itself succeeded or failed. It returns
+// nil when the rotation was a no-op.
+//
+// The read-only projection keeps the result's completion source immutable to
+// callers while preserving the select-based wait contract.
+func (result RotationResult) CompressionDone() <-chan struct{} {
+	return result.done
 }
 
 // NewFileRecorder opens (or creates) the event log at path. It reads the tail
@@ -329,7 +336,7 @@ func (r *FileRecorder) ForceRotate() (RotationResult, error) {
 //
 // On success, the prior active log is renamed to
 // events.jsonl.rotating-<ts> and a background goroutine compresses
-// it to its canonical archive basename. The result's Done channel
+// it to its canonical archive basename. The result's completion channel
 // closes when that goroutine finishes.
 func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	info, err := r.file.Stat()
@@ -423,7 +430,7 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 		AnchorSeq:          anchor.Seq,
 		AnchorTimestamp:    anchor.Ts,
 		CompressionPending: true,
-		Done:               done,
+		done:               done,
 	}, nil
 }
 

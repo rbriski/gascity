@@ -20,21 +20,26 @@ type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metad
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
-	Store                 beads.Store
-	Provider              runtime.Provider
-	CityPath              string
-	SearchPaths           []string
-	Recorder              events.Recorder
-	UsageSink             usage.Sink
-	ResolveTransport      func(template, provider string) string
-	ResolveSessionRuntime SessionRuntimeResolver
-	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
-	// a keyed start is probed for stale resume-key failure. Nil preserves the
-	// session package production timer.
-	StaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	Store                   beads.Store
+	Provider                runtime.Provider
+	CityPath                string
+	SearchPaths             []string
+	Recorder                events.Recorder
+	UsageSink               usage.Sink
+	ResolveTransport        func(template, provider string) string
+	ResolveSessionRuntime   SessionRuntimeResolver
+	staleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
+}
+
+// WithStaleKeyDetectionWaiter returns cfg with the lifecycle signal used
+// before a keyed start is probed for stale resume-key failure. A nil waiter
+// preserves the session package production timer.
+func (cfg FactoryConfig) WithStaleKeyDetectionWaiter(waiter sessionpkg.StaleKeyDetectionWaiter) FactoryConfig {
+	cfg.staleKeyDetectionWaiter = waiter
+	return cfg
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -60,8 +65,8 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
 	}
-	if cfg.StaleKeyDetectionWaiter != nil {
-		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
+	if cfg.staleKeyDetectionWaiter != nil {
+		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.staleKeyDetectionWaiter))
 	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.UsageSink, cfg.ResolveSessionRuntime, cfg.Pricing)

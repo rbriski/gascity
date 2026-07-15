@@ -12,15 +12,15 @@ import (
 )
 
 func (o Options) kill(pid int, sig syscall.Signal) error {
-	if o.Kill != nil {
-		return o.Kill(pid, sig)
+	if o.killFn != nil {
+		return o.killFn(pid, sig)
 	}
 	return syscall.Kill(pid, sig)
 }
 
 func (o Options) currentGroupID() int {
-	if o.CurrentGroupID != nil {
-		return o.CurrentGroupID()
+	if o.currentGroupIDFn != nil {
+		return o.currentGroupIDFn()
 	}
 	return syscall.Getpgrp()
 }

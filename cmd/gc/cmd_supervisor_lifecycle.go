@@ -417,11 +417,11 @@ func supervisorProcessEnvMap(data []byte) map[string]string {
 }
 
 func terminateProcessGroup(pgid int, timeout time.Duration) error {
-	return processgroup.Terminate(pgid, timeout, processgroup.Options{
-		Kill:           supervisorKill,
-		CurrentGroupID: supervisorGetpgrp,
-		PollPeriod:     supervisorProcessGroupPollPeriod,
-	})
+	return processgroup.Terminate(
+		pgid,
+		timeout,
+		processgroup.NewOptions(supervisorKill, supervisorGetpgrp, supervisorProcessGroupPollPeriod),
+	)
 }
 
 func newSupervisorRunCmd(stdout, stderr io.Writer) *cobra.Command {

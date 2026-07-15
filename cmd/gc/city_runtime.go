@@ -195,9 +195,9 @@ type CityRuntimeParams struct {
 	ControlDispatcherCh chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
 	OnStarted           func()                  // called after initial reconciliation succeeds
 	OnStatus            func(string)            // called when init status changes
-	ManagedDoltHealth   func(string) error
-	ManagedDoltOwned    func(string) (bool, error)
-	ManagedDoltPort     func(string) string
+	managedDoltHealth   func(string) error
+	managedDoltOwned    func(string) (bool, error)
+	managedDoltPort     func(string) string
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -247,15 +247,15 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	wg := newWispGCForConfig(p.Cfg)
 
-	managedDoltHealth := p.ManagedDoltHealth
+	managedDoltHealth := p.managedDoltHealth
 	if managedDoltHealth == nil {
 		managedDoltHealth = healthBeadsProvider
 	}
-	managedDoltOwned := p.ManagedDoltOwned
+	managedDoltOwned := p.managedDoltOwned
 	if managedDoltOwned == nil {
 		managedDoltOwned = managedDoltLifecycleOwned
 	}
-	managedDoltPort := p.ManagedDoltPort
+	managedDoltPort := p.managedDoltPort
 	if managedDoltPort == nil {
 		managedDoltPort = currentResolvableManagedDoltPort
 	}

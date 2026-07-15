@@ -184,27 +184,27 @@ type restartSpec struct {
 // restartSupervisor performs so unit tests can exercise both branches
 // without spawning real processes.
 type restartHelpers struct {
-	// Systemctl invokes systemctl with the given args. Production
+	// systemctl invokes systemctl with the given args. Production
 	// uses supervisorSystemctlRun (which targets `systemctl ...`).
-	Systemctl func(args ...string) error
+	systemctl func(args ...string) error
 
-	// Launchctl invokes launchctl with the given args. Production
+	// launchctl invokes launchctl with the given args. Production
 	// uses supervisorLaunchctlRun.
-	Launchctl func(args ...string) error
+	launchctl func(args ...string) error
 
-	// Kill sends SIGTERM to pid through the shared process helper.
-	Kill func(pid int) error
+	// kill sends SIGTERM to pid through the shared process helper.
+	kill func(pid int) error
 
-	// WaitExit blocks until pid has exited (or the helper escalates
+	// waitExit blocks until pid has exited (or the helper escalates
 	// and gives up). Production polls shared PID liveness, then sends
 	// SIGKILL as a fallback. Tests set this to
 	// nil or a no-op when they don't model process lifetimes.
-	WaitExit func(pid int) error
+	waitExit func(pid int) error
 
-	// Spawn launches a detached process executing exe with argv.
+	// spawn launches a detached process executing exe with argv.
 	// Production starts a backgrounded child via os/exec with
 	// backgroundSysProcAttr.
-	Spawn func(exe string, argv ...string) error
+	spawn func(exe string, argv ...string) error
 }
 
 // restartSupervisor restarts the gascity-supervisor process. Behavior
@@ -230,28 +230,28 @@ func restartSupervisor(spec restartSpec, h restartHelpers) error {
 		return fmt.Errorf("restartSupervisor: supervisor cannot be both systemd- and launchd-managed")
 	}
 	if spec.SystemdManaged {
-		if h.Systemctl == nil {
+		if h.systemctl == nil {
 			return fmt.Errorf("restartSupervisor: nil Systemctl helper")
 		}
-		if err := h.Systemctl("--user", "restart", spec.ServiceName); err != nil {
+		if err := h.systemctl("--user", "restart", spec.ServiceName); err != nil {
 			return fmt.Errorf("systemctl --user restart %s: %w", spec.ServiceName, err)
 		}
 		return nil
 	}
 	if spec.LaunchdManaged {
-		if h.Launchctl == nil {
+		if h.launchctl == nil {
 			return fmt.Errorf("restartSupervisor: nil Launchctl helper")
 		}
 		target := supervisorLaunchdServiceTarget(spec.LaunchdLabel)
-		if err := h.Launchctl("kickstart", "-k", target); err != nil {
+		if err := h.launchctl("kickstart", "-k", target); err != nil {
 			return fmt.Errorf("launchctl kickstart -k %s: %w", target, err)
 		}
 		return nil
 	}
-	if h.Kill == nil || h.Spawn == nil {
+	if h.kill == nil || h.spawn == nil {
 		return fmt.Errorf("restartSupervisor: nil Kill/Spawn helper")
 	}
-	if err := h.Kill(spec.PID); err != nil {
+	if err := h.kill(spec.PID); err != nil {
 		return fmt.Errorf("killing supervisor pid %d: %w", spec.PID, err)
 	}
 	// Wait for the old supervisor to actually exit before spawning the
@@ -259,12 +259,12 @@ func restartSupervisor(spec restartSpec, h restartHelpers) error {
 	// /health port and the new one fails to bind — PollReady then sees
 	// the OLD supervisor still serving and returns "ready" without the
 	// build_id ever flipping.
-	if h.WaitExit != nil {
-		if err := h.WaitExit(spec.PID); err != nil {
+	if h.waitExit != nil {
+		if err := h.waitExit(spec.PID); err != nil {
 			return fmt.Errorf("waiting for supervisor pid %d to exit: %w", spec.PID, err)
 		}
 	}
-	if err := h.Spawn(spec.ExePath, spec.Argv...); err != nil {
+	if err := h.spawn(spec.ExePath, spec.Argv...); err != nil {
 		return fmt.Errorf("spawning supervisor %s: %w", spec.ExePath, err)
 	}
 	return nil

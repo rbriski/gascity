@@ -359,10 +359,10 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
-		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{
-			OnStall:      func() { _ = emitPending() },
-			StallTimeout: sessionStreamPendingStallTimeout,
-			Wake:         workerOps,
+		lw.run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, logFileWatcherRunOpts{
+			onStall:      func() { _ = emitPending() },
+			stallTimeout: sessionStreamPendingStallTimeout,
+			wake:         workerOps,
 		})
 		return
 	}
@@ -482,7 +482,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
-		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{Wake: workerOps})
+		lw.run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, logFileWatcherRunOpts{wake: workerOps})
 		return
 	}
 
@@ -778,12 +778,12 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
-		lw.Run(ctx, reloadSnapshot, func() {
+		lw.run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
-		}, RunOpts{
-			OnStall:      func() { _ = emitPending() },
-			StallTimeout: sessionStreamPendingStallTimeout,
-			Wake:         workerOps,
+		}, logFileWatcherRunOpts{
+			onStall:      func() { _ = emitPending() },
+			stallTimeout: sessionStreamPendingStallTimeout,
+			wake:         workerOps,
 		})
 		return
 	}
@@ -905,9 +905,9 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		_ = emitSnapshot(initial)
-		lw.Run(ctx, reloadSnapshot, func() {
+		lw.run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
-		}, RunOpts{Wake: workerOps})
+		}, logFileWatcherRunOpts{wake: workerOps})
 		return
 	}
 

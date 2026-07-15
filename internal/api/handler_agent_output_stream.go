@@ -216,7 +216,7 @@ func (s *Server) streamSessionLog(
 		return true
 	}
 
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) }, RunOpts{Wake: wake})
+	lw.run(ctx, readAndEmit, func() { writeSSEComment(w) }, logFileWatcherRunOpts{wake: wake})
 }
 
 // streamPeekOutput polls Peek() through the worker boundary and emits changes
@@ -394,9 +394,9 @@ func (s *Server) streamSessionLogHuma(
 		return true
 	}
 
-	lw.Run(ctx, readAndEmit, func() {
+	lw.run(ctx, readAndEmit, func() {
 		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
-	}, RunOpts{Wake: wake})
+	}, logFileWatcherRunOpts{wake: wake})
 }
 
 func (s *Server) streamPeekOutputHuma(ctx context.Context, send sse.Sender, name string, handle agentPeekHandle, wake <-chan struct{}) {

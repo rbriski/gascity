@@ -2220,11 +2220,10 @@ func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.Pr
 // PostProvision hook do not dominate that function's complexity; the wiring is
 // unchanged.
 func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, depOnStep func(rig.ProvisionStep)) rig.Deps {
-	return rig.Deps{
+	deps := rig.Deps{
 		FS:           fsys.OSFS{},
 		CityPath:     cs.cityPath,
 		Cfg:          editCfg,
-		InitStore:    controllerStateInitRigDirIfReady,
 		InitAndHook:  initAndHookDir,
 		ComposePacks: ensureBundledRigImportsInstalled,
 		WriteRoutes: func(cp string, c *config.City) error {
@@ -2243,6 +2242,7 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 			return nil
 		},
 	}
+	return deps.WithInitStore(controllerStateInitRigDirIfReady)
 }
 
 // rigPostProvisionLocal runs the rig-local infrastructure the CLI installs after a

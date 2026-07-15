@@ -57,8 +57,8 @@ func TestWatcherSurvivesRotationWithoutGap(t *testing.T) {
 	if !res.Rotated {
 		t.Fatal("expected Rotated=true")
 	}
-	if res.Done != nil {
-		<-res.Done
+	if res.CompressionDone() != nil {
+		<-res.CompressionDone()
 	}
 
 	// Write more events post-rotate.
@@ -132,8 +132,8 @@ func TestWatcherDoesNotReEmitAfterRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForceRotate: %v", err)
 	}
-	if res.Done != nil {
-		<-res.Done
+	if res.CompressionDone() != nil {
+		<-res.CompressionDone()
 	}
 
 	first, err := w.Next()

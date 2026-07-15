@@ -297,7 +297,6 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		FS:           fs,
 		CityPath:     cityPath,
 		Cfg:          cfg,
-		InitStore:    initDirIfReady,
 		InitAndHook:  initAndHookDir,
 		ComposePacks: ensureBundledRigImportsInstalled,
 		WriteRoutes: func(cp string, c *config.City) error {
@@ -359,6 +358,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			}
 		},
 	}
+	deps = deps.WithInitStore(initDirIfReady)
 
 	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
 		Name:           name,

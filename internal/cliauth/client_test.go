@@ -72,8 +72,7 @@ func TestWhoamiRejectsInvalidToken(t *testing.T) {
 // to the CLI's /token endpoint.
 func TestBrowserLoginRoundTrip(t *testing.T) {
 	const base = "https://service.example"
-	c := NewClient(base, io.Discard)
-	c.OpenBrowser = func(authURL string) error {
+	c := NewClient(base, io.Discard).WithBrowserOpener(func(authURL string) error {
 		u, err := url.Parse(authURL)
 		if err != nil {
 			return err
@@ -87,7 +86,7 @@ func TestBrowserLoginRoundTrip(t *testing.T) {
 		}
 		_ = resp.Body.Close()
 		return nil
-	}
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -186,8 +185,7 @@ func TestBrowserCallbackPageScrubsFragmentBeforeTokenHandoff(t *testing.T) {
 
 func TestBrowserLoginRejectsServiceMismatch(t *testing.T) {
 	const base = "https://service.example"
-	c := NewClient(base, io.Discard)
-	c.OpenBrowser = func(authURL string) error {
+	c := NewClient(base, io.Discard).WithBrowserOpener(func(authURL string) error {
 		u, _ := url.Parse(authURL)
 		q := u.Query()
 		tokenURL := strings.Replace(q.Get("redirect_uri"), "/callback", "/token", 1)
@@ -199,7 +197,7 @@ func TestBrowserLoginRejectsServiceMismatch(t *testing.T) {
 		}
 		_ = resp.Body.Close()
 		return nil
-	}
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := c.Login(ctx, LoginOptions{}); err == nil || !strings.Contains(err.Error(), "does not match") {
@@ -209,8 +207,7 @@ func TestBrowserLoginRejectsServiceMismatch(t *testing.T) {
 
 func TestBrowserLoginRejectsAbsentService(t *testing.T) {
 	const base = "https://service.example"
-	c := NewClient(base, io.Discard)
-	c.OpenBrowser = func(authURL string) error {
+	c := NewClient(base, io.Discard).WithBrowserOpener(func(authURL string) error {
 		u, _ := url.Parse(authURL)
 		q := u.Query()
 		tokenURL := strings.Replace(q.Get("redirect_uri"), "/callback", "/token", 1)
@@ -222,7 +219,7 @@ func TestBrowserLoginRejectsAbsentService(t *testing.T) {
 		}
 		_ = resp.Body.Close()
 		return nil
-	}
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := c.Login(ctx, LoginOptions{}); err == nil || !strings.Contains(err.Error(), "does not match") {

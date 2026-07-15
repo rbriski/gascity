@@ -429,7 +429,6 @@ func TestAddImportWithSourcePolicyFencesDirectSource(t *testing.T) {
 
 	sentinel := errors.New("blocked by source policy")
 	deps := Deps{
-		SourcePolicy: func(string) error { return sentinel },
 		ResolveHeadCommit: func(string, string) (string, error) {
 			t.Fatal("HEAD probe must not run when the source policy blocks")
 			return "", nil
@@ -442,7 +441,7 @@ func TestAddImportWithSourcePolicyFencesDirectSource(t *testing.T) {
 			t.Fatal("SyncLock must not run when the source policy blocks")
 			return nil, nil
 		},
-	}
+	}.WithSourcePolicy(func(string) error { return sentinel })
 	_, err := AddImportWith(fsys.OSFS{}, dir, "https://github.com/example/tools.git", "", "", deps)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("AddImportWith err = %v, want the source-policy sentinel", err)

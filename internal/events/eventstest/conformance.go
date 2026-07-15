@@ -748,8 +748,8 @@ func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		if !res.Rotated {
 			t.Fatal("ForceRotate did not rotate a non-empty log")
 		}
-		if res.Done != nil {
-			<-res.Done
+		if res.CompressionDone() != nil {
+			<-res.CompressionDone()
 		}
 
 		// (a) The anchor's seq must be strictly greater than the last

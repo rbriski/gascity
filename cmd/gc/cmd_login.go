@@ -178,8 +178,7 @@ func doLogin(ctx context.Context, opts loginOptions, stdout, stderr io.Writer) i
 	// Secrets resolve at execution time, never as flag defaults, so help output
 	// cannot render credential values from the environment.
 	token := strings.TrimSpace(registryFirstNonEmpty(opts.Token, os.Getenv(serviceTokenEnv)))
-	client := cliauth.NewClient(baseURL, stdout)
-	client.OpenBrowser = openURL
+	client := cliauth.NewClient(baseURL, stdout).WithBrowserOpener(openURL)
 	if token == "" {
 		if looksLikeCI() {
 			fmt.Fprintln(stderr, "gc login: this looks like CI — a human session is not a CI credential; use a machine principal for automation") //nolint:errcheck

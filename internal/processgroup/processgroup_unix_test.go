@@ -15,10 +15,8 @@ import (
 func TestTerminateEscalatesToSIGKILL(t *testing.T) {
 	killed := false
 	var signals []syscall.Signal
-	opts := Options{
-		CurrentGroupID: func() int { return 12345 },
-		PollPeriod:     time.Millisecond,
-		Kill: func(_ int, sig syscall.Signal) error {
+	opts := NewOptions(
+		func(_ int, sig syscall.Signal) error {
 			switch sig {
 			case syscall.SIGTERM, syscall.SIGKILL:
 				signals = append(signals, sig)
@@ -36,7 +34,9 @@ func TestTerminateEscalatesToSIGKILL(t *testing.T) {
 				return nil
 			}
 		},
-	}
+		func() int { return 12345 },
+		time.Millisecond,
+	)
 
 	if err := Terminate(45678, 0, opts); err != nil {
 		t.Fatalf("Terminate() error = %v, want nil", err)
@@ -47,12 +47,13 @@ func TestTerminateEscalatesToSIGKILL(t *testing.T) {
 }
 
 func TestTerminateTreatsESRCHAsAlreadyStopped(t *testing.T) {
-	opts := Options{
-		CurrentGroupID: func() int { return 12345 },
-		Kill: func(_ int, _ syscall.Signal) error {
+	opts := NewOptions(
+		func(_ int, _ syscall.Signal) error {
 			return syscall.ESRCH
 		},
-	}
+		func() int { return 12345 },
+		0,
+	)
 
 	if err := Terminate(45678, time.Millisecond, opts); err != nil {
 		t.Fatalf("Terminate() ESRCH error = %v, want nil", err)
@@ -60,7 +61,7 @@ func TestTerminateTreatsESRCHAsAlreadyStopped(t *testing.T) {
 }
 
 func TestTerminateRefusesCurrentProcessGroup(t *testing.T) {
-	opts := Options{CurrentGroupID: func() int { return 45678 }}
+	opts := NewOptions(nil, func() int { return 45678 }, 0)
 
 	if err := Terminate(45678, time.Millisecond, opts); err == nil {
 		t.Fatal("Terminate() current process group error = nil, want refusal")

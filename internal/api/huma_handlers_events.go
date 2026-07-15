@@ -203,11 +203,12 @@ func (s *Server) humaHandleEventRotate(ctx context.Context, input *EventRotateIn
 	}
 
 	compressionStatus := "pending"
-	if input.Wait && result.Rotated && result.Done != nil {
+	compressionDone := result.CompressionDone()
+	if input.Wait && result.Rotated && compressionDone != nil {
 		timer := time.NewTimer(eventRotateWaitTimeout)
 		defer timer.Stop()
 		select {
-		case <-result.Done:
+		case <-compressionDone:
 			compressionStatus = "complete"
 		case <-timer.C:
 			compressionStatus = "pending"

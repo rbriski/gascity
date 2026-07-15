@@ -11,17 +11,17 @@ import (
 // stubDeps returns a Deps with all required infra + required funcs filled with
 // no-op stubs, so validation passes and Provision reaches its core.
 func stubDeps(cityPath string) Deps {
-	return Deps{
+	deps := Deps{
 		FS:       fsys.OSFS{},
 		CityPath: cityPath,
 		Cfg:      &config.City{},
 		ComposePacks: func(string, []config.BoundImport) ([]config.BoundImport, func() error, error) {
 			return nil, nil, nil
 		},
-		InitStore:   func(string, string, string) (bool, error) { return false, nil },
 		InitAndHook: func(string, string, string) error { return nil },
 		WriteRoutes: func(string, *config.City) error { return nil },
 	}
+	return deps.WithInitStore(func(string, string, string) (bool, error) { return false, nil })
 }
 
 func TestValidateDepsRequiresInfra(t *testing.T) {
@@ -34,7 +34,7 @@ func TestValidateDepsRequiresInfra(t *testing.T) {
 		"missing CityPath":     without(func(d *Deps) { d.CityPath = "" }),
 		"missing Cfg":          without(func(d *Deps) { d.Cfg = nil }),
 		"missing ComposePacks": without(func(d *Deps) { d.ComposePacks = nil }),
-		"missing InitStore":    without(func(d *Deps) { d.InitStore = nil }),
+		"missing InitStore":    without(func(d *Deps) { d.initStore = nil }),
 		"missing InitAndHook":  without(func(d *Deps) { d.InitAndHook = nil }),
 		"missing WriteRoutes":  without(func(d *Deps) { d.WriteRoutes = nil }),
 	}

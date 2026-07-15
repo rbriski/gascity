@@ -39,10 +39,11 @@ type Deps struct {
 	// Cfg is the city config the caller loaded for edit.
 	Cfg *config.City
 
-	// InitStore initializes the rig's bead store (cmd/gc initDirIfReady). It
+	// initStore initializes the rig's bead store (cmd/gc initDirIfReady). It
 	// returns deferred=true when live init is punted to the controller/startup.
-	// Required.
-	InitStore func(cityPath, dir, prefix string) (deferred bool, err error)
+	// Required and configured through WithInitStore rather than exposed as a
+	// mutable function field.
+	initStore func(cityPath, dir, prefix string) (deferred bool, err error)
 	// InitAndHook is the deferred-fallback deeper store init (cmd/gc
 	// initAndHookDir); its error is intentionally swallowed (reported as
 	// "deferred to controller"). Required — it is reached whenever InitStore
@@ -96,6 +97,14 @@ type Deps struct {
 	// the API emits typed events (G20). nil = no-op. This push seam is the one
 	// deliberate departure from SlingDeps, whose warnings ride the return struct.
 	OnStep func(step ProvisionStep)
+}
+
+// WithInitStore returns d with the required bead-store initializer installed.
+// Keeping the callback behind this private field makes dependency
+// assembly explicit while preserving the CLI and controller injection seam.
+func (d Deps) WithInitStore(initStore func(cityPath, dir, prefix string) (deferred bool, err error)) Deps {
+	d.initStore = initStore
+	return d
 }
 
 // ProvisionRequest is the caller's rig-add intent. It mirrors the current
@@ -192,7 +201,7 @@ func validateDeps(d Deps) error {
 	if d.ComposePacks == nil {
 		return depErr("ComposePacks")
 	}
-	if d.InitStore == nil {
+	if d.initStore == nil {
 		return depErr("InitStore")
 	}
 	if d.InitAndHook == nil {

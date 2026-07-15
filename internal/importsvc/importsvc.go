@@ -75,13 +75,14 @@ type Deps struct {
 	// [imports] table.
 	Rig string
 
-	// SourcePolicy fences every remote import source before it is probed or
+	// sourcePolicy fences every remote import source before it is probed or
 	// fetched — the caller-supplied source and every transitive import packman
 	// resolves during lock sync. The HTTP handler injects its SSRF fence here so
 	// an accepted public pack cannot pull an internal, file, or link-local nested
 	// import past the API. Leave nil (the trusted CLI/local path) to allow every
-	// source.
-	SourcePolicy func(source string) error
+	// source. Configure it through WithSourcePolicy rather than exposing a
+	// mutable function field.
+	sourcePolicy packman.SourcePolicy
 
 	// SyncLock, WriteLockfile, ResolveVersion, DefaultConstraint, and
 	// ResolveHeadCommit mirror the packman seams. Leave nil to use the package
@@ -93,18 +94,26 @@ type Deps struct {
 	ResolveHeadCommit func(cityRoot, source string) (string, error)
 }
 
+// WithSourcePolicy returns d with the policy that fences direct and transitive
+// remote import sources before any probe or fetch. A nil policy preserves the
+// trusted local-CLI behavior.
+func (d Deps) WithSourcePolicy(policy packman.SourcePolicy) Deps {
+	d.sourcePolicy = policy
+	return d
+}
+
 func (d Deps) syncLock() func(string, map[string]config.Import, packman.InstallMode) (*packman.Lockfile, error) {
 	if d.SyncLock != nil {
 		return d.SyncLock
 	}
-	if d.SourcePolicy == nil {
+	if d.sourcePolicy == nil {
 		return syncLock
 	}
 	// Route the default sync through the policy-aware packman entry point so the
 	// fence reaches transitive imports discovered inside lock resolution, which
 	// the caller can't see to pre-check.
 	return func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
-		return packman.SyncLockWithPolicy(cityRoot, imports, mode, d.SourcePolicy)
+		return packman.SyncLockWithPolicy(cityRoot, imports, mode, d.sourcePolicy)
 	}
 }
 
@@ -156,10 +165,10 @@ func (d Deps) defaultImportVersionForSource(cityRoot, source string) (string, er
 // AddImportWith never drives a git probe at an internal target, even for a
 // caller that skips the handler's own pre-check. A nil policy allows everything.
 func (d Deps) fenceSource(source string) error {
-	if d.SourcePolicy == nil {
+	if d.sourcePolicy == nil {
 		return nil
 	}
-	return d.SourcePolicy(source)
+	return d.sourcePolicy(source)
 }
 
 // resolveImportVersion validates and resolves the version constraint for an add.

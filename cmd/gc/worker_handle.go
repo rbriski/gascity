@@ -75,17 +75,17 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		}
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	return worker.NewFactory(worker.FactoryConfig{
-		Store:                   store,
-		Provider:                sp,
-		CityPath:                cityPath,
-		SearchPaths:             searchPaths,
-		UsageSink:               usageSinkForCity(cfg, cityPath),
-		ResolveTransport:        resolveTransport,
-		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
-		StaleKeyDetectionWaiter: waiter,
-		Pricing:                 cfg.PricingRegistry(),
-	})
+	factoryConfig := worker.FactoryConfig{
+		Store:                 store,
+		Provider:              sp,
+		CityPath:              cityPath,
+		SearchPaths:           searchPaths,
+		UsageSink:             usageSinkForCity(cfg, cityPath),
+		ResolveTransport:      resolveTransport,
+		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		Pricing:               cfg.PricingRegistry(),
+	}.WithStaleKeyDetectionWaiter(waiter)
+	return worker.NewFactory(factoryConfig)
 }
 
 func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) worker.SessionRuntimeResolver {

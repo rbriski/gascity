@@ -228,7 +228,7 @@ func TestInstallNudgeKeyShadowNeverFallsBackToCityPathOrDisplayName(t *testing.T
 		cfg:      supervisorCfg(),
 		stderr:   &bytes.Buffer{},
 	}
-	if err := cr.installNudgeKeyShadow(); err != nil {
+	if err := cr.installNudgeKeyShadow(t.Context()); err != nil {
 		t.Fatalf("installNudgeKeyShadow without project identity: %v", err)
 	}
 	if cr.nudgeKeyController != nil || cr.nudgeKeyShadowScope != "" {

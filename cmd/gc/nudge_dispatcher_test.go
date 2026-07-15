@@ -11,9 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -238,21 +236,30 @@ func TestStartNudgeWakeListenerKeepsMalformedAndLegacyPayloadsGlobalOnly(t *test
 	}
 }
 
-func TestCommittedNudgeStartsProvisionalExactShadowBeforePatrol(t *testing.T) {
+func TestVerifiedDurableCommandStartsExactReadShadowBeforePatrol(t *testing.T) {
 	dir := t.TempDir()
-	if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, "project-shadow-scope"); err != nil {
-		t.Fatalf("WriteProjectIdentity: %v", err)
+	storeBinding := nudgequeue.CommandStoreBinding{StoreUUID: "store-socket", RestoreEpoch: 5}
+	command := pageTestCommand("command-exact-1", "session-durable-1", 1, 1, nudgequeue.CommandStatePending, storeBinding)
+	source := &fakeNudgeCommandSource{
+		snapshot: nudgequeue.CommandIndexSnapshot{Store: storeBinding},
+		resolutions: map[string]nudgequeue.CommandIndexResolution{
+			command.ID: {Store: storeBinding, Revision: 1, Entry: knownPageEntry(command), Found: true},
+		},
 	}
 	cr := &CityRuntime{
-		cityPath: dir,
-		cfg:      supervisorCfg(),
-		stderr:   &bytes.Buffer{},
+		cityPath:            dir,
+		cfg:                 supervisorCfg(),
+		standaloneCityStore: beads.NewMemStore(),
+		stderr:              &bytes.Buffer{},
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+			return source, nil
+		},
 	}
-	if err := cr.installNudgeKeyShadow(); err != nil {
+	if err := cr.installNudgeKeyShadow(t.Context()); err != nil {
 		t.Fatalf("installNudgeKeyShadow: %v", err)
 	}
 	if cr.nudgeKeyController == nil {
-		t.Fatal("durable project identity did not install provisional keyed shadow controller")
+		t.Fatal("verified durable repository did not install keyed read shadow controller")
 	}
 
 	type observation struct {
@@ -262,14 +269,6 @@ func TestCommittedNudgeStartsProvisionalExactShadowBeforePatrol(t *testing.T) {
 		batch     nudgeReconcileBatch
 	}
 	observed := make(chan observation, 1)
-	type hintObservation struct {
-		hint      nudgeWakeHint
-		committed bool
-		loadErr   error
-	}
-	hintSeen := make(chan hintObservation, 1)
-	commandID := "command-exact-1"
-	sessionID := "session-durable-1"
 	cr.nudgeKeyController.reconcile = func(_ context.Context, key reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
 		observed <- observation{
 			key:       key.String(),
@@ -283,22 +282,8 @@ func TestCommittedNudgeStartsProvisionalExactShadowBeforePatrol(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	stopController := cr.startNudgeKeyController(ctx)
 	wakeCh := make(chan struct{}, 1)
-	hintErrCh := make(chan error, 1)
 	lis, err := startNudgeWakeListenerWithHints(ctx, dir, wakeCh, func(hint nudgeWakeHint) {
-		state, loadErr := nudgequeue.LoadState(dir)
-		committed := false
-		if loadErr == nil {
-			for _, queued := range state.Pending {
-				if queued.ID == hint.CommandID && queued.SessionID == hint.SessionID {
-					committed = true
-					break
-				}
-			}
-		}
-		hintSeen <- hintObservation{hint: hint, committed: committed, loadErr: loadErr}
-		if err := cr.enqueueNudgeKeyShadow(hint.SessionID); err != nil {
-			hintErrCh <- err
-		}
+		cr.acceptNudgeKeyShadowHint(ctx, hint)
 	}, nil, "test")
 	if err != nil {
 		cancel()
@@ -311,33 +296,16 @@ func TestCommittedNudgeStartsProvisionalExactShadowBeforePatrol(t *testing.T) {
 		_ = lis.Close()
 	})
 
-	item := newQueuedNudge("display-alias-must-not-be-key", "message-must-not-enter-hint", time.Now())
-	item.ID = commandID
-	item.SessionID = sessionID
-	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: beads.NewMemStore()}, item); err != nil {
-		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
-	}
+	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: command.ID, SessionID: "untrusted-hint-session"})
 
 	got := receiveBeforeDeadline(t, observed)
-	gotHint := receiveBeforeDeadline(t, hintSeen)
-	if gotHint.loadErr != nil || !gotHint.committed {
-		t.Fatalf("hint observed committed queue state = %v, loadErr=%v", gotHint.committed, gotHint.loadErr)
-	}
-	if gotHint.hint.CommandID != commandID || gotHint.hint.SessionID != sessionID {
-		t.Fatalf("wire hint = %+v, want only committed command/session identities", gotHint.hint)
-	}
-	if got.storeID != nudgeKeyShadowProjectScopePrefix+"project-shadow-scope" || got.sessionID != sessionID {
-		t.Fatalf("provisional key = scope %q session %q, want namespaced project scope + durable session ID (encoded %q)", got.storeID, got.sessionID, got.key)
+	if got.storeID != nudgeCommandReconcileScope(storeBinding) || got.sessionID != command.Target.SessionID {
+		t.Fatalf("verified key = scope %q session %q, want durable repository lineage + stored target (encoded %q)", got.storeID, got.sessionID, got.key)
 	}
 	if got.batch.Causes != nudgeCauseCommandCommit {
 		t.Fatalf("causes = %v, want command commit only", got.batch.Causes)
 	}
 	receiveBeforeDeadline(t, wakeCh)
-	select {
-	case err := <-hintErrCh:
-		t.Fatalf("exact hint admission: %v", err)
-	default:
-	}
 }
 
 func TestDuplicateCommandWakeUsesPersistedSessionIdentity(t *testing.T) {
@@ -375,35 +343,49 @@ func TestDuplicateCommandWakeUsesPersistedSessionIdentity(t *testing.T) {
 	}
 }
 
-func TestDistinctCommandWakeHintsCoalesceAtProvisionalSessionKey(t *testing.T) {
+func TestDistinctVerifiedCommandWakeHintsCoalesceAtDurableSessionKey(t *testing.T) {
 	dir := t.TempDir()
-	if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, "duplicate-project"); err != nil {
-		t.Fatalf("WriteProjectIdentity: %v", err)
+	storeBinding := nudgequeue.CommandStoreBinding{StoreUUID: "store-coalesce", RestoreEpoch: 2}
+	first := pageTestCommand("command-one", "same-session", 1, 1, nudgequeue.CommandStatePending, storeBinding)
+	second := pageTestCommand("command-two", "same-session", 2, 2, nudgequeue.CommandStatePending, storeBinding)
+	source := &fakeNudgeCommandSource{
+		snapshot: nudgequeue.CommandIndexSnapshot{Store: storeBinding},
+		resolutions: map[string]nudgequeue.CommandIndexResolution{
+			first.ID:  {Store: storeBinding, Revision: 1, Entry: knownPageEntry(first), Found: true},
+			second.ID: {Store: storeBinding, Revision: 2, Entry: knownPageEntry(second), Found: true},
+		},
 	}
-	cr := &CityRuntime{cityPath: dir, cfg: supervisorCfg(), stderr: &bytes.Buffer{}}
-	if err := cr.installNudgeKeyShadow(); err != nil {
+	cr := &CityRuntime{
+		cityPath:            dir,
+		cfg:                 supervisorCfg(),
+		standaloneCityStore: beads.NewMemStore(),
+		stderr:              &bytes.Buffer{},
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+			return source, nil
+		},
+	}
+	if err := cr.installNudgeKeyShadow(t.Context()); err != nil {
 		t.Fatalf("installNudgeKeyShadow: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	accepted := make(chan error, 2)
+	accepted := make(chan struct{}, 2)
 	lis, err := startNudgeWakeListenerWithHints(ctx, dir, make(chan struct{}, 1), func(hint nudgeWakeHint) {
-		accepted <- cr.enqueueNudgeKeyShadow(hint.SessionID)
+		cr.acceptNudgeKeyShadowHint(ctx, hint)
+		accepted <- struct{}{}
 	}, nil, "test")
 	if err != nil {
 		t.Fatalf("startNudgeWakeListenerWithHints: %v", err)
 	}
 	defer lis.Close() //nolint:errcheck
-	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "command-one", SessionID: "same-session"})
-	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: "command-two", SessionID: "same-session"})
+	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: first.ID, SessionID: "untrusted-one"})
+	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: second.ID, SessionID: "untrusted-two"})
 	for i := 0; i < 2; i++ {
-		if err := receiveBeforeDeadline(t, accepted); err != nil {
-			t.Fatalf("enqueueNudgeKeyShadow: %v", err)
-		}
+		receiveBeforeDeadline(t, accepted)
 	}
 
-	key, err := reconcilekey.NewSession(nudgeKeyShadowProjectScopePrefix+"duplicate-project", "same-session")
+	key, err := reconcilekey.NewSession(nudgeCommandReconcileScope(storeBinding), "same-session")
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}

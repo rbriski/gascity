@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-// TestNudgeKeyControllerProductionActivationIsExactlyShadow pins the first
+// TestNudgeKeyControllerProductionActivationIsExactlyShadow pins the read-only
 // production activation boundary. Exactly one reviewed CityRuntime method may
-// construct the controller; every other non-test path remains forbidden.
+// construct the controller, and its callback must be the certified reader.
 func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -29,7 +29,7 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 	constructorLiterals := 0
 	constructorReferences := 0
 	allowedShadowReferences := 0
-	schedulingOnlyShadowCallbacks := 0
+	certifiedReaderCallbacks := 0
 	constructorCallbackBindings := 0
 	fset := token.NewFileSet()
 	for _, entry := range entries {
@@ -70,7 +70,7 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 				for _, lhs := range typed.Lhs {
 					selector, ok := lhs.(*ast.SelectorExpr)
 					if ok && selector.Sel.Name == "reconcile" {
-						t.Errorf("%s assigns a production .reconcile callback at %s; the shadow callback is immutable until an effect-ownership gate", name, fset.Position(selector.Pos()))
+						t.Errorf("%s assigns a production .reconcile callback at %s; the read-only callback is immutable after certified construction", name, fset.Position(selector.Pos()))
 					}
 				}
 			case *ast.Ident:
@@ -80,7 +80,7 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 					if name == "city_runtime.go" && owner == "installNudgeKeyShadow" {
 						allowedShadowReferences++
 					} else {
-						t.Errorf("%s references the nudge keyed controller constructor from %s at %s; only city_runtime.go:installNudgeKeyShadow may activate the effect-free shadow", name, owner, fset.Position(typed.Pos()))
+						t.Errorf("%s references the nudge keyed controller constructor from %s at %s; only city_runtime.go:installNudgeKeyShadow may activate the read-only shadow", name, owner, fset.Position(typed.Pos()))
 					}
 				}
 			case *ast.CompositeLit:
@@ -123,41 +123,11 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 						t.Errorf("shadow constructor warning sink at %s is not the normalized stderr", fset.Position(typed.Args[2].Pos()))
 						break
 					}
-					callback, ok := typed.Args[1].(*ast.FuncLit)
-					if !ok || len(callback.Type.Params.List) != 3 || callback.Type.Results == nil || len(callback.Type.Results.List) != 1 || len(callback.Body.List) != 2 {
-						t.Errorf("shadow constructor callback at %s is not the fixed scheduling-only function literal", fset.Position(typed.Args[1].Pos()))
+					if selectorPath(typed.Args[1]) != "reader.reconcile" {
+						t.Errorf("shadow constructor callback at %s is %q, want certified reader.reconcile", fset.Position(typed.Args[1].Pos()), selectorPath(typed.Args[1]))
 						break
 					}
-					keyParam := callback.Type.Params.List[1]
-					if len(keyParam.Names) != 1 || keyParam.Names[0].Name != "_" {
-						t.Errorf("shadow constructor callback at %s does not discard the stable key before observation", fset.Position(keyParam.Pos()))
-						break
-					}
-					statement, ok := callback.Body.List[0].(*ast.ExprStmt)
-					if !ok {
-						t.Errorf("shadow constructor callback at %s contains a non-call statement", fset.Position(callback.Body.List[0].Pos()))
-						break
-					}
-					observationCall, ok := statement.X.(*ast.CallExpr)
-					if !ok || selectorPath(observationCall.Fun) != "observeNudgeKeyScheduling" || len(observationCall.Args) != 4 {
-						t.Errorf("shadow constructor callback at %s is not the exact scheduling observer call", fset.Position(statement.Pos()))
-						break
-					}
-					if selectorPath(observationCall.Args[0]) != "ctx" || selectorPath(observationCall.Args[1]) != "batch" || selectorPath(observationCall.Args[3]) != "warnings" {
-						t.Errorf("shadow scheduling observer at %s receives unapproved arguments", fset.Position(observationCall.Pos()))
-						break
-					}
-					nowCall, ok := observationCall.Args[2].(*ast.CallExpr)
-					if !ok || selectorPath(nowCall.Fun) != "time.Now" || len(nowCall.Args) != 0 {
-						t.Errorf("shadow scheduling observer at %s does not receive the local current time", fset.Position(observationCall.Args[2].Pos()))
-						break
-					}
-					result, ok := callback.Body.List[1].(*ast.ReturnStmt)
-					if !ok || len(result.Results) != 1 || calledFunction(result.Results[0]) != "nudgeReconcileSuccess" {
-						t.Errorf("shadow constructor callback at %s does not return the fixed success outcome", fset.Position(callback.Body.List[1].Pos()))
-						break
-					}
-					schedulingOnlyShadowCallbacks++
+					certifiedReaderCallbacks++
 				}
 				builtin, ok := typed.Fun.(*ast.Ident)
 				if !ok || builtin.Name != "new" || len(typed.Args) != 1 {
@@ -177,8 +147,8 @@ func TestNudgeKeyControllerProductionActivationIsExactlyShadow(t *testing.T) {
 	if constructorReferences != 1 || allowedShadowReferences != 1 {
 		t.Fatalf("production nudge keyed constructor references = %d (allowed shadow = %d), want exactly one reviewed shadow activation", constructorReferences, allowedShadowReferences)
 	}
-	if schedulingOnlyShadowCallbacks != 1 {
-		t.Fatalf("scheduling-only production nudge shadow callbacks = %d, want exactly one identity-free observer", schedulingOnlyShadowCallbacks)
+	if certifiedReaderCallbacks != 1 {
+		t.Fatalf("certified production nudge reader callbacks = %d, want exactly one", certifiedReaderCallbacks)
 	}
 	if constructorCallbackBindings != 1 {
 		t.Fatalf("nudge keyed constructor callback field bindings = %d, want direct parameter binding", constructorCallbackBindings)
@@ -215,6 +185,75 @@ func TestNudgeKeyShadowMapperHasNoEffectfulCalls(t *testing.T) {
 			t.Errorf("enqueueNudgeKeyShadow call count %s = %d, want %d", name, got, want)
 		}
 	}
+}
+
+func TestNudgeKeyReadShadowConstructionUsesNudgeClassAndDurableBinding(t *testing.T) {
+	fset, file := parseGCTestSource(t, "city_runtime.go")
+	install := findGCFunction(t, file, "installNudgeKeyShadow")
+	wantCalls := map[string]int{
+		"cr.nudgesBeadStore":         1,
+		"newNudgeKeyReadShadow":      1,
+		"nudgeCommandReconcileScope": 1,
+		"newNudgeKeyController":      1,
+	}
+	gotCalls := make(map[string]int)
+	ast.Inspect(install.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := selectorPath(call.Fun)
+		if _, tracked := wantCalls[name]; tracked {
+			gotCalls[name]++
+		}
+		if name == "contract.ReadProjectIdentity" || name == "reconcilekey.NewSession" {
+			t.Errorf("install derives scope from non-store identity through %s at %s", name, fset.Position(call.Pos()))
+		}
+		return true
+	})
+	for name, want := range wantCalls {
+		if got := gotCalls[name]; got != want {
+			t.Errorf("install call count %s = %d, want %d", name, got, want)
+		}
+	}
+
+	readerFSet, readerFile := parseGCTestSource(t, "nudge_key_production_reader.go")
+	allowedImports := map[string]bool{
+		"context": true, "errors": true, "fmt": true, "sync/atomic": true, "time": true,
+		"github.com/gastownhall/gascity/internal/beads":        true,
+		"github.com/gastownhall/gascity/internal/nudgequeue":   true,
+		"github.com/gastownhall/gascity/internal/reconcilekey": true,
+	}
+	for _, imported := range readerFile.Imports {
+		path := strings.Trim(imported.Path.Value, "\"")
+		if !allowedImports[path] {
+			t.Errorf("nudge keyed reader imports unapproved capability %q at %s", path, readerFSet.Position(imported.Pos()))
+		}
+		delete(allowedImports, path)
+	}
+	for missing := range allowedImports {
+		t.Errorf("nudge keyed reader import guard is stale: expected %q", missing)
+	}
+	forbiddenCalls := map[string]bool{
+		"Create": true, "Update": true, "Delete": true, "Close": true,
+		"SetMetadata": true, "AtomicReadWrite": true,
+		"Nudge": true, "Start": true, "Stop": true,
+	}
+	ast.Inspect(readerFile, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.CallExpr:
+			path := selectorPath(typed.Fun)
+			parts := strings.Split(path, ".")
+			if forbiddenCalls[parts[len(parts)-1]] {
+				t.Errorf("nudge keyed reader calls effect capability %q at %s", path, readerFSet.Position(typed.Pos()))
+			}
+		case *ast.GoStmt:
+			t.Errorf("nudge keyed reader starts a goroutine at %s", readerFSet.Position(typed.Pos()))
+		case *ast.SendStmt:
+			t.Errorf("nudge keyed reader sends on a channel at %s", readerFSet.Position(typed.Pos()))
+		}
+		return true
+	})
 }
 
 func TestNudgeKeySchedulingObserverIsIdentityFreeAndEffectFree(t *testing.T) {
@@ -454,7 +493,7 @@ func TestNudgeKeyControllerCoreCallSurfaceIsCapabilityFree(t *testing.T) {
 	assertASTCallsOnly(t, fset, file, "nudge keyed core", allowedCalls)
 }
 
-func TestNudgeExactIngressCallGraphRemainsEffectFree(t *testing.T) {
+func TestNudgeExactIngressCallGraphRemainsReadOnly(t *testing.T) {
 	cityFSet, cityFile := parseGCTestSource(t, "city_runtime.go")
 	run := findGCFunction(t, cityFile, "run")
 	var onExact *ast.FuncLit
@@ -482,9 +521,14 @@ func TestNudgeExactIngressCallGraphRemainsEffectFree(t *testing.T) {
 	assertASTHasNoCapabilityEscape(t, cityFSet, onExact, "CityRuntime exact ingress", nil)
 	accept := findGCFunction(t, cityFile, "acceptNudgeKeyShadowHint")
 	assertASTCallsOnly(t, cityFSet, accept, "CityRuntime exact admission", map[string]bool{
-		"ctx.Err": true, "cr.enqueueNudgeKeyShadow": true, "fmt.Fprintf": true,
+		"ctx.Err":                             true,
+		"cr.nudgeKeyReader.acceptCommandHint": true,
+		"cr.warnNudgeKeyHintDiagnostic":       true,
+		"cr.enqueueNudgeKeyShadow":            true,
 	})
-	assertASTHasNoCapabilityEscape(t, cityFSet, accept, "CityRuntime exact admission", map[string]bool{"err": true})
+	assertASTHasNoCapabilityEscape(t, cityFSet, accept, "CityRuntime exact admission", map[string]bool{
+		"sessionID": true, "accepted": true, "err": true,
+	})
 
 	dispatchFSet, dispatchFile := parseGCTestSource(t, "nudge_dispatcher.go")
 	reader := findGCFunction(t, dispatchFile, "readNudgeWakeHintConnection")
@@ -532,7 +576,7 @@ func TestQueuedNudgeWakeIsStructurallyPostCommit(t *testing.T) {
 func TestCityRuntimeStartsNudgeIngressBeforePublishingReadiness(t *testing.T) {
 	fset, file := parseGCTestSource(t, "city_runtime.go")
 	fn := findGCFunction(t, file, "run")
-	var listenerPos, readyPos token.Pos
+	var installPos, listenerPos, readyPos token.Pos
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
@@ -543,6 +587,12 @@ func TestCityRuntimeStartsNudgeIngressBeforePublishingReadiness(t *testing.T) {
 				t.Errorf("multiple production nudge listener starts: %s and %s", fset.Position(listenerPos), fset.Position(call.Pos()))
 			}
 			listenerPos = call.Pos()
+		}
+		if calledFunction(call) == "cr.installNudgeKeyShadow" {
+			if installPos != token.NoPos {
+				t.Errorf("multiple production nudge reader installs: %s and %s", fset.Position(installPos), fset.Position(call.Pos()))
+			}
+			installPos = call.Pos()
 		}
 		return true
 	})
@@ -558,8 +608,11 @@ func TestCityRuntimeStartsNudgeIngressBeforePublishingReadiness(t *testing.T) {
 			readyPos = expr.Pos()
 		}
 	}
-	if listenerPos == token.NoPos || readyPos == token.NoPos {
-		t.Fatalf("listener/readiness positions = %s/%s, want both production calls", fset.Position(listenerPos), fset.Position(readyPos))
+	if installPos == token.NoPos || listenerPos == token.NoPos || readyPos == token.NoPos {
+		t.Fatalf("install/listener/readiness positions = %s/%s/%s, want all production calls", fset.Position(installPos), fset.Position(listenerPos), fset.Position(readyPos))
+	}
+	if installPos >= listenerPos {
+		t.Fatalf("nudge reader installs at %s after ingress opens at %s", fset.Position(installPos), fset.Position(listenerPos))
 	}
 	if listenerPos >= readyPos {
 		t.Fatalf("nudge listener starts at %s after readiness at %s", fset.Position(listenerPos), fset.Position(readyPos))

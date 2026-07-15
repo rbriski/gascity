@@ -115,8 +115,8 @@ type nudgeDeferredAdmission struct {
 }
 
 // nudgeKeyController is the first domain-local keyed scheduler. It deliberately
-// owns no provider or store dependencies: the injected callback is shadow-only
-// until a later ownership gate installs a real nudge reconciler.
+// owns no provider or store dependencies: the injected callback is read-only
+// until a later ownership gate installs an effectful nudge reconciler.
 type nudgeKeyController struct {
 	queue     workqueue.TypedRateLimitingInterface[reconcilekey.Session]
 	limiter   workqueue.TypedRateLimiter[reconcilekey.Session]
@@ -242,7 +242,7 @@ func (c *nudgeKeyController) Enqueue(key reconcilekey.Session, cause nudgeReconc
 }
 
 // Run starts the fixed worker set and blocks until ctx is canceled. A callback
-// must honor ctx for shutdown to be bounded; the initial production seam never
+// must honor ctx for shutdown to be bounded; the production read shadow never
 // installs an effectful callback.
 func (c *nudgeKeyController) Run(ctx context.Context) error {
 	if ctx == nil {

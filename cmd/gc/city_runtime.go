@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -109,12 +108,16 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 	// nudgeKeyController is a domain-local keyed child. Production installs only
-	// an effect-free shadow when a durable project scope is available.
+	// a read-only shadow backed by a verified durable command repository.
 	nudgeKeyController *nudgeKeyController
-	// nudgeKeyShadowScope is deliberately prefixed as uncertified. The current
-	// git-tracked project identity is sufficient for shadow correlation but is
-	// not the store UUID/restore epoch required before effect admission.
-	nudgeKeyShadowScope string
+	// nudgeKeyShadowScope is derived only from the repository's certified
+	// store_uuid + restore_epoch binding. It is never synthesized from city,
+	// project, path, or config identity.
+	nudgeKeyShadowScope        string
+	nudgeKeyReader             *nudgeKeyReadShadow
+	nudgeCommandSourceOpener   nudgeCommandSourceOpener
+	nudgeKeyUnavailableOnce    sync.Once
+	nudgeKeyHintDiagnosticOnce sync.Once
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -337,15 +340,16 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			}
 			return make(chan struct{}, 1)
 		}(),
-		nudgeWakeCh:       make(chan struct{}, 1),
-		onStarted:         p.OnStarted,
-		onStatus:          p.OnStatus,
-		managedDoltHealth: managedDoltHealth,
-		managedDoltOwned:  managedDoltOwned,
-		managedDoltPort:   managedDoltPort,
-		logPrefix:         logPrefix,
-		stdout:            p.Stdout,
-		stderr:            p.Stderr,
+		nudgeWakeCh:              make(chan struct{}, 1),
+		onStarted:                p.OnStarted,
+		onStatus:                 p.OnStatus,
+		managedDoltHealth:        managedDoltHealth,
+		managedDoltOwned:         managedDoltOwned,
+		managedDoltPort:          managedDoltPort,
+		nudgeCommandSourceOpener: openProductionNudgeCommandSource,
+		logPrefix:                logPrefix,
+		stdout:                   p.Stdout,
+		stderr:                   p.Stderr,
 	}
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
@@ -641,12 +645,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
-	// Install and start the effect-free keyed shadow before readiness is
-	// published. Missing/invalid legacy identity leaves it inert; legacy remains
-	// the sole dispatcher owner in every case.
+	// Install and start the read-only keyed shadow before readiness is published.
+	// Unsupported or unverified repositories leave it inert; legacy remains the
+	// sole dispatcher effect owner in every case.
 	// The defer is registered after run's shutdown defer, so LIFO ordering stops
 	// queue admission and workers before shutdown inspects live sessions.
-	if err := cr.installNudgeKeyShadow(); err != nil {
+	if err := cr.installNudgeKeyShadow(ctx); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge keyed shadow disabled: %v\n", cr.logPrefix, err) //nolint:errcheck // legacy dispatcher remains authoritative
 	}
 	stopNudgeKeyController := cr.startNudgeKeyController(ctx)
@@ -657,7 +661,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Open nudge ingress before publishing readiness. A producer that commits
 	// immediately after readiness must never fall into the patrol-only gap.
 	// Every accepted connection still feeds nudgeWakeCh, while valid exact
-	// hints additionally enqueue the effect-free keyed shadow.
+	// hints additionally reread durable authority and enqueue the read-only keyed
+	// shadow.
 	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
 		onExact := func(hint nudgeWakeHint) {
 			cr.acceptNudgeKeyShadowHint(ctx, hint)
@@ -794,26 +799,35 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	}
 }
 
-const nudgeKeyShadowProjectScopePrefix = "shadow-project/v1/"
-
 // installNudgeKeyShadow installs the sole production keyed-controller
-// construction. Its scheduling-only callback is structurally guarded: this
-// phase measures admitted-key-to-callback delay without reading commands.
-// It makes no delivery or cutover claim; the legacy dispatcher remains the only
-// store/provider effect owner.
-//
-// Project identity is intentionally namespaced as an uncertified shadow scope.
-// It must be replaced by P0.15 store_uuid + restore_epoch capability evidence
-// before any callback may read commands or mutate stores/providers.
-func (cr *CityRuntime) installNudgeKeyShadow() error {
+// construction. It requires a verified durable source, builds its complete
+// command index before publication, and installs a read-only callback. It makes
+// no delivery or cutover claim; legacy remains the only store/provider effect
+// owner.
+func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 	if cr == nil || cr.nudgeKeyController != nil || cr.cityPath == "" || !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return nil
 	}
-	projectID, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, cr.cityPath)
-	if err != nil {
-		return fmt.Errorf("reading provisional project scope: %w", err)
+	if ctx == nil {
+		return errors.New("installing keyed nudge read shadow: context is nil")
 	}
-	if !ok {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	opener := cr.nudgeCommandSourceOpener
+	if opener == nil {
+		opener = openProductionNudgeCommandSource
+	}
+	source, err := opener(ctx, cr.cityPath, cr.nudgesBeadStore().Store)
+	if err != nil {
+		if errors.Is(err, errNudgeCommandSourceUnverified) {
+			cr.warnNudgeKeySourceUnavailable()
+			return nil
+		}
+		return fmt.Errorf("opening verified durable nudge command source: %w", err)
+	}
+	if source == nil {
+		cr.warnNudgeKeySourceUnavailable()
 		return nil
 	}
 	stderr := cr.stderr
@@ -821,21 +835,33 @@ func (cr *CityRuntime) installNudgeKeyShadow() error {
 		stderr = io.Discard
 	}
 	warnings := newNudgeKeyObservationWarnings(stderr)
-	controller, err := newNudgeKeyController(1, func(ctx context.Context, _ reconcilekey.Session, batch nudgeReconcileBatch) nudgeReconcileOutcome {
-		observeNudgeKeyScheduling(ctx, batch, time.Now(), warnings)
-		return nudgeReconcileSuccess()
-	}, stderr)
+	reader, err := newNudgeKeyReadShadow(ctx, source, nudgequeue.MaxCommandIndexPageSize, warnings)
 	if err != nil {
 		return err
 	}
-	cr.nudgeKeyShadowScope = nudgeKeyShadowProjectScopePrefix + projectID
+	controller, err := newNudgeKeyController(1, reader.reconcile, stderr)
+	if err != nil {
+		return err
+	}
+	cr.nudgeKeyShadowScope = nudgeCommandReconcileScope(reader.store)
+	cr.nudgeKeyReader = reader
 	cr.nudgeKeyController = controller
 	return nil
 }
 
-// enqueueNudgeKeyShadow maps one validated socket hint to its stable shadow
-// key. It performs no store lookup, alias resolution, fleet scan, or provider
-// operation; the queue callback is effect-free until a later ownership gate.
+func (cr *CityRuntime) warnNudgeKeySourceUnavailable() {
+	cr.nudgeKeyUnavailableOnce.Do(func() {
+		stderr := cr.stderr
+		if stderr == nil {
+			stderr = io.Discard
+		}
+		fmt.Fprintln(stderr, "verified durable nudge command source unavailable; legacy dispatcher remains sole effect owner") //nolint:errcheck // explicit one-shot degraded-mode diagnostic
+	})
+}
+
+// enqueueNudgeKeyShadow maps one repository-validated target to its stable
+// shadow key. It performs no alias resolution, fleet scan, or provider
+// operation.
 func (cr *CityRuntime) enqueueNudgeKeyShadow(sessionID string) error {
 	if cr == nil || cr.nudgeKeyController == nil || cr.nudgeKeyShadowScope == "" {
 		return nil
@@ -851,15 +877,35 @@ func (cr *CityRuntime) enqueueNudgeKeyShadow(sessionID string) error {
 }
 
 func (cr *CityRuntime) acceptNudgeKeyShadowHint(ctx context.Context, hint nudgeWakeHint) {
-	if ctx.Err() != nil {
+	if cr == nil || cr.nudgeKeyReader == nil || ctx == nil || ctx.Err() != nil {
 		return
 	}
-	if err := cr.enqueueNudgeKeyShadow(hint.SessionID); err != nil && ctx.Err() == nil {
-		fmt.Fprintf(cr.stderr, "%s: nudge keyed shadow admission: %v\n", cr.logPrefix, err) //nolint:errcheck // advisory shadow; legacy wake already fired
+	sessionID, accepted, err := cr.nudgeKeyReader.acceptCommandHint(ctx, hint.CommandID)
+	if err != nil {
+		if ctx.Err() == nil {
+			cr.warnNudgeKeyHintDiagnostic(err)
+		}
+		return
+	}
+	if !accepted || ctx.Err() != nil {
+		return
+	}
+	if err := cr.enqueueNudgeKeyShadow(sessionID); err != nil && ctx.Err() == nil {
+		cr.warnNudgeKeyHintDiagnostic(err)
 	}
 }
 
-// startNudgeKeyController starts the optional shadow-only keyed nudge child and
+func (cr *CityRuntime) warnNudgeKeyHintDiagnostic(err error) {
+	cr.nudgeKeyHintDiagnosticOnce.Do(func() {
+		stderr := cr.stderr
+		if stderr == nil {
+			stderr = io.Discard
+		}
+		fmt.Fprintf(stderr, "%s: nudge keyed read-only admission failed; legacy wake retained: %v\n", cr.logPrefix, err) //nolint:errcheck // one-shot diagnostic avoids untrusted local wake log spam
+	})
+}
+
+// startNudgeKeyController starts the optional read-only keyed nudge child and
 // returns an idempotent stop function. A nil child is intentionally inert.
 func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
 	if cr.nudgeKeyController == nil {

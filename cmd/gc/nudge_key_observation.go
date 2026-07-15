@@ -19,7 +19,7 @@ const (
 
 type nudgeKeyScopeCertification uint8
 
-const nudgeKeyScopeProvisional nudgeKeyScopeCertification = 1
+const nudgeKeyScopeStoreLineageVerified nudgeKeyScopeCertification = 1
 
 type nudgeKeyAuthorizationState uint8
 
@@ -55,7 +55,7 @@ func newNudgeKeySchedulingObservation(batch nudgeReconcileBatch, now time.Time) 
 		WorkqueueReplay:    batch.WorkqueueReplay,
 		QueueDelay:         delay,
 		QueueDelayState:    delayState,
-		ScopeCertification: nudgeKeyScopeProvisional,
+		ScopeCertification: nudgeKeyScopeStoreLineageVerified,
 		Authorization:      nudgeKeyAuthorizationNotEvaluated,
 		EffectsAdmissible:  false,
 	}

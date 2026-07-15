@@ -18,8 +18,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
@@ -48,14 +47,14 @@ func TestNewNudgeKeySchedulingObservationPreservesBoundedSchedulingFacts(t *test
 	if got.QueueDelayState != nudgeKeyQueueDelayObserved || got.QueueDelay != 37*time.Millisecond {
 		t.Fatalf("queue delay = %v/%v, want %v/%v", got.QueueDelayState, got.QueueDelay, nudgeKeyQueueDelayObserved, 37*time.Millisecond)
 	}
-	if got.ScopeCertification != nudgeKeyScopeProvisional {
-		t.Fatalf("ScopeCertification = %v, want %v", got.ScopeCertification, nudgeKeyScopeProvisional)
+	if got.ScopeCertification != nudgeKeyScopeStoreLineageVerified {
+		t.Fatalf("ScopeCertification = %v, want %v", got.ScopeCertification, nudgeKeyScopeStoreLineageVerified)
 	}
 	if got.Authorization != nudgeKeyAuthorizationNotEvaluated {
 		t.Fatalf("Authorization = %v, want %v", got.Authorization, nudgeKeyAuthorizationNotEvaluated)
 	}
 	if got.EffectsAdmissible {
-		t.Fatal("EffectsAdmissible = true, want false in scheduling-only shadow")
+		t.Fatal("EffectsAdmissible = true, want false in read-only shadow")
 	}
 }
 
@@ -144,15 +143,24 @@ func TestObserveNudgeKeySchedulingRecordsBoundedIdentityFreeMetrics(t *testing.T
 func TestExactWakeAdmissionRecordsProductionKeySchedulingWithoutPatrol(t *testing.T) {
 	reader := installNudgeKeyObservationMetricReader(t)
 	dir := t.TempDir()
-	if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, "metric-scope-must-not-be-a-label"); err != nil {
-		t.Fatalf("WriteProjectIdentity: %v", err)
+	storeBinding := nudgequeue.CommandStoreBinding{StoreUUID: "metric-scope-must-not-be-a-label", RestoreEpoch: 3}
+	command := pageTestCommand("command-must-not-be-a-label", "session-must-not-be-a-label", 1, 1, nudgequeue.CommandStatePending, storeBinding)
+	source := &fakeNudgeCommandSource{
+		snapshot: nudgequeue.CommandIndexSnapshot{Store: storeBinding},
+		resolutions: map[string]nudgequeue.CommandIndexResolution{
+			command.ID: {Store: storeBinding, Revision: 1, Entry: knownPageEntry(command), Found: true},
+		},
 	}
 	cr := &CityRuntime{
-		cityPath: dir,
-		cfg:      supervisorCfg(),
-		stderr:   &bytes.Buffer{},
+		cityPath:            dir,
+		cfg:                 supervisorCfg(),
+		standaloneCityStore: beads.NewMemStore(),
+		stderr:              &bytes.Buffer{},
+		nudgeCommandSourceOpener: func(context.Context, string, beads.Store) (nudgeCommandSource, error) {
+			return source, nil
+		},
 	}
-	if err := cr.installNudgeKeyShadow(); err != nil {
+	if err := cr.installNudgeKeyShadow(t.Context()); err != nil {
 		t.Fatalf("installNudgeKeyShadow: %v", err)
 	}
 	if cr.nudgeKeyController == nil {
@@ -184,12 +192,7 @@ func TestExactWakeAdmissionRecordsProductionKeySchedulingWithoutPatrol(t *testin
 		_ = lis.Close()
 	})
 
-	item := newQueuedNudge("display-alias-must-not-be-a-label", "message-must-not-be-a-label", time.Now())
-	item.ID = "command-must-not-be-a-label"
-	item.SessionID = "session-must-not-be-a-label"
-	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: beads.NewMemStore()}, item); err != nil {
-		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
-	}
+	pingNudgeWakeSocketHint(dir, nudgeWakeHint{Version: nudgequeue.SessionWakeHintVersion1, CommandID: command.ID, SessionID: "untrusted-hint-must-not-be-a-label"})
 	receiveBeforeDeadline(t, callbackDone)
 	receiveBeforeDeadline(t, wakeCh)
 
@@ -201,7 +204,7 @@ func TestExactWakeAdmissionRecordsProductionKeySchedulingWithoutPatrol(t *testin
 	assertNudgeKeyObservationAttributes(t, counter.DataPoints[0].Attributes, uint8(nudgeCauseCommandCommit), false, nudgeKeyQueueDelayObserved)
 	for _, attr := range counter.DataPoints[0].Attributes.ToSlice() {
 		value := attr.Value.Emit()
-		for _, forbidden := range []string{"metric-scope", "command-must", "session-must", "display-alias", "message-must"} {
+		for _, forbidden := range []string{"metric-scope", "command-must", "session-must", "untrusted-hint"} {
 			if strings.Contains(value, forbidden) {
 				t.Fatalf("metric attribute %q leaked identity/content %q", attr.Key, value)
 			}

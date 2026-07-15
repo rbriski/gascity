@@ -535,7 +535,7 @@ func sanitizeRunMapKey(s string) string {
 }
 
 // writeRunMap publishes a session→run-id map file,
-// ${GC_RUNMAP_DIR:-/run/gc-runmap}/<sanitizeRunMapKey(session)>.json =
+// ${GC_RUNMAP_DIR:-/run/gc-manifold-runmap}/<sanitizeRunMapKey(session)>.json =
 // {"run_id":...,"bead_id":...,"ts":...}, so an external tool can correlate a
 // session's activity to the run it is working. One file is written per distinct
 // non-empty session key (the session may be addressed as GC_SESSION_NAME,
@@ -547,7 +547,10 @@ func writeRunMap(runID, beadID string, sessionKeys ...string) {
 	}
 	dir := os.Getenv("GC_RUNMAP_DIR")
 	if dir == "" {
-		dir = "/run/gc-runmap"
+		// Default matches the manifold proxy's read dir (GC_PROXY_RUNMAP_DIR
+		// default in gc-manifold-proxy.go) so writer and reader agree with no
+		// env config; the proxy reads+stamps X-Gc-Run-Id from these files.
+		dir = "/run/gc-manifold-runmap"
 	}
 	if err := os.MkdirAll(dir, 0o1777); err != nil {
 		return

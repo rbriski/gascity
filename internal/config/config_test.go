@@ -2575,27 +2575,16 @@ esac
 func runShellWithFakeBdAllowFailure(t *testing.T, shellCmd string, env map[string]string, bdScript string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	cmd := exec.Command("sh", "-c", shellCmd)
-	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
-	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
-	out, err := cmd.Output()
+	out, err := runShellCommandWithFakeBd(t, shellCmd, env, bdScript)
 	if err == nil {
-		return string(out), "", 0
+		return out, "", 0
 	}
 	exitErr := &exec.ExitError{}
 	ok := errors.As(err, &exitErr)
 	if !ok {
 		t.Fatalf("run shell with fake bd: %v", err)
 	}
-	return string(out), string(exitErr.Stderr), exitErr.ExitCode()
+	return out, string(exitErr.Stderr), exitErr.ExitCode()
 }
 
 // schemaSkewBdScript unconditionally fails every invocation with the bd
@@ -5991,10 +5980,11 @@ func runEffectiveWorkQueryForBeads(t *testing.T, a Agent, beads BeadsConfig, env
 	return runShellWithFakeBd(t, a.EffectiveWorkQueryForBeads(beads), env, bdScript)
 }
 
-// runShellWithFakeBd executes shellCmd with a fake `bd` script on PATH so
-// shared-predicate tests can exercise EffectiveWorkQuery and
-// EffectivePoolDemandQuery against the same simulated bd state.
-func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bdScript string) string {
+// runShellCommandWithFakeBd is the shared implementation behind
+// runShellWithFakeBd and runShellWithFakeBdAllowFailure: it puts a fake `bd`
+// script on PATH and runs shellCmd, returning raw stdout and the *exec.Cmd
+// error so each caller can decide how to handle failure.
+func runShellCommandWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bdScript string) (string, error) {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -6009,10 +5999,20 @@ func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bd
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	out, err := cmd.Output()
+	return string(out), err
+}
+
+// runShellWithFakeBd executes shellCmd with a fake `bd` script on PATH so
+// shared-predicate tests can exercise EffectiveWorkQuery and
+// EffectivePoolDemandQuery against the same simulated bd state.
+func runShellWithFakeBd(t *testing.T, shellCmd string, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	out, err := runShellCommandWithFakeBd(t, shellCmd, env, bdScript)
 	if err != nil {
 		t.Fatalf("run shell with fake bd: %v", err)
 	}
-	return string(out)
+	return out
 }
 
 func runLifecycleHookCommand(t *testing.T, command string, bdScript string) string {

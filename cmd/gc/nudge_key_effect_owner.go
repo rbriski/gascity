@@ -1,10 +1,14 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+var errNudgeEffectTargetChanged = errors.New("durable nudge target changed")
 
 const (
 	nudgeProviderAmbiguousDetail       = "provider may have accepted the nudge without a durable result"
@@ -22,6 +26,43 @@ type nudgeProviderCompletion struct {
 	detail        string
 	providerStage nudgequeue.ProviderStage
 	completion    nudgequeue.CompletionState
+}
+
+// nudgeEffectTarget is one exact persisted session/runtime identity reread. It
+// carries only the fields needed to reject stale command generations before a
+// provider can be entered.
+type nudgeEffectTarget struct {
+	sessionID            string
+	sessionName          string
+	intentGeneration     uint64
+	continuationIdentity string
+	launchIdentity       string
+	closed               bool
+}
+
+func selectNudgeEffectLaunch(command nudgequeue.Command, target nudgeEffectTarget) (string, error) {
+	if target.closed || target.sessionID == "" || target.sessionName == "" ||
+		target.launchIdentity == "" || target.sessionID != command.Target.SessionID ||
+		target.intentGeneration != command.Target.IntentGeneration {
+		return "", errNudgeEffectTargetChanged
+	}
+
+	switch command.Target.Policy {
+	case nudgequeue.TargetPolicyContinuation:
+		if target.continuationIdentity == "" || target.continuationIdentity != command.Target.ContinuationIdentity {
+			return "", errNudgeEffectTargetChanged
+		}
+	case nudgequeue.TargetPolicyExactLaunch:
+		if target.launchIdentity != command.Target.LaunchIdentity {
+			return "", errNudgeEffectTargetChanged
+		}
+	default:
+		return "", errNudgeEffectTargetChanged
+	}
+	if command.Binding != nil && command.Binding.LaunchIdentity != target.launchIdentity {
+		return "", errNudgeEffectTargetChanged
+	}
+	return target.launchIdentity, nil
 }
 
 func mapNudgeProviderCompletion(result worker.NudgeResult, effectErr error) nudgeProviderCompletion {

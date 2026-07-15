@@ -157,6 +157,18 @@ unless the row names how they map to the canonical projection.
 | SESSION-RUNTIME-004 | Stop turn | Stop-turn interrupts active sessions and is allowed for pool-managed and pool-slot-only sessions where tests permit it. | `internal/session/manager_test.go`; `internal/session/submit_test.go`; `internal/session/submit_family_test.go` |
 | SESSION-RUNTIME-005 | Transcript lookup | Transcript paths prefer session key, allow closed sessions, avoid ambiguous historical work-dir fallback, and use provider-specific fallback when work dirs collide across providers. | `internal/session/manager_test.go` |
 
+## Effect Inventory
+
+The reconciler effect surface is derived from production code rather than a
+parallel prose census. Later cutovers extend the same typed registry and owning
+test; they do not add family-specific scanners that can drift independently.
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-EFFECT-001 | Exact production effect census | One closed-world, type-aware analyzer inventories authoritative store mutations, provider mutations, destructive process actions, event emission, and wake sources from the `cmd/gc` production dependency closure. It runs the fixed Darwin, Linux, native-beads, and Windows compile profiles with tests excluded, binds the source-file set and Git revision into evidence digests, and rejects unknown or stale sites in either direction. Counts are pinned by executable tests and change only with a reviewed inventory delta. | `internal/reconciletest/effectinventory/{analyzer.go,canonical_discovery.go,boundaries.go}`; `internal/reconciletest/effectinventory/canonical_production_test.go`; `cmd/gc/reconciler_effect_inventory_test.go` |
+| SESSION-EFFECT-002 | Classified ownership registry | The canonical registry assigns every physical site and logical route an action family, executing process, target identity source, fence, gate, access path, continuation, disposition, and owning test. Legacy manager/provider/raw-store/direct-process bypasses retain explicit replacement gates and expiring commit-anchored exceptions; a compiled registry exists only when catalog and production discovery agree exactly. | `internal/reconciletest/effectinventory/{canonical_registry.go,registry.go,catalog_store.go,catalog_provider.go,catalog_process.go,catalog_event.go,catalog_wake.go}`; `cmd/gc/reconciler_effect_inventory_test.go` |
+| SESSION-EFFECT-003 | Sharp effects remain visible | Route recovery's residual non-CAS store write remains classified as a controller-owned raw-store bypass until P9.4 replaces it. Raw-store bypass routes remain enumerable, and provider-internal kill/signal effects must be present rather than hidden below the provider facade. Every compiled route cites `TestReconcilerEffectInventoryOnBoundHead` as owning evidence. | `internal/reconciletest/effectinventory/catalog_store_data.go`; `internal/reconciletest/effectinventory/catalog_process_data.go`; `cmd/gc/reconciler_effect_inventory_test.go` |
+
 ## Maintenance Rules
 
 - Add one row per behavior scenario, not one paragraph per file.

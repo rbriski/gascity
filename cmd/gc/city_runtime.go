@@ -60,14 +60,21 @@ type nudgeKeyPeriodicTicker struct {
 
 type nudgeKeyPeriodicTickerFactory func(time.Duration) nudgeKeyPeriodicTicker
 
+type nudgeKeyRetryTimer struct {
+	ticks <-chan time.Time
+	stop  func()
+}
+
+type nudgeKeyRetryTimerFactory func(time.Duration) nudgeKeyRetryTimer
+
 func newNudgeKeyPeriodicTicker(interval time.Duration) nudgeKeyPeriodicTicker {
 	ticker := time.NewTicker(interval)
 	return nudgeKeyPeriodicTicker{ticks: ticker.C, stop: ticker.Stop}
 }
 
-func newNudgeKeyRetryTimer(delay time.Duration) nudgeKeyPeriodicTicker {
+func newNudgeKeyRetryTimer(delay time.Duration) nudgeKeyRetryTimer {
 	timer := time.NewTimer(delay)
-	return nudgeKeyPeriodicTicker{ticks: timer.C, stop: func() { timer.Stop() }}
+	return nudgeKeyRetryTimer{ticks: timer.C, stop: func() { timer.Stop() }}
 }
 
 var orderRescanInterval = time.Minute
@@ -147,7 +154,7 @@ type CityRuntime struct {
 	nudgeClaimAuthorizer          nudgequeue.NudgeClaimAuthorizer
 	nudgeKeyInstallRetry          bool
 	nudgeKeyTickerFactory         nudgeKeyPeriodicTickerFactory
-	nudgeKeyRetryTimerFactory     nudgeKeyPeriodicTickerFactory
+	nudgeKeyRetryTimerFactory     nudgeKeyRetryTimerFactory
 	nudgeKeyUnavailableOnce       sync.Once
 	nudgeKeyHintDiagnosticOnce    sync.Once
 	nudgeKeyEntropyDiagnosticOnce sync.Once

@@ -769,9 +769,9 @@ func TestNudgeKeyPeriodicAuditConcurrentAdvanceArmsExplicitBoundedRetry(t *testi
 	cr.nudgeKeyTickerFactory = func(time.Duration) nudgeKeyPeriodicTicker {
 		return nudgeKeyPeriodicTicker{ticks: periodicTicks, stop: func() {}}
 	}
-	cr.nudgeKeyRetryTimerFactory = func(delay time.Duration) nudgeKeyPeriodicTicker {
+	cr.nudgeKeyRetryTimerFactory = func(delay time.Duration) nudgeKeyRetryTimer {
 		retryDelays <- delay
-		return nudgeKeyPeriodicTicker{ticks: retryTicks, stop: func() {}}
+		return nudgeKeyRetryTimer{ticks: retryTicks, stop: func() {}}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := cr.startNudgeKeyController(ctx)
@@ -881,8 +881,8 @@ func TestNudgeKeyTransientStartupSnapshotRetriesOnBoundedTick(t *testing.T) {
 		nudgeKeyTickerFactory: func(time.Duration) nudgeKeyPeriodicTicker {
 			return nudgeKeyPeriodicTicker{ticks: ticks, stop: func() { close(tickerStopped) }}
 		},
-		nudgeKeyRetryTimerFactory: func(time.Duration) nudgeKeyPeriodicTicker {
-			return nudgeKeyPeriodicTicker{ticks: retryTicks, stop: func() {}}
+		nudgeKeyRetryTimerFactory: func(time.Duration) nudgeKeyRetryTimer {
+			return nudgeKeyRetryTimer{ticks: retryTicks, stop: func() {}}
 		},
 	}
 	if err := cr.installNudgeKeyShadow(t.Context()); err == nil || !nudgeCommandSourceFailureIsTransient(err) {
@@ -948,8 +948,8 @@ func TestNudgeKeyTransientOpenerRetriesOnBoundedTick(t *testing.T) {
 		nudgeKeyTickerFactory: func(time.Duration) nudgeKeyPeriodicTicker {
 			return nudgeKeyPeriodicTicker{ticks: ticks, stop: func() {}}
 		},
-		nudgeKeyRetryTimerFactory: func(time.Duration) nudgeKeyPeriodicTicker {
-			return nudgeKeyPeriodicTicker{ticks: retryTicks, stop: func() {}}
+		nudgeKeyRetryTimerFactory: func(time.Duration) nudgeKeyRetryTimer {
+			return nudgeKeyRetryTimer{ticks: retryTicks, stop: func() {}}
 		},
 	}
 	if err := cr.installNudgeKeyShadow(t.Context()); err == nil || !nudgeCommandSourceFailureIsTransient(err) {

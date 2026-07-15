@@ -776,6 +776,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 
+	if err := validateCommandSecurityProfile(root.Beads.CommandSecurityProfile); err != nil {
+		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
+	}
+	if err := validateNudgeEffectOwner(root.Daemon.NudgeEffectOwner); err != nil {
+		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
+	}
+
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
 	// mutable files from disk.
@@ -1039,9 +1046,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// (mirror of the daemon.formula_v2 preservation below). Capture before
 		// the overwrite; a fragment that DOES set conditional_writes still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
+		commandSecurityProfile := base.Beads.CommandSecurityProfile
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
+		}
+		if !fragMeta.IsDefined("beads", "command_security_profile") {
+			base.Beads.CommandSecurityProfile = commandSecurityProfile
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
@@ -1052,9 +1063,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	}
 	if fragMeta.IsDefined("daemon") {
 		formulaV2 := base.Daemon.FormulaV2
+		nudgeEffectOwner := base.Daemon.NudgeEffectOwner
 		base.Daemon = fragment.Daemon
 		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
 			base.Daemon.FormulaV2 = formulaV2
+		}
+		if !fragMeta.IsDefined("daemon", "nudge_effect_owner") {
+			base.Daemon.NudgeEffectOwner = nudgeEffectOwner
 		}
 	}
 	if fragMeta.IsDefined("session") {

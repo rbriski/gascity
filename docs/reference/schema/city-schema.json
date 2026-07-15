@@ -1037,6 +1037,14 @@
           ],
           "description": "ConditionalWrites selects the bead-write discipline: \"off\" (legacy,\nbyte-identical), \"auto\" (compare-and-swap where the store is capable,\nloud degrade otherwise), or \"require\" (CAS or a typed refusal). Empty\ndefaults to \"off\". Any other value fails config load."
         },
+        "command_security_profile": {
+          "type": "string",
+          "enum": [
+            "hosted",
+            "store_writer_is_controller"
+          ],
+          "description": "CommandSecurityProfile selects the explicit trust boundary for durable\ncontrol commands. Empty means no profile is selected and can never enable\na keyed effect owner. store_writer_is_controller is the local,\nsingle-tenant compatibility profile; hosted requires independently\nprotected command credentials and namespaces."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1346,6 +1354,16 @@
           ],
           "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
           "default": "legacy"
+        },
+        "nudge_effect_owner": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "NudgeEffectOwner cold-selects the durable nudge provider-effect owner:\n\"off\" (legacy, byte-identical), \"auto\" (keyed only when every startup\ndependency is proven; otherwise loud legacy retention), or \"require\"\n(keyed or startup refusal). Empty defaults to \"off\".",
+          "default": "off"
         },
         "auto_restart_on_drift": {
           "type": "boolean",

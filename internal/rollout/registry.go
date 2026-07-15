@@ -46,6 +46,19 @@ var specs = []Spec{
 		Justification: "Retire the v1 formula path and its process-global atomic.Bool setter " +
 			"anti-pattern; the migration whose completion deletes cmd/gc/feature_flags.go.",
 	},
+	{
+		Key:            keyDaemonNudgeEffectOwner,
+		Category:       InfraMigration,
+		ConfigPath:     "daemon.nudge_effect_owner",
+		EnvOverride:    "",
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-f7v2ft.31", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-07-15",
+		VersionAnchor:  "gcNudgeEffectOwnerRemovalFloor",
+		SelectsBetween: [2]string{"legacy nudge dispatcher provider-effect owner", "durable keyed nudge reconciler provider-effect owner"},
+		Justification: "Cold-select exactly one provider-effect owner while the durable keyed nudge " +
+			"reconciler is canaried and the legacy dispatcher remains available for rollback.",
+	},
 }
 
 // Specs returns a defensive copy of the canonical registry. The Default pointers

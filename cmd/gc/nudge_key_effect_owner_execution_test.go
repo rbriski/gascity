@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -33,6 +35,9 @@ func TestNudgeKeyEffectOwnerAuthorizedImmediateExecutesAfterDurableClaim(t *test
 	}
 	if got := fixture.handle.nudgeCallCount(); got != 1 {
 		t.Fatalf("worker.Handle.Nudge calls = %d, want 1", got)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 1 {
+		t.Fatalf("native provider entries = %d, want 1", got)
 	}
 	if got := fixture.source.completionCallCount(); got != 1 {
 		t.Fatalf("durable completion calls = %d, want 1", got)
@@ -84,6 +89,309 @@ func TestNudgeKeyEffectOwnerAuthorizedImmediateExecutesAfterDurableClaim(t *test
 	}
 }
 
+func TestNudgeKeyEffectOwnerClaimRefusalsNeverReachWorker(t *testing.T) {
+	tests := []struct {
+		name        string
+		disposition nudgequeue.CommandClaimDisposition
+		claimErr    error
+		wantState   nudgequeue.CommandState
+	}{
+		{
+			name:        "authorization denied",
+			disposition: nudgequeue.CommandClaimDenied,
+			wantState:   nudgequeue.CommandStateDeadLettered,
+		},
+		{
+			name:        "authorization unknown disposition",
+			disposition: nudgequeue.CommandClaimAuthorizationUnknown,
+			wantState:   nudgequeue.CommandStatePending,
+		},
+		{
+			name:        "authorization authority unavailable",
+			disposition: nudgequeue.CommandClaimAuthorizationUnknown,
+			claimErr:    fmt.Errorf("%w: policy authority unavailable", nudgequeue.ErrNudgeAuthorizationUnknown),
+			wantState:   nudgequeue.CommandStatePending,
+		},
+		{
+			name:        "concurrent owner busy",
+			disposition: nudgequeue.CommandClaimBusy,
+			wantState:   nudgequeue.CommandStatePending,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newNudgeEffectOwnerExecutionFixture(t)
+			fixture.source.setClaimResult(test.disposition, test.claimErr)
+
+			outcome := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+			assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+
+			if got := fixture.source.claimCallCount(); got != 1 {
+				t.Fatalf("claim calls = %d, want 1", got)
+			}
+			if got := fixture.handle.nudgeCallCount(); got != 0 {
+				t.Fatalf("worker.Handle.Nudge calls = %d, want 0", got)
+			}
+			if got := fixture.handle.nativeEntryCount(); got != 0 {
+				t.Fatalf("native provider entries = %d, want 0", got)
+			}
+			if got := fixture.source.completionCallCount(); got != 0 {
+				t.Fatalf("provider completion calls = %d, want 0", got)
+			}
+			if got := fixture.source.currentCommand().State; got != test.wantState {
+				t.Fatalf("durable state = %q, want %q", got, test.wantState)
+			}
+		})
+	}
+}
+
+func TestNudgeKeyEffectOwnerStaleGenerationBeforeClaimNeverEntersProvider(t *testing.T) {
+	fixture := newNudgeEffectOwnerExecutionFixture(t)
+	stale := fixture.targets.firstTarget()
+	stale.intentGeneration++
+	fixture.targets.setTargets(stale)
+
+	outcome := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseTargetGeneration})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+
+	if got := fixture.source.claimCallCount(); got != 0 {
+		t.Fatalf("claim calls = %d, want 0 for stale pre-claim generation", got)
+	}
+	if got := fixture.handle.nudgeCallCount(); got != 0 {
+		t.Fatalf("worker.Handle.Nudge calls = %d, want 0", got)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 0 {
+		t.Fatalf("native provider entries = %d, want 0", got)
+	}
+	if got := fixture.source.currentCommand().State; got != nudgequeue.CommandStatePending {
+		t.Fatalf("durable state = %q, want safely parked pending", got)
+	}
+}
+
+func TestNudgeKeyEffectOwnerFinalRereadTerminalizesChangedTargetWithoutProviderEntry(t *testing.T) {
+	fixture := newNudgeEffectOwnerExecutionFixture(t)
+	current := fixture.targets.firstTarget()
+	changed := current
+	changed.launchIdentity = "launch-replaced-after-claim"
+	fixture.targets.setTargets(current, changed)
+
+	outcome := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseTargetGeneration})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+
+	reads := fixture.targets.snapshotReads()
+	if len(reads) != 2 || reads[1].commandState != nudgequeue.CommandStateInFlight {
+		t.Fatalf("target reads = %#v, want final reread after durable claim", reads)
+	}
+	if got := fixture.handle.nudgeCallCount(); got != 0 {
+		t.Fatalf("worker.Handle.Nudge calls = %d, want 0", got)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 0 {
+		t.Fatalf("native provider entries = %d, want 0", got)
+	}
+	if got := fixture.source.completionCallCount(); got != 1 {
+		t.Fatalf("superseded completion calls = %d, want 1", got)
+	}
+	completed := fixture.source.currentCommand()
+	if completed.State != nudgequeue.CommandStateSuperseded || completed.Terminal == nil {
+		t.Fatalf("durable command = %#v, want superseded terminal", completed)
+	}
+	if completed.Terminal.ActionResult != nudgequeue.CommandActionResultSuperseded ||
+		completed.Terminal.ProviderStage != nudgequeue.ProviderStageNotEntered ||
+		completed.Terminal.Completion != nudgequeue.CompletionStateNotCompleted {
+		t.Fatalf("superseded terminal = %#v, want definite not-entered evidence", completed.Terminal)
+	}
+}
+
+func TestNudgeKeyEffectOwnerRuntimeInteractionRefusalsNeverEnterNativeProvider(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*runtime.Fake, string)
+	}{
+		{
+			name: "human attached",
+			prepare: func(provider *runtime.Fake, sessionName string) {
+				provider.SetAttached(sessionName, true)
+			},
+		},
+		{
+			name: "copy mode",
+			prepare: func(provider *runtime.Fake, sessionName string) {
+				provider.SetCopyMode(sessionName, true)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newNudgeEffectOwnerExecutionFixture(t)
+			target := fixture.targets.firstTarget()
+			provider := runtime.NewFake()
+			if err := provider.Start(t.Context(), target.sessionName, runtime.Config{}); err != nil {
+				t.Fatalf("start fake runtime target: %v", err)
+			}
+			if err := provider.SetMeta(target.sessionName, "GC_INSTANCE_TOKEN", target.launchIdentity); err != nil {
+				t.Fatalf("set fake runtime launch identity: %v", err)
+			}
+			test.prepare(provider, target.sessionName)
+			handle, err := worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
+				Provider:    provider,
+				SessionName: target.sessionName,
+			})
+			if err != nil {
+				t.Fatalf("worker.NewRuntimeHandle: %v", err)
+			}
+			owner, key := newNudgeEffectOwnerForSource(
+				t,
+				fixture.source,
+				fixture.targets,
+				&staticNudgeEffectHandleFactory{handle: handle},
+				fixture.now,
+				"runtime-refusal-owner",
+			)
+
+			outcome := owner.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseRuntimeReadiness})
+			assertNudgeEffectOutcomeDoesNotViolateInvariant(t, outcome)
+
+			if got := provider.CountCalls("NudgeEffect", target.sessionName); got != 0 {
+				t.Fatalf("native NudgeEffect entries = %d, want 0", got)
+			}
+			if got := provider.CountCalls("Nudge", target.sessionName); got != 0 {
+				t.Fatalf("legacy Nudge entries = %d, want 0", got)
+			}
+			if got := fixture.source.completionCallCount(); got != 0 {
+				t.Fatalf("terminal completion calls = %d, want 0 for parked pre-entry refusal", got)
+			}
+			command := fixture.source.currentCommand()
+			if command.State != nudgequeue.CommandStateInFlight || command.Claim == nil || command.Terminal != nil {
+				t.Fatalf("durable command after refusal = %#v, want claimed parked command", command)
+			}
+
+			owner.reconcile(t.Context(), key, nudgeReconcileBatch{Causes: nudgeCauseRuntimeReadiness})
+			if got := provider.CountCalls("NudgeEffect", target.sessionName); got != 0 {
+				t.Fatalf("duplicate callback native entries = %d, want no blind replay", got)
+			}
+		})
+	}
+}
+
+func TestNudgeKeyEffectOwnerDuplicateCallbackAfterCompletionDoesNotReplay(t *testing.T) {
+	fixture := newNudgeEffectOwnerExecutionFixture(t)
+	first := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, first)
+	second := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseProviderResult, WorkqueueReplay: true})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, second)
+
+	if got := fixture.handle.nudgeCallCount(); got != 1 {
+		t.Fatalf("worker.Handle.Nudge calls after duplicate callback = %d, want 1", got)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 1 {
+		t.Fatalf("native provider entries after duplicate callback = %d, want 1", got)
+	}
+	if got := fixture.source.completionCallCount(); got != 1 {
+		t.Fatalf("completion calls after duplicate callback = %d, want 1", got)
+	}
+}
+
+func TestNudgeKeyEffectOwnerConcurrentClaimAllowsOneProviderEntry(t *testing.T) {
+	first := newNudgeEffectOwnerExecutionFixture(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	first.handle.blockUntil(started, release)
+
+	secondTargets := &scriptedNudgeEffectTargetReader{
+		source: first.source,
+		targets: []nudgeEffectTarget{
+			first.targets.firstTarget(),
+			first.targets.firstTarget(),
+		},
+	}
+	secondOwner, secondKey := newNudgeEffectOwnerForSource(
+		t,
+		first.source,
+		secondTargets,
+		&staticNudgeEffectHandleFactory{handle: first.handle},
+		first.now,
+		"effect-owner-2",
+	)
+
+	firstDone := make(chan nudgeReconcileOutcome, 1)
+	go func() {
+		firstDone <- first.owner.reconcile(t.Context(), first.key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	}()
+	awaitNudgeEffectSignal(t, started)
+
+	secondOutcome := secondOwner.reconcile(t.Context(), secondKey, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, secondOutcome)
+	if got := first.source.claimCallCount(); got != 2 {
+		t.Fatalf("competing claim calls = %d, want 2", got)
+	}
+	if got := first.handle.nudgeCallCount(); got != 1 {
+		t.Fatalf("worker calls while first attempt blocked = %d, want 1", got)
+	}
+	close(release)
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, awaitNudgeEffectValue(t, firstDone))
+
+	if got := first.handle.nativeEntryCount(); got != 1 {
+		t.Fatalf("native provider entries = %d, want exactly 1", got)
+	}
+	if got := first.source.completionCallCount(); got != 1 {
+		t.Fatalf("durable completion calls = %d, want exactly 1", got)
+	}
+}
+
+func TestNudgeKeyEffectOwnerRestartAfterCompletionFailureNeverReplaysProvider(t *testing.T) {
+	fixture := newNudgeEffectOwnerExecutionFixture(t)
+	fixture.source.setCompletionError(errors.New("durable completion unavailable"))
+
+	first := fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseCommandCommit})
+	if err := first.validate(); err != nil {
+		t.Fatalf("first reconcile outcome is invalid: %v", err)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 1 {
+		t.Fatalf("first native provider entries = %d, want 1", got)
+	}
+	parked := fixture.source.currentCommand()
+	if parked.State != nudgequeue.CommandStateInFlight || parked.Claim == nil || parked.Terminal != nil {
+		t.Fatalf("command after completion failure = %#v, want in-flight ambiguity fence", parked)
+	}
+
+	fixture.owner.reconcile(t.Context(), fixture.key, nudgeReconcileBatch{Causes: nudgeCauseProviderResult, WorkqueueReplay: true})
+	fixture.source.setCompletionError(nil)
+	restartTargets := &scriptedNudgeEffectTargetReader{
+		source:  fixture.source,
+		targets: []nudgeEffectTarget{fixture.targets.firstTarget()},
+	}
+	restarted, restartKey := newNudgeEffectOwnerForSource(
+		t,
+		fixture.source,
+		restartTargets,
+		&staticNudgeEffectHandleFactory{handle: fixture.handle},
+		fixture.now.Add(time.Minute),
+		"effect-owner-after-restart",
+	)
+	restartOutcome := restarted.reconcile(t.Context(), restartKey, nudgeReconcileBatch{Causes: nudgeCauseAudit, WorkqueueReplay: true})
+	assertNudgeEffectOutcomeDoesNotViolateInvariant(t, restartOutcome)
+
+	if got := fixture.handle.nudgeCallCount(); got != 1 {
+		t.Fatalf("worker.Handle.Nudge calls across duplicate and restart = %d, want 1", got)
+	}
+	if got := fixture.handle.nativeEntryCount(); got != 1 {
+		t.Fatalf("native provider entries across duplicate and restart = %d, want 1", got)
+	}
+	if got := fixture.source.completionCallCount(); got != 1 {
+		t.Fatalf("completion calls across duplicate and restart = %d, want failed original only", got)
+	}
+}
+
+func assertNudgeEffectOutcomeDoesNotViolateInvariant(t *testing.T, outcome nudgeReconcileOutcome) {
+	t.Helper()
+	if err := outcome.validate(); err != nil {
+		t.Fatalf("reconcile outcome is invalid: %v", err)
+	}
+	if outcome.disposition == nudgeReconcileOutcomeInvariant {
+		t.Fatalf("reconcile reported invariant failure: %v", outcome.err)
+	}
+}
+
 type nudgeEffectOwnerExecutionFixture struct {
 	now     time.Time
 	command nudgequeue.Command
@@ -99,10 +407,6 @@ func newNudgeEffectOwnerExecutionFixture(t *testing.T) *nudgeEffectOwnerExecutio
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	command := immediateNudgeEffectCommand(now)
 	source := newMutexNudgeEffectSource(command)
-	reader, err := newNudgeKeyReadShadow(t.Context(), source, 8, nil)
-	if err != nil {
-		t.Fatalf("newNudgeKeyReadShadow: %v", err)
-	}
 	target := nudgeEffectTarget{
 		sessionID:        command.Target.SessionID,
 		sessionName:      "city--worker",
@@ -124,26 +428,14 @@ func newNudgeEffectOwnerExecutionFixture(t *testing.T) *nudgeEffectOwnerExecutio
 			},
 		},
 	}
-	ids := &nudgeEffectTestIDs{}
-	owner, err := newNudgeKeyEffectOwner(nudgeKeyEffectOwnerConfig{
-		reader:            reader,
-		source:            source,
-		authorizer:        allowingNudgeEffectAuthorizer{},
-		targets:           targets,
-		handles:           &staticNudgeEffectHandleFactory{handle: handle},
-		ownerID:           "effect-owner-1",
-		now:               func() time.Time { return now },
-		newID:             ids.newID,
-		claimLease:        time.Minute,
-		completionTimeout: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("newNudgeKeyEffectOwner: %v", err)
-	}
-	key, err := reader.key(command.Target.SessionID)
-	if err != nil {
-		t.Fatalf("reader.key: %v", err)
-	}
+	owner, key := newNudgeEffectOwnerForSource(
+		t,
+		source,
+		targets,
+		&staticNudgeEffectHandleFactory{handle: handle},
+		now,
+		"effect-owner-1",
+	)
 	return &nudgeEffectOwnerExecutionFixture{
 		now:     now,
 		command: command,
@@ -153,6 +445,42 @@ func newNudgeEffectOwnerExecutionFixture(t *testing.T) *nudgeEffectOwnerExecutio
 		owner:   owner,
 		key:     key,
 	}
+}
+
+func newNudgeEffectOwnerForSource(
+	t *testing.T,
+	source *mutexNudgeEffectSource,
+	targets nudgeEffectTargetReader,
+	handles nudgeEffectHandleFactory,
+	now time.Time,
+	ownerID string,
+) (*nudgeKeyEffectOwner, reconcilekey.Session) {
+	t.Helper()
+	reader, err := newNudgeKeyReadShadow(t.Context(), source, 8, nil)
+	if err != nil {
+		t.Fatalf("newNudgeKeyReadShadow: %v", err)
+	}
+	ids := &nudgeEffectTestIDs{}
+	owner, err := newNudgeKeyEffectOwner(nudgeKeyEffectOwnerConfig{
+		reader:            reader,
+		source:            source,
+		authorizer:        allowingNudgeEffectAuthorizer{},
+		targets:           targets,
+		handles:           handles,
+		ownerID:           ownerID,
+		now:               func() time.Time { return now },
+		newID:             ids.newID,
+		claimLease:        time.Minute,
+		completionTimeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("newNudgeKeyEffectOwner: %v", err)
+	}
+	key, err := reader.key(source.currentCommand().Target.SessionID)
+	if err != nil {
+		t.Fatalf("reader.key: %v", err)
+	}
+	return owner, key
 }
 
 func immediateNudgeEffectCommand(now time.Time) nudgequeue.Command {
@@ -199,10 +527,13 @@ func immediateNudgeEffectCommand(now time.Time) nudgequeue.Command {
 }
 
 type mutexNudgeEffectSource struct {
-	mu              sync.Mutex
-	command         nudgequeue.Command
-	claimCalls      []nudgeEffectClaimRequest
-	completionCalls []nudgequeue.CommandCompletionRequest
+	mu               sync.Mutex
+	command          nudgequeue.Command
+	claimDisposition nudgequeue.CommandClaimDisposition
+	claimErr         error
+	completionErr    error
+	claimCalls       []nudgeEffectClaimRequest
+	completionCalls  []nudgequeue.CommandCompletionRequest
 }
 
 func newMutexNudgeEffectSource(command nudgequeue.Command) *mutexNudgeEffectSource {
@@ -254,6 +585,28 @@ func (s *mutexNudgeEffectSource) ClaimAuthorized(ctx context.Context, request nu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.claimCalls = append(s.claimCalls, request)
+	switch s.claimDisposition {
+	case nudgequeue.CommandClaimDenied:
+		s.terminalizeAuthorizationDenied(request.claimedAt)
+		return nudgequeue.CommandClaimResult{
+			Disposition: nudgequeue.CommandClaimDenied,
+			Command:     cloneNudgeEffectTestCommand(s.command),
+		}, s.claimErr
+	case nudgequeue.CommandClaimAuthorizationUnknown:
+		return nudgequeue.CommandClaimResult{
+			Disposition: nudgequeue.CommandClaimAuthorizationUnknown,
+			Command:     cloneNudgeEffectTestCommand(s.command),
+		}, s.claimErr
+	case nudgequeue.CommandClaimBusy:
+		return nudgequeue.CommandClaimResult{
+			Disposition: nudgequeue.CommandClaimBusy,
+			Command:     cloneNudgeEffectTestCommand(s.command),
+		}, s.claimErr
+	case "", nudgequeue.CommandClaimAllowed:
+		// Continue through the normal atomic-claim behavior below.
+	default:
+		return nudgequeue.CommandClaimResult{}, fmt.Errorf("unsupported fake claim disposition %q", s.claimDisposition)
+	}
 	if s.command.State != nudgequeue.CommandStatePending {
 		return nudgequeue.CommandClaimResult{
 			Disposition: nudgequeue.CommandClaimBusy,
@@ -290,7 +643,7 @@ func (s *mutexNudgeEffectSource) ClaimAuthorized(ctx context.Context, request nu
 	return nudgequeue.CommandClaimResult{
 		Disposition: nudgequeue.CommandClaimAllowed,
 		Command:     cloneNudgeEffectTestCommand(s.command),
-	}, nil
+	}, s.claimErr
 }
 
 func (s *mutexNudgeEffectSource) CompleteProviderAttempt(ctx context.Context, request nudgequeue.CommandCompletionRequest) (nudgequeue.CommandCompletionResult, error) {
@@ -300,6 +653,9 @@ func (s *mutexNudgeEffectSource) CompleteProviderAttempt(ctx context.Context, re
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.completionCalls = append(s.completionCalls, request)
+	if s.completionErr != nil {
+		return nudgequeue.CommandCompletionResult{}, s.completionErr
+	}
 	if s.command.State != nudgequeue.CommandStateInFlight || s.command.Claim == nil ||
 		s.command.Claim.ID != request.ClaimID || s.command.Claim.AttemptID != request.AttemptID {
 		return nudgequeue.CommandCompletionResult{
@@ -330,6 +686,26 @@ func (s *mutexNudgeEffectSource) CompleteProviderAttempt(ctx context.Context, re
 	}, nil
 }
 
+func (s *mutexNudgeEffectSource) terminalizeAuthorizationDenied(at time.Time) {
+	if s.command.State != nudgequeue.CommandStatePending {
+		return
+	}
+	s.command.Order.Revision++
+	s.command.State = nudgequeue.CommandStateDeadLettered
+	s.command.Claim = nil
+	s.command.Retry = nil
+	s.command.Terminal = &nudgequeue.CommandTerminal{
+		At:                         at,
+		ActionResult:               nudgequeue.CommandActionResultAuthorizationDenied,
+		ErrorClass:                 nudgequeue.CommandErrorClassAuthorizationDenied,
+		Detail:                     "current authorization policy denied the command",
+		AuthorizationDecisionID:    "claim-decision-1",
+		AuthorizationPolicyVersion: "policy-v2",
+		ProviderStage:              nudgequeue.ProviderStageNotEntered,
+		Completion:                 nudgequeue.CompletionStateNotCompleted,
+	}
+}
+
 func (s *mutexNudgeEffectSource) currentCommand() nudgequeue.Command {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -346,6 +722,19 @@ func (s *mutexNudgeEffectSource) completionCallCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.completionCalls)
+}
+
+func (s *mutexNudgeEffectSource) setClaimResult(disposition nudgequeue.CommandClaimDisposition, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.claimDisposition = disposition
+	s.claimErr = err
+}
+
+func (s *mutexNudgeEffectSource) setCompletionError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completionErr = err
 }
 
 func nudgeEffectTerminalState(result nudgequeue.CommandActionResult) nudgequeue.CommandState {
@@ -434,6 +823,22 @@ func (r *scriptedNudgeEffectTargetReader) snapshotReads() []nudgeEffectTargetRea
 	return append([]nudgeEffectTargetRead(nil), r.reads...)
 }
 
+func (r *scriptedNudgeEffectTargetReader) firstTarget() nudgeEffectTarget {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.targets) == 0 {
+		return nudgeEffectTarget{}
+	}
+	return r.targets[0]
+}
+
+func (r *scriptedNudgeEffectTargetReader) setTargets(targets ...nudgeEffectTarget) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.targets = append([]nudgeEffectTarget(nil), targets...)
+	r.reads = nil
+}
+
 type nudgeEffectNudgeCall struct {
 	request      worker.NudgeRequest
 	commandState nudgequeue.CommandState
@@ -443,11 +848,14 @@ type nudgeEffectNudgeCall struct {
 type mutexNudgeEffectHandle struct {
 	worker.Handle
 
-	mu     sync.Mutex
-	source *mutexNudgeEffectSource
-	result worker.NudgeResult
-	err    error
-	calls  []nudgeEffectNudgeCall
+	mu            sync.Mutex
+	source        *mutexNudgeEffectSource
+	result        worker.NudgeResult
+	calls         []nudgeEffectNudgeCall
+	nativeEntries int
+	started       chan struct{}
+	release       <-chan struct{}
+	startedOnce   sync.Once
 }
 
 func (h *mutexNudgeEffectHandle) Nudge(ctx context.Context, request worker.NudgeRequest) (worker.NudgeResult, error) {
@@ -462,15 +870,35 @@ func (h *mutexNudgeEffectHandle) Nudge(ctx context.Context, request worker.Nudge
 	}
 	h.mu.Lock()
 	h.calls = append(h.calls, nudgeEffectNudgeCall{request: request, commandState: command.State, claim: claim})
-	result, err := h.result, h.err
+	if h.result.Effect != nil && h.result.Effect.Stage != runtime.NudgeEffectStageNotEntered {
+		h.nativeEntries++
+	}
+	result := h.result
+	started, release := h.started, h.release
 	h.mu.Unlock()
-	return result, err
+	if started != nil {
+		h.startedOnce.Do(func() { close(started) })
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return worker.NudgeResult{}, ctx.Err()
+		}
+	}
+	return result, nil
 }
 
 func (h *mutexNudgeEffectHandle) nudgeCallCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.calls)
+}
+
+func (h *mutexNudgeEffectHandle) nativeEntryCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.nativeEntries
 }
 
 func (h *mutexNudgeEffectHandle) singleNudgeCall(t *testing.T) nudgeEffectNudgeCall {
@@ -481,6 +909,13 @@ func (h *mutexNudgeEffectHandle) singleNudgeCall(t *testing.T) nudgeEffectNudgeC
 		t.Fatalf("worker nudge calls = %d, want 1", len(h.calls))
 	}
 	return h.calls[0]
+}
+
+func (h *mutexNudgeEffectHandle) blockUntil(started chan struct{}, release <-chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.started = started
+	h.release = release
 }
 
 type staticNudgeEffectHandleFactory struct {
@@ -512,6 +947,31 @@ type nudgeEffectTestIDs struct {
 
 func (g *nudgeEffectTestIDs) newID(kind string) (string, error) {
 	return fmt.Sprintf("%s-%d", kind, g.sequence.Add(1)), nil
+}
+
+func awaitNudgeEffectSignal(t *testing.T, signal <-chan struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	defer cancel()
+	select {
+	case <-signal:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for nudge effect signal")
+	}
+}
+
+func awaitNudgeEffectValue[T any](t *testing.T, values <-chan T) T {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	defer cancel()
+	select {
+	case value := <-values:
+		return value
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for nudge effect result")
+		var zero T
+		return zero
+	}
 }
 
 var (

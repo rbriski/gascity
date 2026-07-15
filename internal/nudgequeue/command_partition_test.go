@@ -69,6 +69,57 @@ func TestCommandPartitionReaderIsolatesTwoCitiesSharingOneRepository(t *testing.
 	}
 }
 
+func TestCommandPartitionReaderPreservesCompactedCoverageAcrossCities(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repo := newVerifiedCommandRepository(t, store)
+	state, err := repo.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	cityA := trustedCityPartitionForTest("authority/city-a")
+	cityB := trustedCityPartitionForTest("authority/city-b")
+	resolver := newTestTrustedCityPartitionResolver()
+
+	terminal := createPartitionedCommandForTest(t, repo, state.Store, resolver, cityA, "request-terminal", "session-a", "caller-city-a")
+	terminalRow := repositoryCheckpointCommandRowForTest(t, CommandRepositoryState{Store: state.Store}, "request-terminal", CommandStateDelivered, terminal.Order.Sequence, terminal.CreatedAt)
+	state, err = repo.State(t.Context())
+	if err != nil {
+		t.Fatalf("State after terminal create: %v", err)
+	}
+	state.Revision++
+	store.mu.Lock()
+	store.rows[terminal.ID] = terminalRow
+	store.metadata = repositoryMetadataForTest(state)
+	store.mu.Unlock()
+	if _, err := repo.RepairLineage(t.Context()); err != nil {
+		t.Fatalf("RepairLineage after terminal write: %v", err)
+	}
+	for {
+		_, caughtUp, err := repo.PublishCheckpoint(t.Context(), 1)
+		if err != nil {
+			t.Fatalf("PublishCheckpoint: %v", err)
+		}
+		if caughtUp {
+			break
+		}
+	}
+
+	commandA := createPartitionedCommandForTest(t, repo, state.Store, resolver, cityA, "request-a", "session-a", "caller-city-a")
+	commandB := createPartitionedCommandForTest(t, repo, state.Store, resolver, cityB, "request-b", "session-b", "caller-city-b")
+	readerA, err := NewCommandPartitionReader(repo, cityA, resolver)
+	if err != nil {
+		t.Fatalf("NewCommandPartitionReader(city A): %v", err)
+	}
+	snapshot, err := readerA.Snapshot(t.Context(), 2)
+	if err != nil {
+		t.Fatalf("city A Snapshot: %v", err)
+	}
+	assertPartitionSnapshot(t, snapshot, []string{commandA.ID}, []uint64{commandB.Order.Sequence})
+	if snapshot.Coverage == nil || snapshot.Coverage.TerminalCount != 1 || len(snapshot.Coverage.Ranges) != 1 || snapshot.Coverage.Ranges[0] != (CommandIndexSequenceRange{FirstSequence: terminal.Order.Sequence, LastSequence: terminal.Order.Sequence}) {
+		t.Fatalf("city A compacted coverage = %#v, want terminal sequence %d", snapshot.Coverage, terminal.Order.Sequence)
+	}
+}
+
 func TestCommandPartitionReaderSameTrustedCityReopenIsStable(t *testing.T) {
 	repo := newVerifiedCommandRepository(t, newRepositoryAtomicTestStore())
 	state, err := repo.State(t.Context())

@@ -99,6 +99,7 @@ func (r *CommandPartitionReader) Snapshot(ctx context.Context, maxCommands int) 
 		Store:             snapshot.Store,
 		Entries:           make([]CommandIndexEntry, 0, len(snapshot.Entries)),
 		PartitionGaps:     make([]CommandIndexPartitionGap, 0, len(snapshot.Entries)),
+		Coverage:          cloneCommandIndexCoverage(snapshot.Coverage),
 		Revision:          snapshot.Revision,
 		SequenceHighWater: snapshot.SequenceHighWater,
 	}

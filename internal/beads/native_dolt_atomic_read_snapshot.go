@@ -11,6 +11,53 @@ import (
 
 const nativeDoltStatusIDSnapshotIndex = "gc_idx_issues_status_id"
 
+// PrepareAtomicReadSnapshot installs the Gas City-owned `(status,id)`
+// companion index used for bounded current-state and partition-prefix reads.
+// It is deliberately separate from AtomicReadSnapshot so read paths remain
+// side-effect free. An index with the owned name but different columns is
+// schema skew and fails closed.
+func (s *NativeDoltStore) PrepareAtomicReadSnapshot(parent context.Context) error {
+	if parent == nil {
+		return errors.New("preparing beads atomic read snapshot: nil context")
+	}
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(parent)
+	defer cancel()
+	db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cleanup() }()
+	columns, present, err := nativeDoltSnapshotIndexColumns(ctx, db, nativeDoltStatusIDSnapshotIndex)
+	if err != nil {
+		return fmt.Errorf("checking NativeDolt atomic snapshot paging index %q: %w", nativeDoltStatusIDSnapshotIndex, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	if present {
+		if columns != "status,id" {
+			return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want status,id: %w", nativeDoltStatusIDSnapshotIndex, columns, ErrAtomicReadSnapshotUnsupported)
+		}
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS "+nativeDoltStatusIDSnapshotIndex+" ON issues (status, id)"); err != nil {
+		return fmt.Errorf("installing NativeDolt atomic snapshot paging index %q: %w", nativeDoltStatusIDSnapshotIndex, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	columns, present, err = nativeDoltSnapshotIndexColumns(ctx, db, nativeDoltStatusIDSnapshotIndex)
+	if err != nil {
+		return fmt.Errorf("verifying installed NativeDolt atomic snapshot paging index %q: %w", nativeDoltStatusIDSnapshotIndex, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+	}
+	if !present || columns != "status,id" {
+		return fmt.Errorf("installed NativeDolt atomic snapshot paging index %q columns = %q, want status,id: %w", nativeDoltStatusIDSnapshotIndex, columns, ErrAtomicReadSnapshotUnsupported)
+	}
+	return nil
+}
+
 // AtomicReadSnapshot holds one repeatable-read SQL snapshot across every exact
 // metadata/record read and bounded keyset page in fn. The callback surface is
 // read-only by construction. NativeDolt's upstream transaction SearchIssues
@@ -73,6 +120,25 @@ type nativeDoltAtomicReadSnapshotTx struct {
 	tx  *sql.Tx
 }
 
+type nativeDoltSnapshotIndexQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func nativeDoltSnapshotIndexColumns(ctx context.Context, queryer nativeDoltSnapshotIndexQueryer, indexName string) (string, bool, error) {
+	var columns sql.NullString
+	err := queryer.QueryRowContext(ctx, `
+		SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',')
+		FROM INFORMATION_SCHEMA.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_NAME = 'issues'
+		  AND INDEX_NAME = ?
+	`, indexName).Scan(&columns)
+	if err != nil {
+		return "", false, err
+	}
+	return columns.String, columns.Valid, nil
+}
+
 func (t *nativeDoltAtomicReadSnapshotTx) verifyPagingIndexes() error {
 	indexes := []struct {
 		name    string
@@ -82,19 +148,12 @@ func (t *nativeDoltAtomicReadSnapshotTx) verifyPagingIndexes() error {
 		{name: nativeDoltStatusIDSnapshotIndex, columns: "status,id"},
 	}
 	for _, index := range indexes {
-		var columns sql.NullString
-		err := t.tx.QueryRowContext(t.ctx, `
-		SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',')
-		FROM INFORMATION_SCHEMA.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE()
-		  AND TABLE_NAME = 'issues'
-		  AND INDEX_NAME = ?
-	`, index.name).Scan(&columns)
+		columns, present, err := nativeDoltSnapshotIndexColumns(t.ctx, t.tx, index.name)
 		if err != nil {
 			return fmt.Errorf("verifying NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
 		}
-		if !columns.Valid || columns.String != index.columns {
-			return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns.String, index.columns, ErrAtomicReadSnapshotUnsupported)
+		if !present || columns != index.columns {
+			return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns, index.columns, ErrAtomicReadSnapshotUnsupported)
 		}
 	}
 	return nil

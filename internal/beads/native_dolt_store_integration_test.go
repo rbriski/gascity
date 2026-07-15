@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -30,7 +29,12 @@ func TestNativeDoltAtomicReadSnapshotRealBackendIsStableAcrossPages(t *testing.T
 	}
 	reader := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-reader", "gc")
 	writer := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-writer", "gc")
-	prepareNativeDoltStatusIDSnapshotIndexForTest(t, ctx, storage)
+	if err := reader.PrepareAtomicReadSnapshot(ctx); err != nil {
+		t.Fatalf("PrepareAtomicReadSnapshot: %v", err)
+	}
+	if err := reader.PrepareAtomicReadSnapshot(ctx); err != nil {
+		t.Fatalf("idempotent PrepareAtomicReadSnapshot: %v", err)
+	}
 	for _, id := range []string{"gc-snapshot-a", "gc-snapshot-b"} {
 		if _, err := writer.Create(Bead{ID: id, Title: id}); err != nil {
 			t.Fatalf("Create seed %s: %v", id, err)
@@ -128,7 +132,10 @@ func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) 
 					t.Fatalf("close upstream storage: %v", err)
 				}
 			})
-			prepareNativeDoltStatusIDSnapshotIndexForTest(t, ctx, storage)
+			preparer := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-index-preparer", "gc")
+			if err := preparer.PrepareAtomicReadSnapshot(ctx); err != nil {
+				t.Fatalf("PrepareAtomicReadSnapshot: %v", err)
+			}
 			db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
 			if err != nil {
 				t.Fatalf("open snapshot database for schema skew: %v", err)
@@ -158,20 +165,6 @@ func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) 
 				t.Fatal("AtomicReadSnapshot called callback with missing/skewed paging index")
 			}
 		})
-	}
-}
-
-func prepareNativeDoltStatusIDSnapshotIndexForTest(t *testing.T, ctx context.Context, storage beadslib.Storage) {
-	t.Helper()
-	db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
-	if err != nil {
-		t.Fatalf("open snapshot database to install status/id index: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, "CREATE INDEX "+nativeDoltStatusIDSnapshotIndex+" ON issues (status, id)"); err != nil && !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("install status/id snapshot index: %v", err)
-	}
-	if err := cleanup(); err != nil {
-		t.Fatalf("close snapshot database after installing status/id index: %v", err)
 	}
 }
 

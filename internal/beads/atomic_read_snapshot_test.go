@@ -159,4 +159,11 @@ func TestNativeDoltAtomicReadSnapshotFailsClosedWithoutRawDatabase(t *testing.T)
 	if called {
 		t.Fatal("AtomicReadSnapshot called callback without a raw transaction-consistent database")
 	}
+	preparer, ok := capability.(AtomicReadSnapshotPreparer)
+	if !ok {
+		t.Fatalf("NativeDolt snapshot capability %T lacks explicit index preparer", capability)
+	}
+	if err := preparer.PrepareAtomicReadSnapshot(t.Context()); !errors.Is(err, ErrAtomicReadSnapshotUnsupported) {
+		t.Fatalf("PrepareAtomicReadSnapshot error = %v, want ErrAtomicReadSnapshotUnsupported", err)
+	}
 }

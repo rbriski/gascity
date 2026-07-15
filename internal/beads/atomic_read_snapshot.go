@@ -80,6 +80,13 @@ type AtomicReadSnapshotStore interface {
 	AtomicReadSnapshot(ctx context.Context, fn func(AtomicReadSnapshotTx) error) error
 }
 
+// AtomicReadSnapshotPreparer explicitly installs any provider-owned companion
+// index required by AtomicReadSnapshot. Preparation is a writer operation;
+// read paths never invoke it implicitly.
+type AtomicReadSnapshotPreparer interface {
+	PrepareAtomicReadSnapshot(ctx context.Context) error
+}
+
 // AtomicReadSnapshotHandleProvider exposes the capability for wrappers whose
 // support depends on their backing store.
 type AtomicReadSnapshotHandleProvider interface {

@@ -33,6 +33,9 @@ func main() {
 }
 
 func mainExitCode(args []string, stdout, stderr io.Writer) int {
+	if handled, code := privateManagedDoltWatchdogEntrypoint(args, stdout, stderr); handled {
+		return code
+	}
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}

@@ -29,6 +29,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -44,7 +45,8 @@ import (
 const (
 	// managedDoltScopeWatchdogArg is the argv[1] re-exec marker for the
 	// production scope watchdog. No production `gc` invocation collides with
-	// it; reaching init() with it set is proof of an intentional re-exec.
+	// it; reaching the private process entrypoint with it set is proof of an
+	// intentional re-exec.
 	managedDoltScopeWatchdogArg = "__gc-managed-dolt-scope-watchdog"
 
 	// managedDoltScopeWatchdogEnv disables the production scope watchdog
@@ -70,13 +72,6 @@ const (
 	// "scope momentarily absent" (crash-adoption window, transient rename).
 	managedDoltScopeGoneConfirmations = 2
 )
-
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltScopeWatchdogArg {
-		return
-	}
-	os.Exit(runManagedDoltScopeWatchdog(os.Args[2:], os.Stdout, os.Stderr))
-}
 
 // managedDoltScopeWatchdogEnabled reports whether production managed dolt
 // servers are spawned under the scope watchdog. Default on; opt out with
@@ -178,7 +173,7 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 // server PID on stdout, then supervises: it terminates the server when the
 // scope is gone for managedDoltScopeGoneConfirmations consecutive polls,
 // forwards SIGTERM/SIGINT, and exits when the server exits on its own.
-func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
+func runManagedDoltScopeWatchdog(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 3 {
 		fmt.Fprintf(stderr, "usage: %s <config-file> <log-file> <city-path>\n", managedDoltScopeWatchdogArg) //nolint:errcheck
 		return 2

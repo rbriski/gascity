@@ -39,12 +39,6 @@ var allowedGCExitBypassSites = map[string]func(gcExitBypassSite) error{
 		}
 		return nil
 	},
-	"dolt_scope_watchdog.go:init:os.Exit": func(site gcExitBypassSite) error {
-		return validatePrivateWatchdogExit(site, "managedDoltScopeWatchdogArg", "runManagedDoltScopeWatchdog(os.Args[2:], os.Stdout, os.Stderr)")
-	},
-	"dolt_start_managed.go:init:os.Exit": func(site gcExitBypassSite) error {
-		return validatePrivateWatchdogExit(site, "managedDoltTestWatchdogArg", "runManagedDoltTestWatchdog(os.Args[2:], os.Stdout, os.Stderr)")
-	},
 	"main.go:main:os.Exit": func(site gcExitBypassSite) error {
 		function, ok := site.root.(*ast.FuncDecl)
 		if !ok || function.Name.Name != "main" || function.Body == nil {
@@ -678,7 +672,7 @@ var supervisorHardExit = func(stderr io.Writer, code int) {
 	}
 }
 
-func TestExitBypassCensusPinsMainAndWatchdogAncestry(t *testing.T) {
+func TestExitBypassCensusPinsMainAncestry(t *testing.T) {
 	tests := map[string]struct {
 		file   string
 		source string
@@ -711,68 +705,6 @@ func main() {
 }
 `,
 		},
-		"scope watchdog nested closure": {
-			file: "dolt_scope_watchdog.go",
-			source: `package main
-import "os"
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltScopeWatchdogArg { return }
-	func() { os.Exit(runManagedDoltScopeWatchdog(os.Args[2:], os.Stdout, os.Stderr)) }()
-}
-`,
-		},
-		"scope watchdog nested goroutine": {
-			file: "dolt_scope_watchdog.go",
-			source: `package main
-import "os"
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltScopeWatchdogArg { return }
-	go func() { os.Exit(runManagedDoltScopeWatchdog(os.Args[2:], os.Stdout, os.Stderr)) }()
-}
-`,
-		},
-		"test watchdog nested closure": {
-			file: "dolt_start_managed.go",
-			source: `package main
-import "os"
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg { return }
-	func() { os.Exit(runManagedDoltTestWatchdog(os.Args[2:], os.Stdout, os.Stderr)) }()
-}
-`,
-		},
-		"test watchdog nested goroutine": {
-			file: "dolt_start_managed.go",
-			source: `package main
-import "os"
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg { return }
-	go func() { os.Exit(runManagedDoltTestWatchdog(os.Args[2:], os.Stdout, os.Stderr)) }()
-}
-`,
-		},
-		"scope watchdog extra statement": {
-			file: "dolt_scope_watchdog.go",
-			source: `package main
-import "os"
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltScopeWatchdogArg { return }
-	beforeExit()
-	os.Exit(runManagedDoltScopeWatchdog(os.Args[2:], os.Stdout, os.Stderr))
-}
-`,
-		},
-		"test watchdog extra statement": {
-			file: "dolt_start_managed.go",
-			source: `package main
-import "os"
-func init() {
-	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg { return }
-	beforeExit()
-	os.Exit(runManagedDoltTestWatchdog(os.Args[2:], os.Stdout, os.Stderr))
-}
-`,
-		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -800,26 +732,6 @@ func exitCensusRejectsReference(sites []gcExitBypassSite, violations []string) b
 		}
 	}
 	return false
-}
-
-func TestExitBypassCensusRequiresPrivateWatchdogGuard(t *testing.T) {
-	dir := t.TempDir()
-	writeExitCensusFixture(t, dir, "dolt_scope_watchdog.go", `package main
-import "os"
-func init() {
-	os.Exit(runManagedDoltScopeWatchdog(os.Args[2:], os.Stdout, os.Stderr))
-}
-`)
-	sites, violations, err := scanGCExitBypasses(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(violations) != 0 || len(sites) != 1 {
-		t.Fatalf("fixture scan = sites %#v, violations %q", sites, violations)
-	}
-	if err := allowedGCExitBypassSites[sites[0].key()](sites[0]); err == nil {
-		t.Fatal("watchdog exit without its private sentinel guard was allowed")
-	}
 }
 
 func scanGCExitBypasses(dir string) ([]gcExitBypassSite, []string, error) {
@@ -1121,57 +1033,6 @@ func exitSensitiveSymbol(path, name string) bool {
 
 func isFatalName(name string) bool {
 	return name == "Fatal" || name == "Fatalf" || name == "Fatalln"
-}
-
-func validatePrivateWatchdogExit(site gcExitBypassSite, sentinel, wantArgument string) error {
-	function, ok := site.root.(*ast.FuncDecl)
-	if !ok || function.Name.Name != "init" || function.Body == nil {
-		return fmt.Errorf("watchdog exit owner is not init")
-	}
-	if got := expressionShape(site.call.Args); got != wantArgument {
-		return fmt.Errorf("exit argument = %q, want %q", got, wantArgument)
-	}
-	expression, ok := site.parent.(*ast.ExprStmt)
-	if !ok || expression.X != site.call || !hasExactExitAncestors(site, expression, function.Body, function) {
-		return fmt.Errorf("watchdog os.Exit is not a direct init-body statement")
-	}
-	if len(function.Body.List) != 2 || function.Body.List[1] != expression {
-		return fmt.Errorf("watchdog init body is not exactly the sentinel guard followed by os.Exit")
-	}
-	if len(function.Body.List) == 0 || !isPrivateWatchdogGuard(function.Body.List[0], sentinel) {
-		return fmt.Errorf("first statement is not the exact %s argv sentinel guard", sentinel)
-	}
-	return nil
-}
-
-func isPrivateWatchdogGuard(statement ast.Stmt, sentinel string) bool {
-	guard, ok := statement.(*ast.IfStmt)
-	if !ok || guard.Else != nil || len(guard.Body.List) != 1 {
-		return false
-	}
-	returned, ok := guard.Body.List[0].(*ast.ReturnStmt)
-	if !ok || len(returned.Results) != 0 {
-		return false
-	}
-	or, ok := guard.Cond.(*ast.BinaryExpr)
-	if !ok || or.Op != token.LOR {
-		return false
-	}
-	return isLenOSArgsLessThanTwo(or.X) && isOSArgsSentinelMismatch(or.Y, sentinel)
-}
-
-func isLenOSArgsLessThanTwo(expression ast.Expr) bool {
-	binary, ok := expression.(*ast.BinaryExpr)
-	if !ok || binary.Op != token.LSS || expressionShape([]ast.Expr{binary.Y}) != "2" {
-		return false
-	}
-	call, ok := binary.X.(*ast.CallExpr)
-	return ok && expressionShape([]ast.Expr{call.Fun}) == "len" && expressionShape(call.Args) == "os.Args"
-}
-
-func isOSArgsSentinelMismatch(expression ast.Expr, sentinel string) bool {
-	binary, ok := expression.(*ast.BinaryExpr)
-	return ok && binary.Op == token.NEQ && expressionShape([]ast.Expr{binary.X}) == "os.Args[1]" && expressionShape([]ast.Expr{binary.Y}) == sentinel
 }
 
 func expressionShape(expressions []ast.Expr) string {

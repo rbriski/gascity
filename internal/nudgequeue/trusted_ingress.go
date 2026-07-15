@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -49,18 +51,31 @@ const (
 type NudgeAuthorization struct {
 	Disposition            NudgeAuthorizationDisposition
 	PrincipalSchemaVersion uint32
-	Reference              TrustedIngressReference
+	// CommandCreatedAt is the immutable command timestamp covered by
+	// Reference.PayloadDigest. Authorities must retain it across idempotent
+	// replays; it is distinct from the evidence issuance time.
+	CommandCreatedAt time.Time
+	Reference        TrustedIngressReference
 }
 
-// NudgeIngressAuthorizationRequest is the exact, digest-covered request shown
-// to authenticated ingress authority. It deliberately carries no requester,
-// tenant, city, credential, policy, store, or restore identity.
+// NudgeIngressAuthorizationRequest is the digest-covered request shown to
+// authenticated ingress authority. IntentDigest covers stable caller intent
+// independently of the authority-selected creation time; PayloadDigest covers
+// the provisional exact command. An idempotent authority replay returns its
+// original command creation time and payload digest, which ingress reconstructs
+// and verifies before persistence. The request deliberately carries no
+// requester, tenant, city, credential, policy, store, or restore identity.
 type NudgeIngressAuthorizationRequest struct {
-	RequestID     string
-	Action        string
-	Target        CommandTarget
-	PayloadDigest string
-	RequestedAt   time.Time
+	RequestID         string
+	Action            string
+	Mode              DeliveryMode
+	Target            CommandTarget
+	IntentDigest      string
+	PayloadDigest     string
+	DeliverAtCreation bool
+	DeliverAfter      time.Time
+	ExpiresAt         time.Time
+	RequestedAt       time.Time
 }
 
 // TrustedNudgeAuthority is injected only by an authenticated control boundary.
@@ -72,18 +87,22 @@ type TrustedNudgeAuthority interface {
 	TrustedCommandPartitionCoverageResolver
 	TrustedCommandPartitionMembershipRecorder
 	TrustedCommandPartitionTerminalIntentAuthority
+	TrustedCommandPartitionAdmissionRecovery
 	TrustedCommandPartitionTerminalRecovery
 }
 
 // NudgeIngressRequest is the complete caller-owned nudge payload. Authority and
 // store-order fields are intentionally absent.
 type NudgeIngressRequest struct {
-	RequestID    string
-	Mode         DeliveryMode
-	Target       CommandTarget
-	Source       CommandSource
-	Message      string
-	Reference    *Reference
+	RequestID string
+	Mode      DeliveryMode
+	Target    CommandTarget
+	Source    CommandSource
+	Message   string
+	Reference *Reference
+	// DeliverAfter is an absolute scheduled time. Zero means deliver at the
+	// authority-selected command creation time and is the canonical immediate
+	// delivery form for callers that do not control the ingress clock.
 	DeliverAfter time.Time
 	ExpiresAt    time.Time
 }
@@ -174,6 +193,11 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 	}
 
 	createdAt := i.now().UTC()
+	deliverAtCreation := request.DeliverAfter.IsZero()
+	effectiveDeliverAfter := request.DeliverAfter
+	if deliverAtCreation {
+		effectiveDeliverAfter = createdAt
+	}
 	command := Command{
 		Version:      CommandVersion1,
 		ID:           commandID,
@@ -184,21 +208,33 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 		Message:      request.Message,
 		Reference:    cloneCommandReference(request.Reference),
 		CreatedAt:    createdAt,
-		DeliverAfter: request.DeliverAfter,
+		DeliverAfter: effectiveDeliverAfter,
 		ExpiresAt:    request.ExpiresAt,
 	}
 	if request.Target.Policy == TargetPolicyExactLaunch {
 		command.Binding = &CommandBinding{LaunchIdentity: request.Target.LaunchIdentity, BoundAt: createdAt}
 	}
+	if err := validateNudgeIngressCommandBeforeAuthorization(state.Store, request.RequestID, request, command); err != nil {
+		return NudgeIngressResult{}, err
+	}
+	intentDigest := computeNudgeIngressIntentDigestForRequest(command, deliverAtCreation)
 	payloadDigest := ComputeCommandPayloadDigest(command)
 	authorization, err := i.authority.AuthorizeNudgeIngress(ctx, NudgeIngressAuthorizationRequest{
-		RequestID:     request.RequestID,
-		Action:        NudgeCommandAction,
-		Target:        request.Target,
-		PayloadDigest: payloadDigest,
-		RequestedAt:   createdAt,
+		RequestID:         request.RequestID,
+		Action:            NudgeCommandAction,
+		Mode:              request.Mode,
+		Target:            request.Target,
+		IntentDigest:      intentDigest,
+		PayloadDigest:     payloadDigest,
+		DeliverAtCreation: deliverAtCreation,
+		DeliverAfter:      request.DeliverAfter,
+		ExpiresAt:         request.ExpiresAt,
+		RequestedAt:       createdAt,
 	})
 	if err != nil {
+		if errors.Is(err, ErrNudgeAuthorizationInvalid) || errors.Is(err, ErrNudgeAuthorizationDenied) || errors.Is(err, ErrNudgeAuthorizationUnknown) {
+			return NudgeIngressResult{}, err
+		}
 		return NudgeIngressResult{}, fmt.Errorf("%w: trusted ingress authority failed: %w", ErrNudgeAuthorizationUnknown, err)
 	}
 	if err := classifyNudgeAuthorization(authorization); err != nil {
@@ -207,7 +243,18 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 	if err := validateNudgeAuthorizationSchema(authorization); err != nil {
 		return NudgeIngressResult{}, err
 	}
+	if err := validateCommandTime("authorized command created at", authorization.CommandCreatedAt); err != nil {
+		return NudgeIngressResult{}, fmt.Errorf("%w: %w", ErrNudgeAuthorizationInvalid, err)
+	}
 	command.TrustedIngress = authorization.Reference
+	command.CreatedAt = authorization.CommandCreatedAt.UTC()
+	if deliverAtCreation {
+		command.DeliverAfter = command.CreatedAt
+	}
+	if command.Binding != nil {
+		command.Binding.BoundAt = command.CreatedAt
+	}
+	payloadDigest = ComputeCommandPayloadDigest(command)
 	if command.TrustedIngress.Action != NudgeCommandAction ||
 		command.TrustedIngress.TargetSessionID != command.Target.SessionID ||
 		command.TrustedIngress.PayloadDigest != payloadDigest {
@@ -230,6 +277,71 @@ func (i *TrustedNudgeIngress) Admit(ctx context.Context, request NudgeIngressReq
 		}
 	}
 	return NudgeIngressResult{Entry: entry, Partition: partition, Created: created}, nil
+}
+
+// validateNudgeIngressCommandBeforeAuthorization applies the complete known-v1
+// caller-payload contract before an authority may durably bind the request ID.
+// The synthetic evidence exists only to reuse the total command validator and
+// is never returned, persisted, or presented to an authority.
+func validateNudgeIngressCommandBeforeAuthorization(binding CommandStoreBinding, requestID string, request NudgeIngressRequest, command Command) error {
+	invalid := func(err error) error {
+		return fmt.Errorf("%w: caller command is invalid before authorization: %w", ErrNudgeAuthorizationInvalid, err)
+	}
+	if err := validateCommandIdentity("request id", requestID); err != nil {
+		return invalid(err)
+	}
+	if command.ID == "" || command.ID != CommandIDForRequest(binding, requestID) {
+		return invalid(errors.New("command id does not match the request and repository binding"))
+	}
+	if command.Version != CommandVersion1 || command.State != CommandStatePending || command.Store != (CommandStoreBinding{}) ||
+		command.Order != (CommandOrder{}) || command.Retry != nil || command.Claim != nil || command.Terminal != nil {
+		return invalid(errors.New("command is not a pristine pending v1 ingress intent"))
+	}
+	if !knownDeliveryMode(request.Mode) {
+		return invalid(fmt.Errorf("unknown delivery mode %q", request.Mode))
+	}
+	if err := validateCommandTarget(request.Mode, request.Target); err != nil {
+		return invalid(err)
+	}
+	if err := validateCommandSourceReference(request.Source, request.Reference); err != nil {
+		return invalid(err)
+	}
+	if request.Message == "" {
+		return invalid(errors.New("message is empty"))
+	}
+	if !utf8.ValidString(request.Message) {
+		return invalid(errors.New("message is not valid UTF-8"))
+	}
+	if strings.IndexByte(request.Message, 0) >= 0 {
+		return invalid(errors.New("message contains a NUL byte"))
+	}
+	if err := validateCommandTime("requested command creation time", command.CreatedAt); err != nil {
+		return invalid(err)
+	}
+	if !request.DeliverAfter.IsZero() {
+		if err := validateCommandTime("deliver_after", request.DeliverAfter); err != nil {
+			return invalid(err)
+		}
+	}
+	if err := validateCommandTime("expires_at", request.ExpiresAt); err != nil {
+		return invalid(err)
+	}
+	if !request.DeliverAfter.IsZero() && !request.ExpiresAt.After(request.DeliverAfter) {
+		return invalid(errors.New("expires_at must be after deliver_after"))
+	}
+	return nil
+}
+
+func computeNudgeIngressIntentDigest(command Command) string {
+	return computeNudgeIngressIntentDigestForRequest(command, false)
+}
+
+func computeNudgeIngressIntentDigestForRequest(command Command, deliverAtCreation bool) string {
+	command.CreatedAt = time.Time{}
+	if deliverAtCreation {
+		command.DeliverAfter = time.Time{}
+	}
+	return ComputeCommandPayloadDigest(command)
 }
 
 func commandIsPristinePending(command Command) bool {
@@ -336,7 +448,7 @@ func (i *TrustedNudgeIngress) AbortCommandPartitionTerminal(ctx context.Context,
 
 // RepairCommandPartitionTerminals resolves authority-owned preparations before
 // a production partition reader or writer is published.
-func (i *TrustedNudgeIngress) RepairCommandPartitionTerminals(ctx context.Context, reader CommandPartitionTerminalRecoveryReader) error {
+func (i *TrustedNudgeIngress) RepairCommandPartitionTerminals(ctx context.Context, reader CommandPartitionRecoveryReader) error {
 	if i == nil || isNilRepositoryDependency(i.authority) {
 		return fmt.Errorf("%w: trusted ingress terminal recovery is not fully bound", ErrNudgeAuthorizationUnknown)
 	}
@@ -344,6 +456,18 @@ func (i *TrustedNudgeIngress) RepairCommandPartitionTerminals(ctx context.Contex
 		return fmt.Errorf("%w: command repository recovery reader is required", ErrNudgeAuthorizationInvalid)
 	}
 	return i.authority.RepairCommandPartitionTerminals(ctx, reader)
+}
+
+// RepairCommandPartitionAdmissions resolves authority grants whose exact
+// command create committed before membership publication.
+func (i *TrustedNudgeIngress) RepairCommandPartitionAdmissions(ctx context.Context, reader CommandPartitionRecoveryReader) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress admission recovery is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	if isNilRepositoryDependency(reader) {
+		return fmt.Errorf("%w: command repository recovery reader is required", ErrNudgeAuthorizationInvalid)
+	}
+	return i.authority.RepairCommandPartitionAdmissions(ctx, reader)
 }
 
 func classifyNudgeAuthorization(authorization NudgeAuthorization) error {
@@ -385,13 +509,17 @@ func trustedCityPartitionFromAuthority(reference TrustedIngressReference) Truste
 }
 
 func nudgeIngressRequestMatchesCommand(request NudgeIngressRequest, command Command) bool {
+	deliveryMatches := request.DeliverAfter.Equal(command.DeliverAfter)
+	if request.DeliverAfter.IsZero() {
+		deliveryMatches = command.DeliverAfter.Equal(command.CreatedAt)
+	}
 	return command.ID != "" &&
 		request.Mode == command.Mode &&
 		request.Target == command.Target &&
 		request.Source == command.Source &&
 		request.Message == command.Message &&
 		reflect.DeepEqual(request.Reference, command.Reference) &&
-		request.DeliverAfter.Equal(command.DeliverAfter) &&
+		deliveryMatches &&
 		request.ExpiresAt.Equal(command.ExpiresAt)
 }
 

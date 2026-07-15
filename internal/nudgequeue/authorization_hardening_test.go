@@ -39,10 +39,12 @@ func TestClaimAuthorizedDirectStoreWriterCannotSelfAuthorize(t *testing.T) {
 	}
 
 	result, err := repository.ClaimAuthorized(t.Context(), request, authority, authority)
-	if err != nil {
-		t.Fatalf("ClaimAuthorized: %v", err)
+	if !errors.Is(err, ErrNudgeAuthorizationUnknown) || !errors.Is(err, ErrCommandRepositoryPartition) {
+		t.Fatalf("ClaimAuthorized error = %v, want parked missing-membership invariant", err)
 	}
-	assertAuthorizationDeniedCommand(t, result)
+	if result.Disposition != CommandClaimAuthorizationUnknown || result.Command.State != CommandStatePending {
+		t.Fatalf("ClaimAuthorized = %#v, want unchanged pending command", result)
+	}
 }
 
 func TestClaimAuthorizedCopiedStampCannotAuthorizeDifferentPayload(t *testing.T) {
@@ -75,10 +77,12 @@ func TestClaimAuthorizedCopiedStampCannotAuthorizeDifferentPayload(t *testing.T)
 	}
 
 	result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
-	if err != nil {
-		t.Fatalf("ClaimAuthorized: %v", err)
+	if !errors.Is(err, ErrNudgeAuthorizationUnknown) || !errors.Is(err, ErrCommandRepositoryPartition) {
+		t.Fatalf("ClaimAuthorized error = %v, want parked missing-membership invariant", err)
 	}
-	assertAuthorizationDeniedCommand(t, result)
+	if result.Disposition != CommandClaimAuthorizationUnknown || result.Command.State != CommandStatePending {
+		t.Fatalf("ClaimAuthorized = %#v, want unchanged pending command", result)
+	}
 }
 
 func TestClaimAuthorizedRejectsUnsupportedClaimPrincipalSchemaWithoutMutation(t *testing.T) {

@@ -58,6 +58,63 @@ func TestClaimAuthorizedReturnsExactAuthoritativeClaimedCommand(t *testing.T) {
 	}
 }
 
+func TestClaimAuthorizedParksWithoutExactActiveMembership(t *testing.T) {
+	for _, scenario := range []string{"missing", "wrong sequence", "authority finalized"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newAuthorizedClaimFixture(t)
+			fixture.authority.coverage.mu.Lock()
+			record := fixture.authority.coverage.records[fixture.command.ID]
+			switch scenario {
+			case "missing":
+				delete(fixture.authority.coverage.records, fixture.command.ID)
+			case "wrong sequence":
+				record.sequence++
+				fixture.authority.coverage.records[fixture.command.ID] = record
+			case "authority finalized":
+				record.terminalRevision = fixture.command.Order.Revision
+				fixture.authority.coverage.records[fixture.command.ID] = record
+			}
+			fixture.authority.coverage.mu.Unlock()
+			before, err := fixture.repository.State(t.Context())
+			if err != nil {
+				t.Fatalf("State before claim: %v", err)
+			}
+
+			result, err := fixture.repository.ClaimAuthorized(t.Context(), fixture.claimRequest("claim-membership", "owner-membership", "attempt-membership", fixture.now.Add(time.Second)), fixture.authority, fixture.authority)
+			if !errors.Is(err, ErrNudgeAuthorizationUnknown) || !errors.Is(err, ErrCommandRepositoryPartition) {
+				t.Fatalf("ClaimAuthorized membership error = %v, want authorization-unknown partition invariant", err)
+			}
+			if result.Disposition != CommandClaimAuthorizationUnknown || !reflect.DeepEqual(result.Command, fixture.command) {
+				t.Fatalf("ClaimAuthorized membership result = %#v, want parked %#v", result, fixture.command)
+			}
+			after, stateErr := fixture.repository.State(t.Context())
+			if stateErr != nil || after != before {
+				t.Fatalf("repository state after membership failure = %#v, err=%v; want %#v", after, stateErr, before)
+			}
+		})
+	}
+}
+
+func TestClaimAuthorizedRevalidatesMembershipBeforeExactInFlightReplay(t *testing.T) {
+	fixture := newAuthorizedClaimFixture(t)
+	request := fixture.claimRequest("claim-membership-replay", "owner-membership", "attempt-membership", fixture.now.Add(time.Second))
+	first, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if err != nil || first.Disposition != CommandClaimAllowed {
+		t.Fatalf("first ClaimAuthorized = %#v, err=%v", first, err)
+	}
+	fixture.authority.coverage.mu.Lock()
+	delete(fixture.authority.coverage.records, fixture.command.ID)
+	fixture.authority.coverage.mu.Unlock()
+
+	replayed, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+	if !errors.Is(err, ErrNudgeAuthorizationUnknown) || !errors.Is(err, ErrCommandRepositoryPartition) {
+		t.Fatalf("replayed ClaimAuthorized membership error = %v, want authorization-unknown partition invariant", err)
+	}
+	if replayed.Disposition != CommandClaimAuthorizationUnknown || !reflect.DeepEqual(replayed.Command, first.Command) {
+		t.Fatalf("replayed ClaimAuthorized = %#v, want parked in-flight %#v", replayed, first.Command)
+	}
+}
+
 func TestClaimAuthorizedRevocationDeniesDurablyBeforeProviderEntry(t *testing.T) {
 	fixture := newAuthorizedClaimFixture(t)
 	fixture.authority.setClaimDisposition(NudgeAuthorizationDenied)
@@ -202,6 +259,15 @@ func TestClaimAuthorizedRejectsDirectStoreStampAndCrossCityReplay(t *testing.T) 
 				request.Partition = trustedCityPartitionForTest("foreign-city")
 			}
 			result, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
+			if scenario == "cross city" {
+				if !errors.Is(err, ErrNudgeAuthorizationUnknown) || !errors.Is(err, ErrCommandRepositoryPartition) {
+					t.Fatalf("ClaimAuthorized cross-city error = %v, want parked partition invariant", err)
+				}
+				if result.Disposition != CommandClaimAuthorizationUnknown || !reflect.DeepEqual(result.Command, fixture.command) {
+					t.Fatalf("ClaimAuthorized cross-city = %#v, want unchanged pending command", result)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("ClaimAuthorized: %v", err)
 			}

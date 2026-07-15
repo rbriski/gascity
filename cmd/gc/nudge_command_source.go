@@ -18,7 +18,7 @@ type productionNudgeCommandSource struct {
 	reader     *nudgequeue.CommandPartitionReader
 	partition  nudgequeue.TrustedCityPartition
 	membership nudgequeue.TrustedCommandPartitionMembershipRecorder
-	terminal   nudgequeue.TrustedCommandPartitionTerminalIntentAuthority
+	terminal   nudgequeue.TrustedCommandClaimStateAuthority
 }
 
 func openVerifiedProductionNudgeCommandSource(
@@ -57,13 +57,20 @@ func openVerifiedProductionNudgeCommandSource(
 	if !ok || membership == nil {
 		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandRepositoryPartition, errors.New("trusted partition membership recorder is required"))
 	}
-	terminal, ok := resolver.(nudgequeue.TrustedCommandPartitionTerminalIntentAuthority)
+	terminal, ok := resolver.(nudgequeue.TrustedCommandClaimStateAuthority)
 	if !ok || terminal == nil {
-		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandPartitionTerminalIntent, errors.New("trusted terminal intent authority is required"))
+		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandPartitionTerminalIntent, nudgequeue.ErrCommandRepositoryPartition, errors.New("trusted command membership and terminal authority is required"))
+	}
+	admissionRecovery, ok := resolver.(nudgequeue.TrustedCommandPartitionAdmissionRecovery)
+	if !ok || admissionRecovery == nil {
+		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandRepositoryPartition, errors.New("trusted admission recovery authority is required"))
 	}
 	recovery, ok := resolver.(nudgequeue.TrustedCommandPartitionTerminalRecovery)
 	if !ok || recovery == nil {
 		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandPartitionTerminalIntent, errors.New("trusted terminal recovery authority is required"))
+	}
+	if err := admissionRecovery.RepairCommandPartitionAdmissions(ctx, repository); err != nil {
+		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandRepositoryPartition, fmt.Errorf("repairing prepared command admissions: %w", err))
 	}
 	if err := recovery.RepairCommandPartitionTerminals(ctx, repository); err != nil {
 		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandPartitionTerminalIntent, fmt.Errorf("repairing prepared terminal transitions: %w", err))

@@ -44,6 +44,9 @@ func TestTrustedNudgeIngressStampsNonSelfAssertedAuthorityAndRetriesIdempotently
 		t.Fatalf("first admission = %#v, want created command and opaque partition", first)
 	}
 	command := *first.Entry.Command
+	if !command.CreatedAt.Equal(now) || !command.TrustedIngress.IssuedAt.Equal(now.Add(-time.Second)) {
+		t.Fatalf("command and authority times = created %v issued %v, want independent %v and %v", command.CreatedAt, command.TrustedIngress.IssuedAt, now, now.Add(-time.Second))
+	}
 	if command.TrustedIngress.PrincipalID != testNudgePrincipalID ||
 		command.TrustedIngress.CityScope != testNudgeCityScope ||
 		command.TrustedIngress.PayloadDigest != ComputeCommandPayloadDigest(command) {
@@ -66,11 +69,45 @@ func TestTrustedNudgeIngressStampsNonSelfAssertedAuthorityAndRetriesIdempotently
 	}
 }
 
+func TestTrustedNudgeIngressNormalizesDeliverAtCreationWithAdvancingClock(t *testing.T) {
+	requestBuiltAt := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
+	admittedAt := requestBuiltAt.Add(time.Second)
+	for _, mode := range []DeliveryMode{DeliveryModeQueue, DeliveryModeImmediate} {
+		t.Run(string(mode), func(t *testing.T) {
+			repository := newVerifiedCommandRepository(t, newRepositoryAtomicTestStore())
+			authority := newTestNudgeAuthority()
+			ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return admittedAt })
+			if err != nil {
+				t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+			}
+			request := validNudgeIngressRequest(requestBuiltAt)
+			request.DeliverAfter = time.Time{}
+			if mode == DeliveryModeImmediate {
+				request.Mode = DeliveryModeImmediate
+				request.Target = CommandTarget{SessionID: "session-123", IntentGeneration: 7, LaunchIdentity: "launch-123", Policy: TargetPolicyExactLaunch}
+			}
+
+			result, err := ingress.Admit(t.Context(), request)
+			if err != nil || !result.Created || result.Entry.Command == nil {
+				t.Fatalf("Admit deliver-at-creation = %#v, err=%v", result, err)
+			}
+			if !result.Entry.Command.CreatedAt.Equal(admittedAt) || !result.Entry.Command.DeliverAfter.Equal(admittedAt) {
+				t.Fatalf("effective times = created %v deliver %v, want %v", result.Entry.Command.CreatedAt, result.Entry.Command.DeliverAfter, admittedAt)
+			}
+			replayed, err := ingress.Admit(t.Context(), request)
+			if err != nil || replayed.Created || replayed.Entry.Command == nil || !reflect.DeepEqual(replayed.Entry.Command, result.Entry.Command) {
+				t.Fatalf("Admit zero-time replay = %#v, err=%v; want existing %#v", replayed, err, result.Entry.Command)
+			}
+		})
+	}
+}
+
 func TestTrustedNudgeIngressRejectsAuthorityCoverageSubstitution(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
 	for name, mutate := range map[string]func(*NudgeAuthorization){
-		"action": func(a *NudgeAuthorization) { a.Reference.Action = "stop" },
-		"target": func(a *NudgeAuthorization) { a.Reference.TargetSessionID = "another-session" },
+		"missing command creation time": func(a *NudgeAuthorization) { a.CommandCreatedAt = time.Time{} },
+		"action":                        func(a *NudgeAuthorization) { a.Reference.Action = "stop" },
+		"target":                        func(a *NudgeAuthorization) { a.Reference.TargetSessionID = "another-session" },
 		"payload": func(a *NudgeAuthorization) {
 			a.Reference.PayloadDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		},
@@ -99,6 +136,34 @@ func TestTrustedNudgeIngressRejectsAuthorityCoverageSubstitution(t *testing.T) {
 			resolution, getErr := repository.Get(t.Context(), CommandIDForRequest(state.Store, request.RequestID))
 			if getErr != nil || resolution.Found {
 				t.Fatalf("invalid coverage persisted command: %#v, err=%v", resolution, getErr)
+			}
+		})
+	}
+}
+
+func TestTrustedNudgeIngressRejectsMalformedCallerPayloadBeforeAuthority(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 30, 0, 0, time.UTC)
+	for name, mutate := range map[string]func(*NudgeIngressRequest){
+		"empty message":            func(request *NudgeIngressRequest) { request.Message = "" },
+		"invalid mode and target":  func(request *NudgeIngressRequest) { request.Mode = DeliveryModeImmediate },
+		"invalid source reference": func(request *NudgeIngressRequest) { request.Source = CommandSourceMail },
+		"invalid delivery window":  func(request *NudgeIngressRequest) { request.ExpiresAt = request.DeliverAfter },
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := newVerifiedCommandRepository(t, newRepositoryAtomicTestStore())
+			authority := newTestNudgeAuthority()
+			ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+			if err != nil {
+				t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+			}
+			request := validNudgeIngressRequest(now)
+			mutate(&request)
+
+			if _, err := ingress.Admit(t.Context(), request); !errors.Is(err, ErrNudgeAuthorizationInvalid) {
+				t.Fatalf("Admit malformed request error = %v, want invalid authorization request", err)
+			}
+			if got := authority.authorizeCalls(); got != 0 {
+				t.Fatalf("authority calls = %d, want zero before caller payload validation", got)
 			}
 		})
 	}
@@ -229,6 +294,7 @@ func (a *testNudgeAuthority) AuthorizeNudgeIngress(_ context.Context, request Nu
 	authorization := NudgeAuthorization{
 		Disposition:            a.disposition,
 		PrincipalSchemaVersion: a.schema,
+		CommandCreatedAt:       request.RequestedAt,
 		Reference: TrustedIngressReference{
 			Issuer:           "test-authority",
 			ReferenceID:      "authority/" + request.RequestID,
@@ -349,7 +415,7 @@ func (a *testNudgeAuthority) terminalIntentCount() int {
 	return len(a.terminalIntents)
 }
 
-func (a *testNudgeAuthority) RepairCommandPartitionTerminals(ctx context.Context, reader CommandPartitionTerminalRecoveryReader) error {
+func (a *testNudgeAuthority) RepairCommandPartitionTerminals(ctx context.Context, reader CommandPartitionRecoveryReader) error {
 	state, err := reader.State(ctx)
 	if err != nil {
 		return err
@@ -390,6 +456,10 @@ func (a *testNudgeAuthority) RepairCommandPartitionTerminals(ctx context.Context
 			return err
 		}
 	}
+	return nil
+}
+
+func (a *testNudgeAuthority) RepairCommandPartitionAdmissions(context.Context, CommandPartitionRecoveryReader) error {
 	return nil
 }
 
@@ -499,5 +569,6 @@ var (
 	_ TrustedCityPartitionResolver              = (*TrustedNudgeIngress)(nil)
 	_ TrustedCommandPartitionCoverageResolver   = (*TrustedNudgeIngress)(nil)
 	_ TrustedCommandPartitionMembershipRecorder = (*TrustedNudgeIngress)(nil)
+	_ TrustedCommandPartitionAdmissionRecovery  = (*TrustedNudgeIngress)(nil)
 	_ TrustedCommandPartitionTerminalRecovery   = (*TrustedNudgeIngress)(nil)
 )

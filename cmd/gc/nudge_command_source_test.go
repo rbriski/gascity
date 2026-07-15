@@ -553,6 +553,7 @@ func (a *productionNudgeTestAuthority) AuthorizeNudgeIngress(_ context.Context, 
 	defer a.mu.Unlock()
 	authorization := nudgequeue.NudgeAuthorization{
 		Disposition: nudgequeue.NudgeAuthorizationAllowed, PrincipalSchemaVersion: nudgequeue.NudgePrincipalSchemaVersion,
+		CommandCreatedAt: request.RequestedAt,
 		Reference: nudgequeue.TrustedIngressReference{
 			Issuer: "production-test-authority", ReferenceID: "authority/" + request.RequestID,
 			PrincipalID: "principal-1", TenantScope: "tenant-1", CityScope: "city-1",
@@ -707,7 +708,7 @@ func (a *productionNudgeTestAuthority) terminalIntentCount() int {
 	return len(a.intents)
 }
 
-func (a *productionNudgeTestAuthority) RepairCommandPartitionTerminals(ctx context.Context, reader nudgequeue.CommandPartitionTerminalRecoveryReader) error {
+func (a *productionNudgeTestAuthority) RepairCommandPartitionTerminals(ctx context.Context, reader nudgequeue.CommandPartitionRecoveryReader) error {
 	state, err := reader.State(ctx)
 	if err != nil {
 		return err
@@ -750,6 +751,10 @@ func (a *productionNudgeTestAuthority) RepairCommandPartitionTerminals(ctx conte
 			return err
 		}
 	}
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) RepairCommandPartitionAdmissions(context.Context, nudgequeue.CommandPartitionRecoveryReader) error {
 	return nil
 }
 

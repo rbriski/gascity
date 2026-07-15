@@ -174,12 +174,20 @@ type TrustedCommandPartitionTerminalIntentAuthority interface {
 	VerifyCommandPartitionTerminal(context.Context, CommandPartitionTerminalResolution) error
 }
 
-// CommandPartitionTerminalRecoveryReader is the narrow unpartitioned store
+// CommandPartitionRecoveryReader is the narrow unpartitioned store
 // view used only to resolve authority-owned preparations before a production
 // partition reader or writer becomes reachable.
-type CommandPartitionTerminalRecoveryReader interface {
+type CommandPartitionRecoveryReader interface {
 	State(context.Context) (CommandRepositoryState, error)
 	Get(context.Context, string) (CommandIndexResolution, error)
+}
+
+// TrustedCommandPartitionAdmissionRecovery resolves durable ingress grants
+// whose command create committed before admission membership was published.
+// Missing commands remain harmless prepared grants; any present command must
+// match the exact authority grant and pristine pending state.
+type TrustedCommandPartitionAdmissionRecovery interface {
+	RepairCommandPartitionAdmissions(context.Context, CommandPartitionRecoveryReader) error
 }
 
 // TrustedCommandPartitionTerminalRecovery resolves every outstanding terminal
@@ -187,7 +195,7 @@ type CommandPartitionTerminalRecoveryReader interface {
 // finalize an exact prepared after-state or abort an exact before-state only at
 // its unchanged repository revision; all other states must fail closed.
 type TrustedCommandPartitionTerminalRecovery interface {
-	RepairCommandPartitionTerminals(context.Context, CommandPartitionTerminalRecoveryReader) error
+	RepairCommandPartitionTerminals(context.Context, CommandPartitionRecoveryReader) error
 }
 
 func terminalResolutionForCommand(command Command, partition TrustedCityPartition) (CommandPartitionTerminalResolution, error) {

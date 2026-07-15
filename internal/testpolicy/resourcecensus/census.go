@@ -112,7 +112,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   522,
+			BaselineCalls:   523,
 			BaselineFiles:   152,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -140,7 +140,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   395,
+			BaselineCalls:   396,
 			BaselineFiles:   106,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -166,7 +166,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4346,
+			BaselineCalls:   4358,
 			BaselineFiles:   200,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -291,6 +291,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-01",
 		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestProviderOverridesAndSuiteContractsCrossMakeIsolation",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "Make/provider and suite-contract proof is a checked Medium owner",
+			ResourceOwner:   "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation",
+			MigrationTarget: "P0.1",
+			Expires:         "2026-10-01",
+		},
 	},
 	SmallDebt: []Baseline{
 		{
@@ -322,7 +333,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   4340,
+			BaselineCalls:   4352,
 			BaselineFiles:   200,
 			ReportedCalls:   4339,
 			ReportedFiles:   199,

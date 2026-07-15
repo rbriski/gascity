@@ -664,16 +664,14 @@ func refineClosedWorldExecution(analysis *loadedAnalysis, roots []*ssa.Package) 
 // effects without making any framework-specific assumptions.
 func escapedCallableEntryFunctions(analysis *loadedAnalysis) []*ssa.Function {
 	entrySet := make(map[*ssa.Function]bool)
-	for function := range analysis.sourceFuncs {
-		if functionValueEscapesAuthoredUniverse(function, analysis) {
-			entrySet[function] = true
-		}
-	}
+	instantiatedOrigins := make(map[*ssa.Function]bool)
 	// Named functions used as first-class values do not always expose SSA
 	// referrers. Scan operands in the currently reachable authored bodies so a
 	// store such as cobra.Command{RunE: namedHandler} cannot disappear merely
 	// because Function.Referrers is nil. Every higher-order SSA value is rooted
-	// in either a Function or MakeClosure operand in one of these bodies.
+	// in either a Function or MakeClosure operand in one of these bodies. Keep
+	// concrete generic instances intact: their source origin has unconstrained
+	// type parameters and is not the executable callback handed to the callee.
 	for function := range analysis.effectFuncs {
 		for _, block := range function.Blocks {
 			for _, instruction := range block.Instrs {
@@ -686,13 +684,25 @@ func escapedCallableEntryFunctions(analysis *loadedAnalysis) []*ssa.Function {
 						continue
 					}
 					if origin := target.Origin(); origin != nil {
-						target = origin
+						if analysis.sourceFuncs[origin] {
+							entrySet[target] = true
+							instantiatedOrigins[origin] = true
+						}
+						continue
 					}
 					if analysis.sourceFuncs[target] {
 						entrySet[target] = true
 					}
 				}
 			}
+		}
+	}
+	for function := range analysis.sourceFuncs {
+		if instantiatedOrigins[function] {
+			continue
+		}
+		if functionValueEscapesAuthoredUniverse(function, analysis) {
+			entrySet[function] = true
 		}
 	}
 	entries := make([]*ssa.Function, 0, len(entrySet))

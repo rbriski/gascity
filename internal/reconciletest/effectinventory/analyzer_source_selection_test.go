@@ -408,6 +408,26 @@ func TestSourceSelectionCanonicalIntegrationSupportExclusionFailsClosed(t *testi
 	requireSourceSelectionError(t, err, "internal/api/dashport_support.go", "selected a file outside the production source census")
 }
 
+func TestSourceSelectionCanonicalProductMetricsTesthookExclusionsFailClosed(t *testing.T) {
+	repoRoot, config := newSourceSelectionModule(t)
+	config.Roots = []string{"cmd/gc"}
+	writeSourceSelectionFile(t, repoRoot, "cmd/gc/main.go", "package main\n")
+	for _, filename := range []string{
+		"cmd/gc/productmetrics_controls_testhook.go",
+		"cmd/gc/productmetrics_testhook.go",
+	} {
+		writeSourceSelectionFile(t, repoRoot, filename, "//go:build productmetrics_testhook\n\npackage main\n")
+	}
+
+	if err := auditCanonicalSourceSelection(context.Background(), config); err != nil {
+		t.Fatalf("product-metrics testhook file escaped its canonical exclusion: %v", err)
+	}
+
+	writeSourceSelectionFile(t, repoRoot, "cmd/gc/productmetrics_testhook.go", "package main\n")
+	err := auditCanonicalSourceSelection(context.Background(), config)
+	requireSourceSelectionError(t, err, "cmd/gc/productmetrics_testhook.go", "selected a file outside the production source census")
+}
+
 func TestSourceSelectionAuditRejectsUnselectedFile(t *testing.T) {
 	repoRoot, config := newSourceSelectionModule(t)
 	writeSourceSelectionFile(t, repoRoot, "scope/common.go", "package scope\n")

@@ -158,11 +158,17 @@ func sourceCandidates(repoRoot string, roots []string) ([]string, error) {
 }
 
 func canonicalSourceAuditExclusion(filename string) bool {
-	// This integration-only composition seam is imported by the dashboard
-	// end-to-end harness and is deliberately absent from production builds.
-	// If its constraint is removed, selectedCanonicalSources reports it as a
-	// selected file outside this production census instead of hiding it.
-	return filename == "internal/api/dashport_support.go"
+	// These exact support seams are deliberately absent from production builds.
+	// If a constraint is removed, selectedCanonicalSources reports the file as
+	// selected outside this production census instead of hiding the drift.
+	switch filename {
+	case "internal/api/dashport_support.go",
+		"cmd/gc/productmetrics_controls_testhook.go",
+		"cmd/gc/productmetrics_testhook.go":
+		return true
+	default:
+		return false
+	}
 }
 
 func stableFilesystemError(err error) string {

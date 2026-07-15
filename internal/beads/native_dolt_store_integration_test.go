@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -29,6 +30,7 @@ func TestNativeDoltAtomicReadSnapshotRealBackendIsStableAcrossPages(t *testing.T
 	}
 	reader := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-reader", "gc")
 	writer := newNativeDoltStoreWithStorageAndPrefix(storage, "snapshot-writer", "gc")
+	prepareNativeDoltStatusIDSnapshotIndexForTest(t, ctx, storage)
 	for _, id := range []string{"gc-snapshot-a", "gc-snapshot-b"} {
 		if _, err := writer.Create(Bead{ID: id, Title: id}); err != nil {
 			t.Fatalf("Create seed %s: %v", id, err)
@@ -39,7 +41,7 @@ func TestNativeDoltAtomicReadSnapshotRealBackendIsStableAcrossPages(t *testing.T
 	if !ok {
 		t.Fatal("AtomicReadSnapshotFor(real NativeDoltStore) = false, want true")
 	}
-	query := AtomicReadSnapshotPageQuery{IDPrefix: "gc-snapshot-", Status: "open", Limit: 1}
+	query := AtomicReadSnapshotPageQuery{IDPrefix: "gc-snapshot-", Status: "open", Order: AtomicReadSnapshotOrderID, Limit: 1}
 	var stableIDs []string
 	writeStarted := make(chan struct{})
 	writeResult := make(chan error, 1)
@@ -105,11 +107,16 @@ func TestNativeDoltAtomicReadSnapshotRealBackendIsStableAcrossPages(t *testing.T
 }
 
 func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) {
-	tests := map[string]string{
-		"missing":       "",
-		"wrong columns": "CREATE INDEX idx_issues_status_updated_at ON issues (status)",
+	tests := map[string]struct {
+		index       string
+		replacement string
+	}{
+		"missing updated-at index":      {index: "idx_issues_status_updated_at"},
+		"wrong updated-at columns":      {index: "idx_issues_status_updated_at", replacement: "CREATE INDEX idx_issues_status_updated_at ON issues (status)"},
+		"missing status-id index":       {index: nativeDoltStatusIDSnapshotIndex},
+		"wrong status-id index columns": {index: nativeDoltStatusIDSnapshotIndex, replacement: "CREATE INDEX " + nativeDoltStatusIDSnapshotIndex + " ON issues (id)"},
 	}
-	for name, replacement := range tests {
+	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
@@ -121,15 +128,16 @@ func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) 
 					t.Fatalf("close upstream storage: %v", err)
 				}
 			})
+			prepareNativeDoltStatusIDSnapshotIndexForTest(t, ctx, storage)
 			db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
 			if err != nil {
 				t.Fatalf("open snapshot database for schema skew: %v", err)
 			}
-			if _, err := db.Exec("DROP INDEX idx_issues_status_updated_at ON issues"); err != nil {
+			if _, err := db.Exec("DROP INDEX " + test.index + " ON issues"); err != nil {
 				t.Fatalf("drop paging index: %v", err)
 			}
-			if replacement != "" {
-				if _, err := db.Exec(replacement); err != nil {
+			if test.replacement != "" {
+				if _, err := db.Exec(test.replacement); err != nil {
 					t.Fatalf("create skewed paging index: %v", err)
 				}
 			}
@@ -150,6 +158,20 @@ func TestNativeDoltAtomicReadSnapshotFailsClosedOnPagingIndexSkew(t *testing.T) 
 				t.Fatal("AtomicReadSnapshot called callback with missing/skewed paging index")
 			}
 		})
+	}
+}
+
+func prepareNativeDoltStatusIDSnapshotIndexForTest(t *testing.T, ctx context.Context, storage beadslib.Storage) {
+	t.Helper()
+	db, cleanup, err := openNativeDoltSnapshotDB(ctx, storage)
+	if err != nil {
+		t.Fatalf("open snapshot database to install status/id index: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE INDEX "+nativeDoltStatusIDSnapshotIndex+" ON issues (status, id)"); err != nil && !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("install status/id snapshot index: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("close snapshot database after installing status/id index: %v", err)
 	}
 }
 

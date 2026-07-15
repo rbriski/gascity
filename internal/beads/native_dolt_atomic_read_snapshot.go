@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const nativeDoltStatusIDSnapshotIndex = "gc_idx_issues_status_id"
+
 // AtomicReadSnapshot holds one repeatable-read SQL snapshot across every exact
 // metadata/record read and bounded keyset page in fn. The callback surface is
 // read-only by construction. NativeDolt's upstream transaction SearchIssues
@@ -54,7 +56,7 @@ func (s *NativeDoltStore) AtomicReadSnapshot(parent context.Context, fn func(Ato
 	}
 	defer func() { _ = tx.Rollback() }()
 	snapshot := &nativeDoltAtomicReadSnapshotTx{ctx: ctx, tx: tx}
-	if err := snapshot.verifyPagingIndex(); err != nil {
+	if err := snapshot.verifyPagingIndexes(); err != nil {
 		return err
 	}
 	if err := fn(snapshot); err != nil {
@@ -71,20 +73,29 @@ type nativeDoltAtomicReadSnapshotTx struct {
 	tx  *sql.Tx
 }
 
-func (t *nativeDoltAtomicReadSnapshotTx) verifyPagingIndex() error {
-	var columns sql.NullString
-	err := t.tx.QueryRowContext(t.ctx, `
+func (t *nativeDoltAtomicReadSnapshotTx) verifyPagingIndexes() error {
+	indexes := []struct {
+		name    string
+		columns string
+	}{
+		{name: "idx_issues_status_updated_at", columns: "status,updated_at"},
+		{name: nativeDoltStatusIDSnapshotIndex, columns: "status,id"},
+	}
+	for _, index := range indexes {
+		var columns sql.NullString
+		err := t.tx.QueryRowContext(t.ctx, `
 		SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',')
 		FROM INFORMATION_SCHEMA.STATISTICS
 		WHERE TABLE_SCHEMA = DATABASE()
 		  AND TABLE_NAME = 'issues'
-		  AND INDEX_NAME = 'idx_issues_status_updated_at'
-	`).Scan(&columns)
-	if err != nil {
-		return fmt.Errorf("verifying NativeDolt atomic snapshot paging index: %w", errors.Join(ErrAtomicReadSnapshotUnsupported, err))
-	}
-	if !columns.Valid || columns.String != "status,updated_at" {
-		return fmt.Errorf("NativeDolt atomic snapshot paging index columns = %q, want status,updated_at: %w", columns.String, ErrAtomicReadSnapshotUnsupported)
+		  AND INDEX_NAME = ?
+	`, index.name).Scan(&columns)
+		if err != nil {
+			return fmt.Errorf("verifying NativeDolt atomic snapshot paging index %q: %w", index.name, errors.Join(ErrAtomicReadSnapshotUnsupported, err))
+		}
+		if !columns.Valid || columns.String != index.columns {
+			return fmt.Errorf("NativeDolt atomic snapshot paging index %q columns = %q, want %s: %w", index.name, columns.String, index.columns, ErrAtomicReadSnapshotUnsupported)
+		}
 	}
 	return nil
 }
@@ -117,10 +128,24 @@ func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryPage(query AtomicReadSnapsho
 		return AtomicReadSnapshotPage{}, err
 	}
 	args := []any{query.Status, query.IDPrefix + "%"}
-	keysetSQL := ""
-	if query.After != (AtomicReadSnapshotCursor{}) {
-		keysetSQL = "AND (updated_at, id) > (?, ?)"
-		args = append(args, query.After.UpdatedAt, query.After.ID)
+	var indexName, keysetSQL, orderSQL string
+	switch query.Order {
+	case AtomicReadSnapshotOrderID:
+		indexName = nativeDoltStatusIDSnapshotIndex
+		orderSQL = "id ASC"
+		if query.After != (AtomicReadSnapshotCursor{}) {
+			keysetSQL = "AND id > ?"
+			args = append(args, query.After.ID)
+		}
+	case AtomicReadSnapshotOrderUpdatedAtID:
+		indexName = "idx_issues_status_updated_at"
+		orderSQL = "updated_at ASC, id ASC"
+		if query.After != (AtomicReadSnapshotCursor{}) {
+			keysetSQL = "AND (updated_at, id) > (?, ?)"
+			args = append(args, query.After.UpdatedAt, query.After.ID)
+		}
+	default:
+		return AtomicReadSnapshotPage{}, fmt.Errorf("unsupported NativeDolt snapshot order %d: %w", query.Order, ErrAtomicReadSnapshotQuery)
 	}
 	args = append(args, query.Limit)
 	// IDPrefix rejects LIKE metacharacters, and every value remains bound. The
@@ -129,11 +154,11 @@ func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryPage(query AtomicReadSnapsho
 	querySQL := fmt.Sprintf(`
 		SELECT id, title, status, issue_type, created_at, updated_at, metadata,
 		       COALESCE(ephemeral, 0), COALESCE(no_history, 0)
-		FROM issues FORCE INDEX (idx_issues_status_updated_at)
+		FROM issues FORCE INDEX (%s)
 		WHERE status = ? AND id LIKE ? %s
-		ORDER BY updated_at ASC, id ASC
+		ORDER BY %s
 		LIMIT ?
-	`, keysetSQL)
+	`, indexName, keysetSQL, orderSQL)
 	rows, err := t.tx.QueryContext(t.ctx, querySQL, args...)
 	if err != nil {
 		return AtomicReadSnapshotPage{}, fmt.Errorf("listing NativeDolt atomic snapshot page: %w", err)
@@ -155,8 +180,7 @@ func (t *nativeDoltAtomicReadSnapshotTx) ListHistoryPage(query AtomicReadSnapsho
 		return AtomicReadSnapshotPage{}, fmt.Errorf("iterating NativeDolt atomic snapshot page: %w", err)
 	}
 	if len(page.Rows) == query.Limit {
-		last := page.Rows[len(page.Rows)-1]
-		page.Next = AtomicReadSnapshotCursor{UpdatedAt: last.UpdatedAt, ID: last.ID}
+		page.Next = atomicReadSnapshotCursorForRow(query.Order, page.Rows[len(page.Rows)-1])
 	}
 	if err := validateAtomicReadSnapshotPage(query, page); err != nil {
 		return AtomicReadSnapshotPage{}, err

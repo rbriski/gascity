@@ -33,6 +33,20 @@ type AtomicReadSnapshotCursor struct {
 	ID        string
 }
 
+// AtomicReadSnapshotOrder selects one verified backing index and its matching
+// exclusive keyset. Callers must choose explicitly so a backend cannot silently
+// substitute an unbounded sort or scan.
+type AtomicReadSnapshotOrder uint8
+
+const (
+	// AtomicReadSnapshotOrderID traverses `(status,id)`. It is the bounded path
+	// for current-state reads and partition-prefix selection.
+	AtomicReadSnapshotOrderID AtomicReadSnapshotOrder = iota + 1
+	// AtomicReadSnapshotOrderUpdatedAtID traverses `(status,updated_at,id)`.
+	// It is the monotonic path for discovering records that enter a status.
+	AtomicReadSnapshotOrderUpdatedAtID
+)
+
 // AtomicReadSnapshotPageQuery selects one bounded page through standard,
 // indexed issue columns. IDPrefix and Status are both mandatory. Metadata is
 // deliberately absent because JSON metadata equality is not an indexed scale
@@ -40,6 +54,7 @@ type AtomicReadSnapshotCursor struct {
 type AtomicReadSnapshotPageQuery struct {
 	IDPrefix string
 	Status   string
+	Order    AtomicReadSnapshotOrder
 	After    AtomicReadSnapshotCursor
 	Limit    int
 }
@@ -99,17 +114,27 @@ func validateAtomicReadSnapshotPageQuery(query AtomicReadSnapshotPageQuery) erro
 	if err := validateAtomicReadSnapshotSelector("status", query.Status); err != nil {
 		return err
 	}
+	if query.Order != AtomicReadSnapshotOrderID && query.Order != AtomicReadSnapshotOrderUpdatedAtID {
+		return fmt.Errorf("snapshot order %d is unsupported: %w", query.Order, ErrAtomicReadSnapshotQuery)
+	}
 	if query.After == (AtomicReadSnapshotCursor{}) {
 		return nil
 	}
-	if query.After.UpdatedAt.IsZero() || query.After.ID == "" {
-		return fmt.Errorf("snapshot continuation requires both updated_at and id: %w", ErrAtomicReadSnapshotQuery)
-	}
-	if query.After.UpdatedAt.Location() != time.UTC {
-		return fmt.Errorf("snapshot continuation updated_at is not UTC: %w", ErrAtomicReadSnapshotQuery)
-	}
 	if !strings.HasPrefix(query.After.ID, query.IDPrefix) {
 		return fmt.Errorf("snapshot continuation id %q is outside prefix %q: %w", query.After.ID, query.IDPrefix, ErrAtomicReadSnapshotQuery)
+	}
+	switch query.Order {
+	case AtomicReadSnapshotOrderID:
+		if query.After.ID == "" || !query.After.UpdatedAt.IsZero() {
+			return fmt.Errorf("status/id snapshot continuation requires only id: %w", ErrAtomicReadSnapshotQuery)
+		}
+	case AtomicReadSnapshotOrderUpdatedAtID:
+		if query.After.UpdatedAt.IsZero() || query.After.ID == "" {
+			return fmt.Errorf("status/updated_at/id snapshot continuation requires updated_at and id: %w", ErrAtomicReadSnapshotQuery)
+		}
+		if query.After.UpdatedAt.Location() != time.UTC {
+			return fmt.Errorf("snapshot continuation updated_at is not UTC: %w", ErrAtomicReadSnapshotQuery)
+		}
 	}
 	return nil
 }
@@ -144,16 +169,15 @@ func validateAtomicReadSnapshotPage(query AtomicReadSnapshotPageQuery, page Atom
 		if row.UpdatedAt.IsZero() || row.UpdatedAt.Location() != time.UTC {
 			return fmt.Errorf("snapshot page row %q has zero or non-UTC updated_at: %w", row.ID, ErrAtomicReadSnapshotQuery)
 		}
-		cursor := AtomicReadSnapshotCursor{UpdatedAt: row.UpdatedAt, ID: row.ID}
-		if !atomicReadSnapshotCursorAfter(cursor, prior) {
+		cursor := atomicReadSnapshotCursorForRow(query.Order, row)
+		if !atomicReadSnapshotCursorAfter(query.Order, cursor, prior) {
 			return fmt.Errorf("snapshot page row %q does not strictly advance the keyset: %w", row.ID, ErrAtomicReadSnapshotQuery)
 		}
 		prior = cursor
 	}
 	wantNext := AtomicReadSnapshotCursor{}
 	if len(page.Rows) == query.Limit {
-		last := page.Rows[len(page.Rows)-1]
-		wantNext = AtomicReadSnapshotCursor{UpdatedAt: last.UpdatedAt, ID: last.ID}
+		wantNext = atomicReadSnapshotCursorForRow(query.Order, page.Rows[len(page.Rows)-1])
 	}
 	if page.Next != wantNext {
 		return fmt.Errorf("snapshot page continuation %#v does not match %#v: %w", page.Next, wantNext, ErrAtomicReadSnapshotQuery)
@@ -161,9 +185,19 @@ func validateAtomicReadSnapshotPage(query AtomicReadSnapshotPageQuery, page Atom
 	return nil
 }
 
-func atomicReadSnapshotCursorAfter(candidate, prior AtomicReadSnapshotCursor) bool {
+func atomicReadSnapshotCursorForRow(order AtomicReadSnapshotOrder, row Bead) AtomicReadSnapshotCursor {
+	if order == AtomicReadSnapshotOrderID {
+		return AtomicReadSnapshotCursor{ID: row.ID}
+	}
+	return AtomicReadSnapshotCursor{UpdatedAt: row.UpdatedAt, ID: row.ID}
+}
+
+func atomicReadSnapshotCursorAfter(order AtomicReadSnapshotOrder, candidate, prior AtomicReadSnapshotCursor) bool {
 	if prior == (AtomicReadSnapshotCursor{}) {
 		return true
+	}
+	if order == AtomicReadSnapshotOrderID {
+		return candidate.ID > prior.ID
 	}
 	if candidate.UpdatedAt.After(prior.UpdatedAt) {
 		return true

@@ -12,6 +12,7 @@ func TestAtomicReadSnapshotPageQueryRequiresBoundedIndexedKeyset(t *testing.T) {
 	valid := AtomicReadSnapshotPageQuery{
 		IDPrefix: "gc-nudge-",
 		Status:   "open",
+		Order:    AtomicReadSnapshotOrderUpdatedAtID,
 		Limit:    128,
 	}
 	if err := validateAtomicReadSnapshotPageQuery(valid); err != nil {
@@ -29,6 +30,7 @@ func TestAtomicReadSnapshotPageQueryRequiresBoundedIndexedKeyset(t *testing.T) {
 		"missing prefix":  func(query *AtomicReadSnapshotPageQuery) { query.IDPrefix = "" },
 		"wildcard prefix": func(query *AtomicReadSnapshotPageQuery) { query.IDPrefix = "gc-nudge-%" },
 		"missing status":  func(query *AtomicReadSnapshotPageQuery) { query.Status = "" },
+		"missing order":   func(query *AtomicReadSnapshotPageQuery) { query.Order = 0 },
 		"zero limit":      func(query *AtomicReadSnapshotPageQuery) { query.Limit = 0 },
 		"oversized limit": func(query *AtomicReadSnapshotPageQuery) { query.Limit = MaxAtomicReadSnapshotPageSize + 1 },
 		"cursor id without time": func(query *AtomicReadSnapshotPageQuery) {
@@ -50,13 +52,24 @@ func TestAtomicReadSnapshotPageQueryRequiresBoundedIndexedKeyset(t *testing.T) {
 			}
 		})
 	}
+
+	idOrdered := valid
+	idOrdered.Order = AtomicReadSnapshotOrderID
+	idOrdered.After = AtomicReadSnapshotCursor{ID: "gc-nudge-0123"}
+	if err := validateAtomicReadSnapshotPageQuery(idOrdered); err != nil {
+		t.Fatalf("valid id continuation query: %v", err)
+	}
+	idOrdered.After.UpdatedAt = time.Now().UTC()
+	if err := validateAtomicReadSnapshotPageQuery(idOrdered); !errors.Is(err, ErrAtomicReadSnapshotQuery) {
+		t.Fatalf("id-ordered query with updated_at error = %v, want ErrAtomicReadSnapshotQuery", err)
+	}
 }
 
 func TestValidateAtomicReadSnapshotPageRejectsBackendCursorAndSelectorViolations(t *testing.T) {
 	t.Parallel()
 
 	baseTime := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
-	query := AtomicReadSnapshotPageQuery{IDPrefix: "gc-nudge-", Status: "open", Limit: 2}
+	query := AtomicReadSnapshotPageQuery{IDPrefix: "gc-nudge-", Status: "open", Order: AtomicReadSnapshotOrderUpdatedAtID, Limit: 2}
 	valid := AtomicReadSnapshotPage{
 		Rows: []Bead{
 			{ID: "gc-nudge-a", Status: "open", UpdatedAt: baseTime},
@@ -87,6 +100,33 @@ func TestValidateAtomicReadSnapshotPageRejectsBackendCursorAndSelectorViolations
 				t.Fatalf("error = %v, want ErrAtomicReadSnapshotQuery", err)
 			}
 		})
+	}
+}
+
+func TestValidateAtomicReadSnapshotPageUsesStatusIDKeysetWithoutTimestampOrdering(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	query := AtomicReadSnapshotPageQuery{
+		IDPrefix: "gc-nudge-",
+		Status:   "open",
+		Order:    AtomicReadSnapshotOrderID,
+		After:    AtomicReadSnapshotCursor{ID: "gc-nudge-a"},
+		Limit:    2,
+	}
+	page := AtomicReadSnapshotPage{
+		Rows: []Bead{
+			{ID: "gc-nudge-b", Status: "open", UpdatedAt: baseTime.Add(time.Hour)},
+			{ID: "gc-nudge-c", Status: "open", UpdatedAt: baseTime},
+		},
+		Next: AtomicReadSnapshotCursor{ID: "gc-nudge-c"},
+	}
+	if err := validateAtomicReadSnapshotPage(query, page); err != nil {
+		t.Fatalf("valid status/id page: %v", err)
+	}
+	page.Rows[1].ID = "gc-nudge-a0"
+	if err := validateAtomicReadSnapshotPage(query, page); !errors.Is(err, ErrAtomicReadSnapshotQuery) {
+		t.Fatalf("non-advancing status/id page error = %v, want ErrAtomicReadSnapshotQuery", err)
 	}
 }
 

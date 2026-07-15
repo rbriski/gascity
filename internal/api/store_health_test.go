@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -15,76 +17,242 @@ import (
 )
 
 func TestCachedStoreHealthServesMemoized(t *testing.T) {
-	var calls int
-	want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
-	s := &Server{}
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
-		calls++
-		return want
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var calls int
+		want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+			calls++
+			return want
+		}
 
-	now := time.Unix(1_000_000, 0)
-	got := s.cachedStoreHealth(context.Background(), now)
-	if got != want {
-		t.Fatalf("cachedStoreHealth = %+v, want %+v", got, want)
-	}
-	if calls != 1 {
-		t.Fatalf("computer called %d times, want 1", calls)
-	}
+		got := s.cachedStoreHealth(context.Background(), time.Now())
+		if got != want {
+			t.Fatalf("cachedStoreHealth = %+v, want %+v", got, want)
+		}
+		if calls != 1 {
+			t.Fatalf("computer called %d times, want 1", calls)
+		}
 
-	// Within TTL: no recomputation.
-	got2 := s.cachedStoreHealth(context.Background(), now.Add(storeHealthCacheTTL-time.Second))
-	if got2 != want {
-		t.Fatalf("second cachedStoreHealth = %+v, want %+v", got2, want)
-	}
-	if calls != 1 {
-		t.Fatalf("computer called %d times within TTL, want 1", calls)
-	}
+		// Within TTL: no recomputation.
+		<-time.After(storeHealthCacheTTL - time.Second)
+		got2 := s.cachedStoreHealth(context.Background(), time.Now())
+		if got2 != want {
+			t.Fatalf("second cachedStoreHealth = %+v, want %+v", got2, want)
+		}
+		if calls != 1 {
+			t.Fatalf("computer called %d times within TTL, want 1", calls)
+		}
+	})
 }
 
 func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
-	var calls int
-	s := &Server{}
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
-		calls++
-		return &StatusStoreHealth{SizeBytes: int64(calls)}
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var calls int
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+			calls++
+			return &StatusStoreHealth{SizeBytes: int64(calls)}
+		}
 
-	now := time.Unix(1_000_000, 0)
-	_ = s.cachedStoreHealth(context.Background(), now)
-	later := now.Add(storeHealthCacheTTL + time.Second)
-	got := s.cachedStoreHealth(context.Background(), later)
-	if calls != 2 {
-		t.Fatalf("computer calls = %d, want 2", calls)
-	}
-	if got.SizeBytes != 2 {
-		t.Fatalf("refreshed entry SizeBytes = %d, want 2", got.SizeBytes)
-	}
+		_ = s.cachedStoreHealth(context.Background(), time.Now())
+		<-time.After(storeHealthCacheTTL + time.Second)
+		got := s.cachedStoreHealth(context.Background(), time.Now())
+		if calls != 2 {
+			t.Fatalf("computer calls = %d, want 2", calls)
+		}
+		if got.SizeBytes != 2 {
+			t.Fatalf("refreshed entry SizeBytes = %d, want 2", got.SizeBytes)
+		}
+	})
+}
+
+func TestCachedStoreHealthConcurrentColdMissesCoalesce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const callers = 8
+
+		want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
+		releaseCompute := make(chan struct{})
+		results := make(chan *StatusStoreHealth, callers)
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+			calls.Add(1)
+			<-releaseCompute
+			return want
+		}
+
+		for range callers {
+			go func() {
+				results <- s.cachedStoreHealth(context.Background(), time.Now())
+			}()
+		}
+
+		// Every caller is now either the elected computer or waiting for that
+		// same in-flight result. No wall-clock sleep is needed to prove overlap.
+		synctest.Wait()
+		computeCalls := calls.Load()
+
+		close(releaseCompute)
+		synctest.Wait()
+
+		for i := range callers {
+			if got := <-results; got != want {
+				t.Errorf("caller %d got cachedStoreHealth = %p, want shared result %p", i, got, want)
+			}
+		}
+		if computeCalls != 1 {
+			t.Errorf("computer calls while %d cold misses overlapped = %d, want 1", callers, computeCalls)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("final computer calls after %d cold misses completed = %d, want 1", callers, got)
+		}
+	})
+}
+
+func TestCachedStoreHealthConcurrentExpiredMissesCoalesce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const callers = 8
+
+		stale := &StatusStoreHealth{SizeBytes: 1}
+		fresh := &StatusStoreHealth{SizeBytes: 2}
+		releaseRefresh := make(chan struct{})
+		results := make(chan *StatusStoreHealth, callers)
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+			if calls.Add(1) == 1 {
+				return stale
+			}
+			<-releaseRefresh
+			return fresh
+		}
+
+		if got := s.cachedStoreHealth(context.Background(), time.Now()); got != stale {
+			t.Fatalf("primed cachedStoreHealth = %p, want stale entry %p", got, stale)
+		}
+		<-time.After(storeHealthCacheTTL)
+
+		for range callers {
+			go func() {
+				results <- s.cachedStoreHealth(context.Background(), time.Now())
+			}()
+		}
+
+		synctest.Wait()
+		computeCalls := calls.Load()
+
+		close(releaseRefresh)
+		synctest.Wait()
+
+		for i := range callers {
+			if got := <-results; got != fresh {
+				t.Errorf("caller %d got cachedStoreHealth = %p, want refreshed result %p", i, got, fresh)
+			}
+		}
+		if computeCalls != 2 {
+			t.Errorf("computer calls across prime plus %d expired misses = %d, want 2", callers, computeCalls)
+		}
+		if got := calls.Load(); got != 2 {
+			t.Errorf("final computer calls after %d expired misses completed = %d, want 2", callers, got)
+		}
+	})
+}
+
+func TestCachedStoreHealthRefreshSurvivesLeaderCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		want := &StatusStoreHealth{SizeBytes: 123}
+		canceledResult := &StatusStoreHealth{SizeBytes: -1}
+		computeStarted := make(chan struct{})
+		releaseCompute := make(chan struct{})
+		results := make(chan *StatusStoreHealth, 2)
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(ctx context.Context) *StatusStoreHealth {
+			calls.Add(1)
+			close(computeStarted)
+			<-releaseCompute
+			if ctx.Err() != nil {
+				return canceledResult
+			}
+			return want
+		}
+
+		leaderCtx, cancelLeader := context.WithCancel(context.Background())
+		go func() {
+			results <- s.cachedStoreHealth(leaderCtx, time.Now())
+		}()
+		<-computeStarted
+		cancelLeader()
+
+		go func() {
+			results <- s.cachedStoreHealth(context.Background(), time.Now())
+		}()
+		synctest.Wait()
+
+		close(releaseCompute)
+		synctest.Wait()
+
+		for i := range 2 {
+			if got := <-results; got != want {
+				t.Errorf("caller %d got cachedStoreHealth = %p, want request-independent result %p", i, got, want)
+			}
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("computer calls with canceled leader and live waiter = %d, want 1", got)
+		}
+	})
+}
+
+func TestCachedStoreHealthTTLStartsAfterComputeCompletes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+			calls.Add(1)
+			// Advance virtual time past the TTL while the refresh is running.
+			<-time.After(storeHealthCacheTTL + time.Second)
+			return want
+		}
+
+		first := s.cachedStoreHealth(context.Background(), time.Now())
+		second := s.cachedStoreHealth(context.Background(), time.Now())
+
+		if first != want || second != want {
+			t.Fatalf("cached results = (%p, %p), want (%p, %p)", first, second, want, want)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("computer calls across immediate post-compute read = %d, want 1", got)
+		}
+	})
 }
 
 func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
-	s := &Server{}
-	canLockDuringCompute := make(chan bool, 1)
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
-		locked := make(chan struct{})
-		go func() {
-			s.storeHealthMu.Lock()
-			defer s.storeHealthMu.Unlock()
-			close(locked)
-		}()
-		select {
-		case <-locked:
-			canLockDuringCompute <- true
-		case <-time.After(100 * time.Millisecond):
-			canLockDuringCompute <- false
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+			locked := make(chan struct{})
+			go func() {
+				s.storeHealthMu.Lock()
+				defer s.storeHealthMu.Unlock()
+				close(locked)
+			}()
+			synctest.Wait()
+			select {
+			case <-locked:
+			default:
+				t.Error("cachedStoreHealth held storeHealthMu while running the refresh computer")
+			}
+			return &StatusStoreHealth{SizeBytes: 1}
 		}
-		return &StatusStoreHealth{SizeBytes: 1}
-	}
 
-	_ = s.cachedStoreHealth(context.Background(), time.Unix(1_000_000, 0))
-	if !<-canLockDuringCompute {
-		t.Fatal("cachedStoreHealth held storeHealthMu while running the refresh computer")
-	}
+		_ = s.cachedStoreHealth(context.Background(), time.Now())
+	})
 }
 
 func TestStatusStoreHealthFromDomainOmitsEmptyLastGC(t *testing.T) {

@@ -26,8 +26,9 @@ const (
 	// CommandRepositoryWriterVersion identifies the writer protocol that owns
 	// dense command sequence and repository revision allocation.
 	CommandRepositoryWriterVersion uint32 = 1
-	// MaxCommandRepositorySnapshotCommands leaves one AtomicReadWrite list slot
-	// for complete-or-error overflow detection.
+	// MaxCommandRepositorySnapshotCommands is the maximum exact active command
+	// set returned by one reconstruction. Terminal lifetime is represented by a
+	// bounded checkpoint and does not consume this limit.
 	MaxCommandRepositorySnapshotCommands = beads.MaxAtomicReadWriteListLimit - 1
 
 	commandRepositorySchemaVersionMetadataKey     = "gc.control.repository.schema_version"
@@ -61,8 +62,12 @@ var (
 	// refusal from the independently retained lineage verifier.
 	ErrCommandRepositoryLineage = errors.New("durable nudge command repository lineage mismatch")
 	// ErrCommandRepositorySnapshotLimit reports an invalid bound or a command
-	// set too large to return completely under the caller's bound.
+	// active set too large to return completely under the caller's bound.
 	ErrCommandRepositorySnapshotLimit = errors.New("durable nudge command snapshot exceeds its bound")
+	// ErrCommandRepositoryCheckpointRequired reports a terminal tail that must
+	// be incorporated by the explicit checkpoint writer before bounded read-only
+	// reconstruction can proceed.
+	ErrCommandRepositoryCheckpointRequired = errors.New("durable nudge command checkpoint catch-up is required")
 	// ErrCommandRepositoryRecord reports a row that violated the centralized
 	// command bead metadata/wire contract.
 	ErrCommandRepositoryRecord = errors.New("invalid durable nudge command record")
@@ -399,8 +404,9 @@ func (r commandRepositoryReader) get(ctx context.Context, commandID string) (Com
 	}, nil
 }
 
-// Snapshot returns a complete transaction-consistent decoded command set or a
-// typed bound error. It never truncates, skips poison, or fabricates tombstones.
+// Snapshot returns a complete transaction-consistent active command set plus
+// compacted terminal coverage or a typed bound/catch-up error. It never
+// truncates, skips poison, writes a checkpoint, or fabricates tombstones.
 func (r *CommandRepository) Snapshot(ctx context.Context, maxCommands int) (CommandIndexSnapshot, error) {
 	return r.reader.snapshot(ctx, maxCommands)
 }
@@ -417,7 +423,7 @@ func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) 
 		return CommandIndexSnapshot{}, err
 	}
 	var snapshot CommandIndexSnapshot
-	err = atomicCommandRepositoryRead(ctx, r.store, "gc: snapshot durable nudge commands", func(tx commandRepositoryReadTx) error {
+	err = r.snapshots.AtomicReadSnapshot(ctx, func(tx beads.AtomicReadSnapshotTx) error {
 		state, err := readCommandRepositoryState(tx)
 		if err != nil {
 			return err
@@ -425,28 +431,76 @@ func (r commandRepositoryReader) snapshot(ctx context.Context, maxCommands int) 
 		if err := validateCommandRepositoryStateAdvance(before, state); err != nil {
 			return err
 		}
-		rows, err := tx.ListHistory(commandRecordListQuery(maxCommands + 1))
+		checkpoint, found, err := readCommandRepositoryCheckpointFromSnapshot(tx, state)
 		if err != nil {
-			return fmt.Errorf("listing durable nudge command snapshot: %w", err)
+			return err
 		}
-		if len(rows) > maxCommands {
-			return fmt.Errorf("snapshot contains more than %d commands: %w", maxCommands, ErrCommandRepositorySnapshotLimit)
+		tailQuery := beads.AtomicReadSnapshotPageQuery{
+			IDPrefix: commandIDPrefix,
+			Status:   "closed",
+			Order:    beads.AtomicReadSnapshotOrderUpdatedAtID,
+			Limit:    1,
 		}
-		entries := make([]CommandIndexEntry, 0, len(rows))
-		for _, row := range rows {
+		if found {
+			tailQuery.After = beads.AtomicReadSnapshotCursor{UpdatedAt: checkpoint.TerminalCursor.UpdatedAt, ID: checkpoint.TerminalCursor.ID}
+		}
+		tail, err := tx.ListHistoryPage(tailQuery)
+		if err != nil {
+			return fmt.Errorf("checking durable nudge command terminal tail: %w", err)
+		}
+		if len(tail.Rows) != 0 {
+			return fmt.Errorf("terminal command %q follows the published checkpoint: %w", tail.Rows[0].ID, ErrCommandRepositoryCheckpointRequired)
+		}
+
+		entries := make([]CommandIndexEntry, 0, min(maxCommands, beads.MaxAtomicReadSnapshotPageSize))
+		query := beads.AtomicReadSnapshotPageQuery{
+			IDPrefix: commandIDPrefix,
+			Status:   "open",
+			Order:    beads.AtomicReadSnapshotOrderID,
+		}
+		for {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			entry, _, err := decodeCommandRecord(row, state)
+			remainingWithOverflowProbe := maxCommands - len(entries) + 1
+			query.Limit = min(beads.MaxAtomicReadSnapshotPageSize, remainingWithOverflowProbe)
+			page, err := tx.ListHistoryPage(query)
 			if err != nil {
-				return err
+				return fmt.Errorf("listing active durable nudge command snapshot: %w", err)
 			}
-			entries = append(entries, entry)
+			for _, row := range page.Rows {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				entry, _, err := decodeCommandRecord(row, state)
+				if err != nil {
+					return err
+				}
+				entries = append(entries, entry)
+				if len(entries) > maxCommands {
+					return fmt.Errorf("snapshot contains more than %d active commands: %w", maxCommands, ErrCommandRepositorySnapshotLimit)
+				}
+			}
+			if page.Next == (beads.AtomicReadSnapshotCursor{}) {
+				break
+			}
+			query.After = page.Next
+		}
+		var coverage *CommandIndexCompactedCoverage
+		if found {
+			coverage = &CommandIndexCompactedCoverage{
+				PublishedRevision: checkpoint.PublishedRevision,
+				Ranges:            append([]CommandIndexSequenceRange(nil), checkpoint.Ranges...),
+				TerminalCount:     checkpoint.TerminalCount,
+				TombstoneCount:    checkpoint.TombstoneCount,
+				FingerprintSHA256: checkpoint.FingerprintSHA256,
+			}
 		}
 		snapshot = CommandIndexSnapshot{
 			Store:             state.Store,
 			Entries:           entries,
 			Tombstones:        make([]CommandIndexTombstone, 0),
+			Coverage:          coverage,
 			Revision:          state.Revision,
 			SequenceHighWater: state.SequenceHighWater,
 		}

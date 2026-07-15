@@ -656,7 +656,7 @@ func TestCommandRepositorySnapshotHonorsCancellationDuringDecode(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	store.mu.Lock()
-	store.afterList = cancel
+	store.afterSnapshotPage = cancel
 	store.mu.Unlock()
 	if _, err := repo.Snapshot(ctx, 2); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Snapshot cancellation error = %v, want context.Canceled", err)
@@ -1157,6 +1157,7 @@ type repositoryAtomicTestStore struct {
 	prepareCalls        int
 	prepareErr          error
 	snapshotPageLimits  []int
+	snapshotPageQueries []beads.AtomicReadSnapshotPageQuery
 	afterSnapshotPage   func()
 }
 
@@ -1179,12 +1180,16 @@ func (s *repositoryAtomicTestStore) AtomicReadSnapshot(ctx context.Context, fn f
 	}
 	s.mu.Lock()
 	tx := &repositoryAtomicTestTx{
-		rows:     cloneRepositoryRows(s.rows),
-		metadata: cloneRepositoryMetadata(s.metadata),
+		// AtomicReadWrite replaces both maps at commit, so retaining these map
+		// generations models a stable MVCC snapshot without copying lifetime
+		// history into test-process memory.
+		rows:     s.rows,
+		metadata: s.metadata,
 		now:      s.nextClock,
 		onSnapshotPage: func(query beads.AtomicReadSnapshotPageQuery) {
 			s.mu.Lock()
 			s.snapshotPageLimits = append(s.snapshotPageLimits, query.Limit)
+			s.snapshotPageQueries = append(s.snapshotPageQueries, query)
 			after := s.afterSnapshotPage
 			s.afterSnapshotPage = nil
 			s.mu.Unlock()
@@ -1481,6 +1486,12 @@ func (s *repositoryAtomicTestStore) snapshotPageLimitsForTest() []int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]int(nil), s.snapshotPageLimits...)
+}
+
+func (s *repositoryAtomicTestStore) snapshotPageQueriesForTest() []beads.AtomicReadSnapshotPageQuery {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]beads.AtomicReadSnapshotPageQuery(nil), s.snapshotPageQueries...)
 }
 
 func (tx *repositoryAtomicTestTx) Create(row beads.Bead) (beads.Bead, error) {

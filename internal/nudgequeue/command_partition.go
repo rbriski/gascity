@@ -20,6 +20,11 @@ const (
 // trusted city partition owns a command before exposing it to an index.
 var ErrCommandRepositoryPartition = errors.New("durable nudge command city partition is unverified")
 
+// ErrCommandProvenanceRejected reports an independently finalized,
+// partitionless rejection decision. It is definitive denial, not an authority
+// outage or missing-membership retry.
+var ErrCommandProvenanceRejected = errors.New("durable nudge command provenance was rejected")
+
 // ErrCommandPartitionTerminalIntent reports missing, conflicting, or
 // unavailable authority-owned intent for a terminal store transition. A
 // terminal command row alone is never sufficient to publish membership.
@@ -70,14 +75,15 @@ type CommandPartitionCoverageEntry struct {
 
 // CommandPartitionCoverage is the independently retained, complete active set
 // for one partition. Every snapshot identity field must exactly echo the
-// request. AdmittedCount proves the authority journal is dense through the
+// request. DecidedCount proves the authority journal has admitted or rejected
+// every sequence through the
 // repository sequence high-water; ActiveEntries is the complete partition set
 // ordered by sequence.
 type CommandPartitionCoverage struct {
 	Store              CommandStoreBinding
 	RepositoryRevision uint64
 	SequenceHighWater  uint64
-	AdmittedCount      uint64
+	DecidedCount       uint64
 	Partition          TrustedCityPartition
 	ActiveEntries      []CommandPartitionCoverageEntry
 }
@@ -87,6 +93,7 @@ type CommandPartitionCoverage struct {
 type CommandPartitionMembershipRequest struct {
 	Store              CommandStoreBinding
 	RepositoryRevision uint64
+	SequenceHighWater  uint64
 	CommandID          string
 	Partition          TrustedCityPartition
 }
@@ -97,10 +104,12 @@ type CommandPartitionMembershipRequest struct {
 type CommandPartitionMembership struct {
 	Store              CommandStoreBinding
 	RepositoryRevision uint64
+	SequenceHighWater  uint64
 	CommandID          string
 	Partition          TrustedCityPartition
 	Found              bool
 	Active             bool
+	Rejected           bool
 	Sequence           uint64
 }
 
@@ -165,12 +174,17 @@ type CommandPartitionTerminalResolution struct {
 // TrustedCommandPartitionTerminalIntentAuthority durably prepares and later
 // verifies exact terminal-transition intent independently of the command
 // store. Prepare is idempotent for one exact intent and must reject a competing
-// unresolved intent for the same command. Abort removes only the exact intent
-// after the caller has proved the store transaction rolled back. Verify accepts
-// only an exact prepared or exact already-finalized digest and never derives
-// authority from a terminal row.
+// unresolved intent for the same command. Every successful Prepare acquires one
+// in-process writer ownership. A successful terminal result retains ownership
+// through RecordCommandPartitionTerminal; any path that will not publish must
+// Release after its store call returns. Release never changes durable
+// preparation evidence. Abort removes only the exact intent after the caller
+// has proved the store transaction rolled back. Verify accepts only an exact
+// prepared or exact already-finalized digest and never derives authority from
+// a terminal row.
 type TrustedCommandPartitionTerminalIntentAuthority interface {
 	PrepareCommandPartitionTerminal(context.Context, CommandPartitionTerminalIntent) error
+	ReleaseCommandPartitionTerminalWriter(context.Context, CommandPartitionTerminalIntent) error
 	AbortCommandPartitionTerminal(context.Context, CommandPartitionTerminalIntent) error
 	VerifyCommandPartitionTerminal(context.Context, CommandPartitionTerminalResolution) error
 }
@@ -181,22 +195,6 @@ type TrustedCommandPartitionTerminalIntentAuthority interface {
 type CommandPartitionRecoveryReader interface {
 	State(context.Context) (CommandRepositoryState, error)
 	Get(context.Context, string) (CommandIndexResolution, error)
-}
-
-// TrustedCommandPartitionAdmissionRecovery resolves durable ingress grants
-// whose command create committed before admission membership was published.
-// Missing commands remain harmless prepared grants; any present command must
-// match the exact authority grant and pristine pending state.
-type TrustedCommandPartitionAdmissionRecovery interface {
-	RepairCommandPartitionAdmissions(context.Context, CommandPartitionRecoveryReader) error
-}
-
-// TrustedCommandPartitionTerminalRecovery resolves every outstanding terminal
-// preparation against exact store bytes during startup. Implementations may
-// finalize an exact prepared after-state or abort an exact before-state only at
-// its unchanged repository revision; all other states must fail closed.
-type TrustedCommandPartitionTerminalRecovery interface {
-	RepairCommandPartitionTerminals(context.Context, CommandPartitionRecoveryReader) error
 }
 
 func terminalResolutionForCommand(command Command, partition TrustedCityPartition) (CommandPartitionTerminalResolution, error) {
@@ -280,6 +278,16 @@ func abortCommandPartitionTerminal(ctx context.Context, authority TrustedCommand
 	}
 	if err := authority.AbortCommandPartitionTerminal(ctx, intent); err != nil {
 		return fmt.Errorf("%w: aborting rolled-back terminal transition: %w", ErrCommandPartitionTerminalIntent, err)
+	}
+	return nil
+}
+
+func releaseCommandPartitionTerminalWriter(ctx context.Context, authority TrustedCommandPartitionTerminalIntentAuthority, intent CommandPartitionTerminalIntent) error {
+	if isNilRepositoryDependency(authority) {
+		return fmt.Errorf("%w: terminal intent authority is required", ErrCommandPartitionTerminalIntent)
+	}
+	if err := authority.ReleaseCommandPartitionTerminalWriter(ctx, intent); err != nil {
+		return fmt.Errorf("%w: releasing terminal writer ownership: %w", ErrCommandPartitionTerminalIntent, err)
 	}
 	return nil
 }
@@ -472,7 +480,7 @@ func validateCommandPartitionCoverage(request CommandPartitionCoverageRequest, c
 		return fmt.Errorf("trusted coverage command bound %d is outside 1..%d: %w", request.MaxCommands, MaxCommandRepositorySnapshotCommands, ErrCommandRepositorySnapshotLimit)
 	}
 	if coverage.Store != request.Store || coverage.RepositoryRevision != request.RepositoryRevision ||
-		coverage.SequenceHighWater != request.SequenceHighWater || coverage.AdmittedCount != request.SequenceHighWater ||
+		coverage.SequenceHighWater != request.SequenceHighWater || coverage.DecidedCount != request.SequenceHighWater ||
 		coverage.Partition != request.Partition {
 		return errors.New("trusted coverage is not bound to the exact repository snapshot")
 	}
@@ -516,7 +524,7 @@ func (r *CommandPartitionReader) Get(ctx context.Context, commandID string) (Com
 		return CommandIndexResolution{}, err
 	}
 	trusted, err := r.coverage.ResolveCommandPartitionMembership(ctx, CommandPartitionMembershipRequest{
-		Store: resolution.Store, RepositoryRevision: resolution.Revision,
+		Store: resolution.Store, RepositoryRevision: resolution.Revision, SequenceHighWater: resolution.SequenceHighWater,
 		CommandID: commandID, Partition: r.partition,
 	})
 	if err != nil {
@@ -529,15 +537,18 @@ func (r *CommandPartitionReader) Get(ctx context.Context, commandID string) (Com
 }
 
 func validateCommandPartitionMembership(resolution CommandIndexResolution, commandID string, partition TrustedCityPartition, trusted CommandPartitionMembership) error {
-	if trusted.Store != resolution.Store || trusted.RepositoryRevision != resolution.Revision ||
+	if trusted.Store != resolution.Store || trusted.RepositoryRevision != resolution.Revision || trusted.SequenceHighWater != resolution.SequenceHighWater ||
 		trusted.CommandID != commandID || trusted.Partition != partition {
 		return errors.New("trusted membership is not bound to the exact command read")
 	}
 	if !trusted.Found {
-		if trusted.Active || trusted.Sequence != 0 || resolution.Found {
+		if trusted.Active || trusted.Rejected || trusted.Sequence != 0 || resolution.Found {
 			return errors.New("repository command exists without trusted partition membership")
 		}
 		return nil
+	}
+	if trusted.Rejected {
+		return ErrCommandProvenanceRejected
 	}
 	if !resolution.Found || trusted.Sequence == 0 {
 		return errors.New("authority-owned command is absent from the repository read")

@@ -25,8 +25,11 @@ import (
 )
 
 const (
+	// The v1 filename is the physical lock-path generation, not the SQL schema
+	// version. Keeping it stable makes old and new binaries contend on one
+	// lifetime lock instead of silently opening split authority journals.
 	localNudgeAuthorityFileName = "local-authority-v1.sqlite"
-	localNudgeAuthoritySchema   = 1
+	localNudgeAuthoritySchema   = 3
 	// LocalNudgeAuthorityProfileStoreWriterIsController is the sole security
 	// profile supported by the local single-controller authority journal.
 	LocalNudgeAuthorityProfileStoreWriterIsController = string(CommandSecurityProfileStoreWriterIsController)
@@ -80,17 +83,22 @@ type LocalNudgeAuthorityOptions struct {
 // It holds an exclusive lock for its lifetime; hosted/multi-controller use is
 // intentionally unsupported.
 type LocalNudgeAuthority struct {
-	mu       sync.RWMutex
-	db       *sql.DB
-	lock     *os.File
-	lockInfo os.FileInfo
-	identity *os.File
-	path     string
-	fileInfo os.FileInfo
-	store    CommandStoreBinding
-	opts     LocalNudgeAuthorityOptions
-	closed   bool
-	closeErr error
+	mu                  sync.RWMutex
+	terminalOwnershipMu sync.Mutex
+	terminalOwners      map[string]localAuthorityTerminalOwner
+	claimOwnershipMu    sync.Mutex
+	claimOwners         map[string]localAuthorityClaimOwner
+	db                  *sql.DB
+	lock                *os.File
+	lockInfo            os.FileInfo
+	identity            *os.File
+	path                string
+	fileInfo            os.FileInfo
+	store               CommandStoreBinding
+	opts                LocalNudgeAuthorityOptions
+	now                 func() time.Time
+	closed              bool
+	closeErr            error
 }
 
 // LocalNudgeAuthorityPath returns the canonical independent authority database
@@ -181,7 +189,7 @@ func OpenLocalNudgeAuthority(ctx context.Context, cityPath string, state Command
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	authority := &LocalNudgeAuthority{db: db, lock: lock, lockInfo: lockInfo, identity: identity, path: path, fileInfo: info, store: state.Store, opts: opts}
+	authority := &LocalNudgeAuthority{db: db, lock: lock, lockInfo: lockInfo, identity: identity, path: path, fileInfo: info, store: state.Store, opts: opts, now: time.Now}
 	defer func() {
 		if err != nil {
 			_ = db.Close()
@@ -355,15 +363,17 @@ func (a *LocalNudgeAuthority) initializeSchema(ctx context.Context, state Comman
 			return fmt.Errorf("initializing local nudge authority schema: %w", err)
 		}
 	}
+	initialClaimAudit := localAuthorityClaimAuditCursor{phase: localAuthorityClaimAuditIdle}
+	initialClaimAuditDigest := localAuthorityClaimAuditCursorDigest(initialClaimAudit, a.store, a.opts.AuthorityID)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO authority_meta (
 		singleton, schema_version, profile, store_uuid, restore_epoch, authority_id, issuer,
-		tenant_scope, city_scope, credential_class, policy_version, principal_schema, dense_admission_high_water,
-		highest_observed_sequence, highest_observed_revision
-	) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		tenant_scope, city_scope, credential_class, policy_version, principal_schema, dense_decision_high_water,
+		highest_observed_sequence, highest_observed_revision, claim_transition_generation, claim_audit_checkpoint_digest
+	) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		localNudgeAuthoritySchema, a.opts.Profile, state.Store.StoreUUID, encodeLocalAuthorityUint64(state.Store.RestoreEpoch),
 		a.opts.AuthorityID, a.opts.Issuer, a.opts.TenantScope, a.opts.CityScope, a.opts.CredentialClass,
 		a.opts.PolicyVersion, NudgePrincipalSchemaVersion, encodeLocalAuthorityUint64(0),
-		encodeLocalAuthorityUint64(0), encodeLocalAuthorityUint64(0)); err != nil {
+		encodeLocalAuthorityUint64(0), encodeLocalAuthorityUint64(0), encodeLocalAuthorityUint64(0), initialClaimAuditDigest[:]); err != nil {
 		return fmt.Errorf("initializing local nudge authority metadata: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -385,49 +395,119 @@ var localNudgeAuthoritySchemaStatements = []localNudgeAuthoritySchemaStatement{
 		profile TEXT NOT NULL, store_uuid TEXT NOT NULL, restore_epoch BLOB NOT NULL CHECK (length(restore_epoch) = 8),
 		authority_id TEXT NOT NULL, issuer TEXT NOT NULL, tenant_scope TEXT NOT NULL, city_scope TEXT NOT NULL,
 		credential_class TEXT NOT NULL, policy_version TEXT NOT NULL, principal_schema INTEGER NOT NULL,
-		dense_admission_high_water BLOB NOT NULL CHECK (length(dense_admission_high_water) = 8),
+		dense_decision_high_water BLOB NOT NULL CHECK (length(dense_decision_high_water) = 8),
 		highest_observed_sequence BLOB NOT NULL CHECK (length(highest_observed_sequence) = 8),
-		highest_observed_revision BLOB NOT NULL CHECK (length(highest_observed_revision) = 8)
+		highest_observed_revision BLOB NOT NULL CHECK (length(highest_observed_revision) = 8),
+		claim_transition_generation BLOB NOT NULL CHECK (length(claim_transition_generation) = 8),
+		claim_preparation_count BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_preparation_count) = 8),
+		claim_receipt_count BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_receipt_count) = 8),
+		claim_audit_generation BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_audit_generation) = 8),
+		claim_audit_repository_revision BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_audit_repository_revision) = 8),
+		claim_audit_sequence_high_water BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_audit_sequence_high_water) = 8),
+		claim_audit_phase TEXT NOT NULL DEFAULT 'idle' CHECK (claim_audit_phase IN ('idle', 'preparations', 'receipts', 'active', 'done')),
+		claim_audit_after_command_id TEXT NOT NULL DEFAULT '',
+		claim_audit_after_sequence BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_audit_after_sequence) = 8),
+		claim_audit_identity BLOB NOT NULL DEFAULT (zeroblob(32)) CHECK (length(claim_audit_identity) = 32),
+		claim_audit_preparation_count BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_audit_preparation_count) = 8),
+		claim_audit_receipt_count BLOB NOT NULL DEFAULT (x'0000000000000000') CHECK (length(claim_audit_receipt_count) = 8),
+		claim_audit_checkpoint_digest BLOB NOT NULL CHECK (length(claim_audit_checkpoint_digest) = 32)
 	)`},
 	{objectType: "table", name: "ingress_grants", tableName: "ingress_grants", sql: `CREATE TABLE ingress_grants (
 		reference_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),
 		command_id TEXT NOT NULL UNIQUE, principal_schema INTEGER NOT NULL, issuer TEXT NOT NULL, principal_id TEXT NOT NULL,
 		tenant_scope TEXT NOT NULL, city_scope TEXT NOT NULL, credential_class TEXT NOT NULL, policy_version TEXT NOT NULL,
 		policy_decision_id TEXT NOT NULL, action TEXT NOT NULL, target_session_id TEXT NOT NULL,
-		payload_digest TEXT NOT NULL, command_created_at TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL
+		payload_digest TEXT NOT NULL, command_created_at TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+		UNIQUE (command_id, reference_id)
 	)`},
 	{objectType: "table", name: "admission_preparations", tableName: "admission_preparations", sql: `CREATE TABLE admission_preparations (
 		command_id TEXT PRIMARY KEY REFERENCES ingress_grants(command_id)
 	)`},
-	{objectType: "table", name: "memberships", tableName: "memberships", sql: `CREATE TABLE memberships (
-		command_id TEXT PRIMARY KEY REFERENCES ingress_grants(command_id), sequence BLOB NOT NULL UNIQUE CHECK (length(sequence) = 8),
-		admission_revision BLOB NOT NULL CHECK (length(admission_revision) = 8), partition_id BLOB NOT NULL CHECK (length(partition_id) = 32),
+	{objectType: "table", name: "admission_decisions", tableName: "admission_decisions", sql: `CREATE TABLE admission_decisions (
+		sequence BLOB PRIMARY KEY NOT NULL CHECK (length(sequence) = 8), command_id TEXT NOT NULL UNIQUE,
+		decision_kind TEXT NOT NULL CHECK (decision_kind IN ('admitted', 'rejected')),
+		allocation_revision BLOB NOT NULL CHECK (length(allocation_revision) = 8),
+		decision_revision BLOB NOT NULL CHECK (length(decision_revision) = 8),
+		grant_command_id TEXT, grant_reference_id TEXT, partition_id BLOB CHECK (partition_id IS NULL OR length(partition_id) = 32),
+		origin_digest BLOB CHECK (origin_digest IS NULL OR length(origin_digest) = 32),
+		identity_digest BLOB CHECK (identity_digest IS NULL OR length(identity_digest) = 32),
 		terminal_revision BLOB CHECK (terminal_revision IS NULL OR length(terminal_revision) = 8),
 		terminal_digest BLOB CHECK (terminal_digest IS NULL OR length(terminal_digest) = 32),
-		CHECK ((terminal_revision IS NULL) = (terminal_digest IS NULL))
+		rejection_reason TEXT,
+		CHECK ((terminal_revision IS NULL) = (terminal_digest IS NULL)),
+		CHECK (
+			(decision_kind = 'admitted' AND grant_command_id = command_id AND grant_reference_id IS NOT NULL AND
+			 partition_id IS NOT NULL AND origin_digest IS NULL AND identity_digest IS NULL AND rejection_reason IS NULL AND
+			 allocation_revision = decision_revision) OR
+			(decision_kind = 'rejected' AND grant_command_id IS NULL AND grant_reference_id IS NULL AND
+			 partition_id IS NULL AND origin_digest IS NOT NULL AND identity_digest IS NOT NULL AND
+			 rejection_reason = 'unauthorized_provenance' AND terminal_revision IS NOT NULL AND
+			 terminal_digest IS NOT NULL AND decision_revision = terminal_revision)
+		),
+		UNIQUE (command_id, decision_kind),
+		FOREIGN KEY (grant_command_id, grant_reference_id) REFERENCES ingress_grants(command_id, reference_id)
 	)`},
 	{objectType: "table", name: "terminal_preparations", tableName: "terminal_preparations", sql: `CREATE TABLE terminal_preparations (
-		command_id TEXT PRIMARY KEY REFERENCES memberships(command_id), repository_before_revision BLOB NOT NULL CHECK (length(repository_before_revision) = 8),
+		command_id TEXT PRIMARY KEY, decision_kind TEXT NOT NULL DEFAULT 'admitted' CHECK (decision_kind = 'admitted'),
+		repository_before_revision BLOB NOT NULL CHECK (length(repository_before_revision) = 8),
 		before_digest BLOB NOT NULL CHECK (length(before_digest) = 32), terminal_revision BLOB NOT NULL CHECK (length(terminal_revision) = 8),
-		terminal_digest BLOB NOT NULL CHECK (length(terminal_digest) = 32)
+		terminal_digest BLOB NOT NULL CHECK (length(terminal_digest) = 32),
+			FOREIGN KEY (command_id, decision_kind) REFERENCES admission_decisions(command_id, decision_kind)
+		)`},
+	{objectType: "table", name: "claim_preparations", tableName: "claim_preparations", sql: `CREATE TABLE claim_preparations (
+			command_id TEXT PRIMARY KEY, decision_kind TEXT NOT NULL DEFAULT 'admitted' CHECK (decision_kind = 'admitted'),
+			sequence BLOB NOT NULL CHECK (length(sequence) = 8), partition_id BLOB NOT NULL CHECK (length(partition_id) = 32),
+			repository_before_revision BLOB NOT NULL CHECK (length(repository_before_revision) = 8),
+			claim_revision BLOB NOT NULL CHECK (length(claim_revision) = 8),
+			sequence_high_water BLOB NOT NULL CHECK (length(sequence_high_water) = 8),
+			before_digest BLOB NOT NULL CHECK (length(before_digest) = 32),
+			after_digest BLOB NOT NULL CHECK (length(after_digest) = 32),
+			claim_id TEXT NOT NULL, owner_id TEXT NOT NULL, operation_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+			bound_launch_identity TEXT NOT NULL, authorization_decision_id TEXT NOT NULL, authorization_policy_version TEXT NOT NULL,
+			claimed_at TEXT NOT NULL, lease_until TEXT NOT NULL,
+			FOREIGN KEY (command_id, decision_kind) REFERENCES admission_decisions(command_id, decision_kind)
+		)`},
+	{objectType: "table", name: "claim_receipts", tableName: "claim_receipts", sql: `CREATE TABLE claim_receipts (
+			command_id TEXT PRIMARY KEY, decision_kind TEXT NOT NULL DEFAULT 'admitted' CHECK (decision_kind = 'admitted'),
+			sequence BLOB NOT NULL CHECK (length(sequence) = 8), partition_id BLOB NOT NULL CHECK (length(partition_id) = 32),
+			repository_before_revision BLOB NOT NULL CHECK (length(repository_before_revision) = 8),
+			claim_revision BLOB NOT NULL CHECK (length(claim_revision) = 8),
+			sequence_high_water BLOB NOT NULL CHECK (length(sequence_high_water) = 8),
+			before_digest BLOB NOT NULL CHECK (length(before_digest) = 32),
+			after_digest BLOB NOT NULL CHECK (length(after_digest) = 32),
+			claim_id TEXT NOT NULL, owner_id TEXT NOT NULL, operation_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+			bound_launch_identity TEXT NOT NULL, authorization_decision_id TEXT NOT NULL, authorization_policy_version TEXT NOT NULL,
+			claimed_at TEXT NOT NULL, lease_until TEXT NOT NULL,
+			effect_revision BLOB NOT NULL CHECK (length(effect_revision) = 8),
+			effect_sequence_high_water BLOB NOT NULL CHECK (length(effect_sequence_high_water) = 8),
+			FOREIGN KEY (command_id, decision_kind) REFERENCES admission_decisions(command_id, decision_kind)
+		)`},
+	{objectType: "table", name: "rejection_preparations", tableName: "rejection_preparations", sql: `CREATE TABLE rejection_preparations (
+		sequence BLOB PRIMARY KEY NOT NULL CHECK (length(sequence) = 8), command_id TEXT NOT NULL UNIQUE,
+		allocation_revision BLOB NOT NULL CHECK (length(allocation_revision) = 8),
+		before_command_revision BLOB NOT NULL CHECK (length(before_command_revision) = 8),
+		identity_digest BLOB NOT NULL CHECK (length(identity_digest) = 32),
+		before_digest BLOB NOT NULL CHECK (length(before_digest) = 32),
+		rejected_at TEXT NOT NULL, reason TEXT NOT NULL CHECK (reason = 'unauthorized_provenance')
 	)`},
-	{objectType: "index", name: "memberships_partition_active", tableName: "memberships", sql: `CREATE INDEX memberships_partition_active ON memberships(partition_id, sequence, admission_revision) WHERE terminal_revision IS NULL`},
-	{objectType: "index", name: "memberships_partition_terminal", tableName: "memberships", sql: `CREATE INDEX memberships_partition_terminal ON memberships(partition_id, terminal_revision, sequence) WHERE terminal_revision IS NOT NULL`},
+	{objectType: "index", name: "admission_decisions_partition_active", tableName: "admission_decisions", sql: `CREATE INDEX admission_decisions_partition_active ON admission_decisions(partition_id, sequence, decision_revision) WHERE decision_kind = 'admitted' AND terminal_revision IS NULL`},
+	{objectType: "index", name: "admission_decisions_active_sequence", tableName: "admission_decisions", sql: `CREATE INDEX admission_decisions_active_sequence ON admission_decisions(sequence) WHERE decision_kind = 'admitted' AND terminal_revision IS NULL`},
+	{objectType: "index", name: "admission_decisions_partition_terminal", tableName: "admission_decisions", sql: `CREATE INDEX admission_decisions_partition_terminal ON admission_decisions(partition_id, terminal_revision, sequence) WHERE decision_kind = 'admitted' AND terminal_revision IS NOT NULL`},
 }
 
 func (a *LocalNudgeAuthority) validateMetadata(ctx context.Context, state CommandRepositoryState) error {
 	var (
 		schema, principalSchema                                                                         int
 		profile, storeUUID, authorityID, issuer, tenantScope, cityScope, credentialClass, policyVersion string
-		restoreEpoch, dense, highestSequenceWire, highestRevisionWire                                   []byte
+		restoreEpoch, dense, highestSequenceWire, highestRevisionWire, claimGenerationWire              []byte
 	)
 	err := a.db.QueryRowContext(ctx, `SELECT schema_version, profile, store_uuid, restore_epoch, authority_id, issuer,
-		tenant_scope, city_scope, credential_class, policy_version, principal_schema, dense_admission_high_water,
-		highest_observed_sequence, highest_observed_revision
+		tenant_scope, city_scope, credential_class, policy_version, principal_schema, dense_decision_high_water,
+		highest_observed_sequence, highest_observed_revision, claim_transition_generation
 		FROM authority_meta WHERE singleton = 1`).Scan(
 		&schema, &profile, &storeUUID, &restoreEpoch, &authorityID, &issuer,
 		&tenantScope, &cityScope, &credentialClass, &policyVersion, &principalSchema, &dense,
-		&highestSequenceWire, &highestRevisionWire,
+		&highestSequenceWire, &highestRevisionWire, &claimGenerationWire,
 	)
 	if err != nil {
 		return fmt.Errorf("%w: reading authority metadata: %w", ErrLocalNudgeAuthorityConflict, err)
@@ -448,12 +528,18 @@ func (a *LocalNudgeAuthority) validateMetadata(ctx context.Context, state Comman
 	if err != nil {
 		return err
 	}
+	if _, err := decodeLocalAuthorityUint64(claimGenerationWire); err != nil {
+		return err
+	}
 	principalSchemaSupported := principalSchema == int(NudgePrincipalSchemaVersion) || principalSchema == int(NudgePrincipalSchemaVersion-1)
 	if schema != localNudgeAuthoritySchema || profile != a.opts.Profile || storeUUID != state.Store.StoreUUID || epoch != state.Store.RestoreEpoch ||
 		authorityID != a.opts.AuthorityID || issuer != a.opts.Issuer || tenantScope != a.opts.TenantScope || cityScope != a.opts.CityScope ||
 		credentialClass != a.opts.CredentialClass || policyVersion != a.opts.PolicyVersion || !principalSchemaSupported ||
 		denseHighWater > highestSequence || highestSequence > state.SequenceHighWater || highestRevision > state.Revision {
 		return fmt.Errorf("%w: authority metadata differs from configured repository lineage", ErrLocalNudgeAuthorityConflict)
+	}
+	if err := a.validateClaimAuditMetadata(ctx, state); err != nil {
+		return err
 	}
 	if principalSchema != int(NudgePrincipalSchemaVersion) || highestSequence != state.SequenceHighWater || highestRevision != state.Revision {
 		if _, err := a.db.ExecContext(ctx, `UPDATE authority_meta SET principal_schema = ?, highest_observed_sequence = ?, highest_observed_revision = ? WHERE singleton = 1`,
@@ -864,6 +950,16 @@ func ensureLocalNudgeAdmissionPreparation(ctx context.Context, queryer localNudg
 	}
 	if !found || grant.fingerprint != fingerprint || grant.commandID != commandID {
 		return localNudgeAuthorityRequestConflict()
+	}
+	if _, rejected, err := localAuthorityRejectionDecisionByCommand(ctx, queryer, commandID); err != nil {
+		return err
+	} else if rejected {
+		return fmt.Errorf("%w: command has a finalized provenance rejection", ErrLocalNudgeAuthorityConflict)
+	}
+	if rejecting, err := localAuthorityRejectionPreparationExists(ctx, queryer, commandID); err != nil {
+		return err
+	} else if rejecting {
+		return fmt.Errorf("%w: command has a provenance rejection preparation", ErrLocalNudgeAuthorityConflict)
 	}
 	membership, admitted, err := localAuthorityMembershipByCommand(ctx, queryer, commandID)
 	if err != nil {

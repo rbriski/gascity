@@ -328,8 +328,8 @@ func TestClaimAuthorizedCommitResponseLossAndDuplicateRetryConverge(t *testing.T
 		t.Fatalf("ClaimAuthorized lost response = %#v, err=%v", first, err)
 	}
 	second, err := fixture.repository.ClaimAuthorized(t.Context(), request, fixture.authority, fixture.authority)
-	if err != nil || second.Disposition != CommandClaimAllowed || !reflect.DeepEqual(second.Command, first.Command) {
-		t.Fatalf("ClaimAuthorized duplicate = %#v, err=%v; want %#v", second, err, first)
+	if err != nil || second.Disposition != CommandClaimEntryUnknown || !reflect.DeepEqual(second.Command, first.Command) {
+		t.Fatalf("ClaimAuthorized duplicate = %#v, err=%v; want entry unknown with %#v", second, err, first.Command)
 	}
 	if second.Command.Retry == nil || second.Command.Retry.AttemptCount != 1 {
 		t.Fatalf("duplicate attempt evidence = %#v, want one attempt", second.Command.Retry)

@@ -22,9 +22,10 @@ var ErrCommandClaimInvalid = errors.New("invalid durable nudge command claim")
 type CommandClaimDisposition string
 
 const (
-	// CommandClaimAllowed returns the authoritative in-flight command whose
-	// exact durable Claim+Retry is permission to proceed to the separate
-	// provider-entry gate, not proof that provider entry occurred.
+	// CommandClaimAllowed returns the authoritative in-flight command only when
+	// this call also finalized its independent authority receipt. That receipt,
+	// not the command-store Claim+Retry by itself, is permission to enter the
+	// provider once; it is not proof that provider entry occurred.
 	CommandClaimAllowed CommandClaimDisposition = "allowed"
 	// CommandClaimDenied returns a durable terminal command with proof that no
 	// provider was entered by this claim.
@@ -37,6 +38,11 @@ const (
 	// in-flight claim stays busy after lease expiry unless durable evidence
 	// proves that its provider attempt definitely did not enter.
 	CommandClaimBusy CommandClaimDisposition = "busy"
+	// CommandClaimEntryUnknown returns the exact authoritative in-flight command
+	// when its claim receipt was already finalized by an earlier call. The
+	// earlier caller may have entered the provider, so this disposition forbids
+	// provider re-entry and must be terminalized as delivery-unknown.
+	CommandClaimEntryUnknown CommandClaimDisposition = "entry_unknown"
 )
 
 // CommandClaimRequest contains only ownership and lease data. Payload, target,
@@ -90,11 +96,14 @@ type NudgeClaimAuthorizer interface {
 type TrustedCommandClaimStateAuthority interface {
 	TrustedCommandPartitionCoverageResolver
 	TrustedCommandPartitionTerminalIntentAuthority
+	TrustedCommandClaimTransitionAuthority
+	VerifyCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error
+	RecordCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error
 }
 
 // CommandClaimResult always carries the exact transaction-decoded durable
-// command for a total disposition. An allowed result is still pre-provider;
-// the effect runner must next pass the separate provider-entry CAS.
+// command for a total disposition. Allowed is a one-shot pre-provider receipt;
+// EntryUnknown proves a prior caller already received that receipt.
 type CommandClaimResult struct {
 	Disposition               CommandClaimDisposition
 	Command                   Command
@@ -146,11 +155,12 @@ func (w commandTerminalTransitionWitness) provesTransition(command Command) bool
 // ClaimAuthorized atomically re-reads one durable command, revalidates current
 // policy, and records either its exact bounded claim or a typed denial. Policy
 // unknown leaves the command byte-for-byte unchanged. The method owns no
-// provider/runtime capability and an allowed claim is not provider entry. Its
-// committed Claim+Retry is durable may-enter permission: a crash can occur
-// after provider entry but before later evidence is recorded, so lease expiry
-// alone never releases the in-flight command for an automatic competing claim.
-func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request CommandClaimRequest, authorizer NudgeClaimAuthorizer, commandAuthority TrustedCommandClaimStateAuthority) (CommandClaimResult, error) {
+// provider/runtime capability and an allowed claim is not provider entry. A
+// committed Claim+Retry without a finalized receipt is recoverable pre-entry
+// intent. Once the receipt is finalized, a crash can occur after provider entry
+// but before later evidence is recorded, so lease expiry alone never releases
+// the in-flight command for an automatic competing claim.
+func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request CommandClaimRequest, authorizer NudgeClaimAuthorizer, commandAuthority TrustedCommandClaimStateAuthority) (result CommandClaimResult, retErr error) {
 	if r == nil || isNilRepositoryDependency(r.reader.store) || isNilRepositoryDependency(r.reader.verifier) {
 		return CommandClaimResult{}, fmt.Errorf("%w: command repository is not fully bound", ErrCommandClaimInvalid)
 	}
@@ -166,6 +176,29 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 	if err := validateRepositoryContext(ctx); err != nil {
 		return CommandClaimResult{}, err
 	}
+	var preparedTerminalIntent *CommandPartitionTerminalIntent
+	var preparedClaimIntent *CommandClaimTransitionIntent
+	defer func() {
+		if preparedTerminalIntent == nil || (retErr == nil && result.HasTerminalTransitionWitness()) {
+			return
+		}
+		releaseErr := releaseCommandPartitionTerminalWriter(
+			context.WithoutCancel(ctx), commandAuthority, *preparedTerminalIntent,
+		)
+		if releaseErr != nil {
+			result = CommandClaimResult{}
+			retErr = errors.Join(retErr, releaseErr)
+		}
+	}()
+	defer func() {
+		if preparedClaimIntent == nil {
+			return
+		}
+		releaseErr := releaseCommandClaimTransitionWriter(context.WithoutCancel(ctx), commandAuthority, *preparedClaimIntent)
+		if releaseErr != nil {
+			retErr = errors.Join(retErr, releaseErr)
+		}
+	}()
 	before, err := r.State(ctx)
 	if err != nil {
 		before, err = r.repairLineage(ctx, "pre-claim lineage repair")
@@ -175,7 +208,6 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 	}
 
 	var (
-		result       CommandClaimResult
 		state        CommandRepositoryState
 		mutated      bool
 		authorityErr error
@@ -188,6 +220,12 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 		}
 		if err := validateCommandRepositoryStateAdvance(before, state); err != nil {
 			return err
+		}
+		// The command store and its restore anchor can be rewound together by an
+		// out-of-band backup restore. Fence the transaction against authority-owned
+		// monotonic state before any claim mutation can grant provider entry.
+		if err := commandAuthority.VerifyCommandRepositoryEffectFence(ctx, state); err != nil {
+			return fmt.Errorf("%w: repository effect fence: %w", ErrCommandRepositoryPartition, err)
 		}
 		row, err := tx.GetIssue(request.CommandID)
 		if errors.Is(err, beads.ErrNotFound) {
@@ -206,6 +244,13 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 		command := cloneCommandValue(*entry.Command)
 		result.Command = cloneCommandValue(command)
 		if err := validateCommandClaimMembership(ctx, commandAuthority, state, command, request.Partition); err != nil {
+			if errors.Is(err, ErrCommandProvenanceRejected) && command.Terminal != nil &&
+				command.State == CommandStateDeadLettered && command.Terminal.ActionResult == CommandActionResultUnauthorizedProvenance &&
+				command.Terminal.ErrorClass == CommandErrorClassUnauthorizedProvenance &&
+				command.Terminal.ProviderStage == ProviderStageNotEntered && command.Terminal.Completion == CompletionStateNotCompleted {
+				result = CommandClaimResult{Disposition: CommandClaimDenied, Command: cloneCommandValue(command)}
+				return nil
+			}
 			result = CommandClaimResult{Disposition: CommandClaimAuthorizationUnknown, Command: cloneCommandValue(command)}
 			authorityErr = fmt.Errorf("%w: command membership proof failed: %w", ErrNudgeAuthorizationUnknown, err)
 			return nil
@@ -243,12 +288,14 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 			if err != nil {
 				return err
 			}
+			preparedTerminalIntent = &intent
 			updated, err := writeCommandTransition(tx, state, row, terminalized)
 			if err != nil {
 				abortErr := abortCommandPartitionTerminal(context.WithoutCancel(ctx), commandAuthority, intent)
 				return errors.Join(err, abortErr)
 			}
 			result = CommandClaimResult{Disposition: CommandClaimDenied, Command: updated}
+			state.Revision = updated.Order.Revision
 			mutated = true
 			return nil
 		}
@@ -303,12 +350,14 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 			if err != nil {
 				return err
 			}
+			preparedTerminalIntent = &intent
 			updated, err := writeCommandTransition(tx, state, row, terminalized)
 			if err != nil {
 				abortErr := abortCommandPartitionTerminal(context.WithoutCancel(ctx), commandAuthority, intent)
 				return errors.Join(err, abortErr)
 			}
 			result = CommandClaimResult{Disposition: CommandClaimDenied, Command: updated}
+			state.Revision = updated.Order.Revision
 			mutated = true
 			return nil
 		}
@@ -317,17 +366,38 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 		if err != nil {
 			return err
 		}
-		updated, err := writeCommandTransition(tx, state, row, claimed)
+		if state.Revision == math.MaxUint64 {
+			return &CommandRepositorySchemaSkewError{Field: "repository revision", Found: fmt.Sprint(state.Revision), Want: "allocatable uint64"}
+		}
+		claimed.Order.Revision = state.Revision + 1
+		claimIntent, err := commandClaimTransitionIntentFor(state, command, claimed, request.Partition)
 		if err != nil {
 			return err
 		}
+		if err := prepareCommandClaimTransition(ctx, commandAuthority, claimIntent); err != nil {
+			return err
+		}
+		preparedClaimIntent = &claimIntent
+		updated, err := writeCommandTransition(tx, state, row, claimed)
+		if err != nil {
+			abortErr := abortCommandClaimTransition(context.WithoutCancel(ctx), commandAuthority, claimIntent)
+			return errors.Join(err, abortErr)
+		}
 		result = CommandClaimResult{Disposition: CommandClaimAllowed, Command: updated}
+		state.Revision = updated.Order.Revision
 		mutated = true
 		return nil
 	})
 	if err != nil {
 		if mutated {
 			if recovered, ok := r.resolveAmbiguousClaim(ctx, result); ok {
+				if recovered.Disposition == CommandClaimAllowed {
+					finalized, finalizeErr := finalizeAllowedCommandClaim(ctx, commandAuthority, state, recovered, request.Partition)
+					if finalizeErr == nil {
+						preparedClaimIntent = nil
+					}
+					return finalized, finalizeErr
+				}
 				return recovered, nil
 			}
 		}
@@ -335,6 +405,9 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 	}
 	if mutated {
 		if _, err := r.repairLineage(ctx, "post-claim lineage advance"); err != nil {
+			if result.Disposition == CommandClaimAllowed {
+				return result, err
+			}
 			return CommandClaimResult{}, err
 		}
 		if result.Command.Terminal != nil {
@@ -344,24 +417,50 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 	if authorityErr != nil {
 		return result, authorityErr
 	}
+	if result.Disposition == CommandClaimAllowed {
+		finalized, finalizeErr := finalizeAllowedCommandClaim(ctx, commandAuthority, state, result, request.Partition)
+		if finalizeErr == nil {
+			preparedClaimIntent = nil
+		}
+		return finalized, finalizeErr
+	}
+	return result, nil
+}
+
+func finalizeAllowedCommandClaim(ctx context.Context, authority TrustedCommandClaimStateAuthority, state CommandRepositoryState, result CommandClaimResult, partition TrustedCityPartition) (CommandClaimResult, error) {
+	if result.Command.State != CommandStateInFlight || result.Command.Claim == nil ||
+		state.Store != result.Command.Store || state.Revision < result.Command.Order.Revision ||
+		state.SequenceHighWater < result.Command.Order.Sequence {
+		return result, fmt.Errorf("%w: allowed claim cannot finalize an inconsistent transition", ErrCommandClaimInvalid)
+	}
+	disposition, err := finalizeCommandClaimTransition(ctx, authority, state, result.Command, partition)
+	if err != nil {
+		return result, err
+	}
+	if disposition == CommandClaimReceiptAlreadyFinalized {
+		result.Disposition = CommandClaimEntryUnknown
+	}
 	return result, nil
 }
 
 func validateCommandClaimMembership(ctx context.Context, authority TrustedCommandClaimStateAuthority, state CommandRepositoryState, command Command, partition TrustedCityPartition) error {
 	request := CommandPartitionMembershipRequest{
-		Store: command.Store, RepositoryRevision: state.Revision,
+		Store: command.Store, RepositoryRevision: state.Revision, SequenceHighWater: state.SequenceHighWater,
 		CommandID: command.ID, Partition: partition,
 	}
 	membership, err := authority.ResolveCommandPartitionMembership(ctx, request)
 	if err != nil {
 		return fmt.Errorf("%w: resolving exact command membership: %w", ErrCommandRepositoryPartition, err)
 	}
-	if membership.Store != request.Store || membership.RepositoryRevision != request.RepositoryRevision ||
+	if membership.Store != request.Store || membership.RepositoryRevision != request.RepositoryRevision || membership.SequenceHighWater != request.SequenceHighWater ||
 		membership.CommandID != request.CommandID || membership.Partition != request.Partition {
 		return fmt.Errorf("%w: membership authority returned a substituted proof", ErrCommandRepositoryPartition)
 	}
 	if !membership.Found {
 		return fmt.Errorf("%w: command has no authority admission", ErrCommandRepositoryPartition)
+	}
+	if membership.Rejected {
+		return fmt.Errorf("%w: %w", ErrCommandRepositoryPartition, ErrCommandProvenanceRejected)
 	}
 	if membership.Sequence != command.Order.Sequence {
 		return fmt.Errorf("%w: membership sequence %d differs from command sequence %d", ErrCommandRepositoryPartition, membership.Sequence, command.Order.Sequence)

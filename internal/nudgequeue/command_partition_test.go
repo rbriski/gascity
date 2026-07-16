@@ -529,7 +529,7 @@ func assertSparsePartitionSnapshot(t *testing.T, snapshot CommandIndexSnapshot, 
 type testCommandPartitionCoverageLedger struct {
 	mu                     sync.Mutex
 	records                map[string]testCommandPartitionCoverageRecord
-	syntheticAdmittedCount uint64
+	syntheticDecisionCount uint64
 }
 
 type testCommandPartitionCoverageRecord struct {
@@ -621,15 +621,15 @@ func (l *testCommandPartitionCoverageLedger) ResolveCommandPartitionCoverage(ctx
 		}
 	}
 	sort.Slice(active, func(i, j int) bool { return active[i].Sequence < active[j].Sequence })
-	if l.syntheticAdmittedCount != 0 {
-		admittedCount = l.syntheticAdmittedCount
+	if l.syntheticDecisionCount != 0 {
+		admittedCount = l.syntheticDecisionCount
 	}
 	if sequenceHighWater != request.SequenceHighWater || admittedCount != request.SequenceHighWater {
 		return CommandPartitionCoverage{}, errors.New("test authority coverage does not match repository snapshot")
 	}
 	return CommandPartitionCoverage{
 		Store: request.Store, RepositoryRevision: request.RepositoryRevision,
-		SequenceHighWater: request.SequenceHighWater, AdmittedCount: admittedCount,
+		SequenceHighWater: request.SequenceHighWater, DecidedCount: admittedCount,
 		Partition: request.Partition, ActiveEntries: active,
 	}, nil
 }
@@ -641,11 +641,11 @@ func (l *testCommandPartitionCoverageLedger) ResolveCommandPartitionMembership(c
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	result := CommandPartitionMembership{
-		Store: request.Store, RepositoryRevision: request.RepositoryRevision,
+		Store: request.Store, RepositoryRevision: request.RepositoryRevision, SequenceHighWater: request.SequenceHighWater,
 		CommandID: request.CommandID, Partition: request.Partition,
 	}
 	record, found := l.records[request.CommandID]
-	if !found || record.store != request.Store || record.admissionRevision > request.RepositoryRevision || record.partition != request.Partition {
+	if !found || record.store != request.Store || record.admissionRevision > request.RepositoryRevision || record.sequence > request.SequenceHighWater || record.partition != request.Partition {
 		return result, nil
 	}
 	result.Found = true
@@ -661,7 +661,7 @@ func (l *testCommandPartitionCoverageLedger) rewriteAdmissionForTest(commandID s
 	record.admissionRevision = revision
 	record.sequence = sequence
 	l.records[commandID] = record
-	l.syntheticAdmittedCount = sequence
+	l.syntheticDecisionCount = sequence
 }
 
 var (

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestNudgeIngressRequestHasNoSelfAssertedAuthorityFields(t *testing.T) {
@@ -251,6 +253,198 @@ func TestTrustedNudgeIngressResolvesCommitResponseLossWithoutSecondCommand(t *te
 	}
 }
 
+func TestTrustedNudgeIngressRecoverCommandAuthorityRepairsMonotonicBindingRace(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		bindingReadNumber int
+	}{
+		{name: "bound repository", bindingReadNumber: 1},
+		{name: "recovery repository", bindingReadNumber: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &trustedIngressRecoveryHookStore{repositoryAtomicTestStore: newRepositoryAtomicTestStore()}
+			lineage := &trustedIngressInterruptingLineage{delegate: NewRestoreAnchorRepositoryVerifier(t.TempDir())}
+			boundRepository, err := NewCommandRepository(store, lineage)
+			if err != nil {
+				t.Fatalf("NewCommandRepository bound: %v", err)
+			}
+			state, err := boundRepository.Provision(t.Context())
+			if err != nil {
+				t.Fatalf("Provision bound repository: %v", err)
+			}
+			recoveryRepository, err := NewCommandRepository(store, lineage)
+			if err != nil {
+				t.Fatalf("NewCommandRepository recovery: %v", err)
+			}
+			if _, err := recoveryRepository.Provision(t.Context()); err != nil {
+				t.Fatalf("Provision recovery repository: %v", err)
+			}
+			authority := newTestNudgeAuthority()
+			ingress, err := NewTrustedNudgeIngress(boundRepository, authority)
+			if err != nil {
+				t.Fatalf("NewTrustedNudgeIngress: %v", err)
+			}
+
+			const requestID = "binding-race-command"
+			store.armBeforeStateRead(test.bindingReadNumber, func() {
+				lineage.failNextAdvance(errors.New("injected post-commit anchor interruption"))
+				command := repositoryCommandForRequest(t, state.Store, requestID, requestID)
+				if _, _, err := boundRepository.createForTest(t.Context(), requestID, command); !errors.Is(err, ErrCommandRepositoryLineage) {
+					t.Fatalf("createForTest post-commit interruption error = %v, want ErrCommandRepositoryLineage", err)
+				}
+			})
+
+			if err := ingress.RecoverCommandAuthority(t.Context(), recoveryRepository); err != nil {
+				t.Fatalf("RecoverCommandAuthority across %s binding race: %v", test.name, err)
+			}
+			if got := authority.recoveryCallCount(); got != 1 {
+				t.Fatalf("authority recovery calls = %d, want 1 after repaired binding", got)
+			}
+			boundState, err := boundRepository.State(t.Context())
+			if err != nil {
+				t.Fatalf("bound State after recovery: %v", err)
+			}
+			recoveryState, err := recoveryRepository.State(t.Context())
+			if err != nil || boundState != recoveryState || recoveryState.Revision <= state.Revision {
+				t.Fatalf("repaired binding states = bound:%#v recovery:%#v err=%v; want equal monotonic advance from %#v", boundState, recoveryState, err, state)
+			}
+		})
+	}
+}
+
+func TestTrustedNudgeIngressRecoverCommandAuthorityNeverRepairsUnsafeBinding(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]string)
+		want   error
+	}{
+		{
+			name: "foreign store",
+			mutate: func(metadata map[string]string) {
+				metadata[commandRepositoryStoreUUIDMetadataKey] = "00000000-0000-4000-8000-000000000001"
+			},
+			want: ErrRestoreAnchorAdmission,
+		},
+		{
+			name: "database rewind",
+			mutate: func(metadata map[string]string) {
+				metadata[commandRepositoryRevisionMetadataKey] = "0"
+				metadata[commandRepositorySequenceHighWaterMetadataKey] = "0"
+			},
+			want: ErrRestoreAnchorAdmission,
+		},
+		{
+			name: "schema skew",
+			mutate: func(metadata map[string]string) {
+				metadata[commandRepositorySchemaVersionMetadataKey] = "999"
+			},
+			want: ErrCommandRepositorySchemaSkew,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newRepositoryAtomicTestStore()
+			lineage := NewRestoreAnchorRepositoryVerifier(t.TempDir())
+			boundRepository, err := NewCommandRepository(store, lineage)
+			if err != nil {
+				t.Fatalf("NewCommandRepository bound: %v", err)
+			}
+			state, err := boundRepository.Provision(t.Context())
+			if err != nil {
+				t.Fatalf("Provision bound repository: %v", err)
+			}
+			const requestID = "unsafe-binding-command"
+			command := repositoryCommandForRequest(t, state.Store, requestID, requestID)
+			if _, created, err := boundRepository.createForTest(t.Context(), requestID, command); err != nil || !created {
+				t.Fatalf("createForTest = created:%t err:%v", created, err)
+			}
+			recoveryRepository, err := NewCommandRepository(store, lineage)
+			if err != nil {
+				t.Fatalf("NewCommandRepository recovery: %v", err)
+			}
+			authority := newTestNudgeAuthority()
+			ingress, err := NewTrustedNudgeIngress(boundRepository, authority)
+			if err != nil {
+				t.Fatalf("NewTrustedNudgeIngress: %v", err)
+			}
+			store.mu.Lock()
+			test.mutate(store.metadata)
+			store.mu.Unlock()
+
+			err = ingress.RecoverCommandAuthority(t.Context(), recoveryRepository)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("RecoverCommandAuthority unsafe binding error = %v, want %v", err, test.want)
+			}
+			if got := authority.recoveryCallCount(); got != 0 {
+				t.Fatalf("authority recovery calls = %d, want 0 for unsafe binding", got)
+			}
+		})
+	}
+}
+
+type trustedIngressRecoveryHookStore struct {
+	*repositoryAtomicTestStore
+	mu                     sync.Mutex
+	stateReadsBeforeHook   int
+	beforeBindingStateRead func()
+}
+
+func (s *trustedIngressRecoveryHookStore) AtomicReadWrite(ctx context.Context, commitMessage string, fn func(beads.AtomicReadWriteTx) error) error {
+	if commitMessage == "gc: read durable nudge command repository" {
+		s.mu.Lock()
+		if s.stateReadsBeforeHook > 0 {
+			s.stateReadsBeforeHook--
+		}
+		var hook func()
+		if s.stateReadsBeforeHook == 0 {
+			hook = s.beforeBindingStateRead
+			s.beforeBindingStateRead = nil
+		}
+		s.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+	}
+	return s.repositoryAtomicTestStore.AtomicReadWrite(ctx, commitMessage, fn)
+}
+
+func (s *trustedIngressRecoveryHookStore) armBeforeStateRead(readNumber int, hook func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stateReadsBeforeHook = readNumber
+	s.beforeBindingStateRead = hook
+}
+
+type trustedIngressInterruptingLineage struct {
+	delegate *RestoreAnchorRepositoryVerifier
+	mu       sync.Mutex
+	nextErr  error
+}
+
+func (v *trustedIngressInterruptingLineage) VerifyCommandRepositoryLineage(ctx context.Context, state CommandRepositoryState) error {
+	return v.delegate.VerifyCommandRepositoryLineage(ctx, state)
+}
+
+func (v *trustedIngressInterruptingLineage) ProvisionCommandRepositoryLineage(ctx context.Context, state CommandRepositoryState, evidence CommandRepositoryProvisioningEvidence) error {
+	return v.delegate.ProvisionCommandRepositoryLineage(ctx, state, evidence)
+}
+
+func (v *trustedIngressInterruptingLineage) AdvanceCommandRepositoryLineage(ctx context.Context, state CommandRepositoryState) error {
+	v.mu.Lock()
+	err := v.nextErr
+	v.nextErr = nil
+	v.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return v.delegate.AdvanceCommandRepositoryLineage(ctx, state)
+}
+
+func (v *trustedIngressInterruptingLineage) failNextAdvance(err error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.nextErr = err
+}
+
 const (
 	testNudgePrincipalID   = "principal-123"
 	testNudgeCityScope     = "tenant-123/city-456"
@@ -259,31 +453,36 @@ const (
 )
 
 type testNudgeAuthority struct {
-	mu               sync.Mutex
-	references       map[string]NudgeAuthorization
-	mutate           func(*NudgeAuthorization)
-	disposition      NudgeAuthorizationDisposition
-	schema           uint32
-	calls            int
-	claimDisposition NudgeAuthorizationDisposition
-	claimSchema      uint32
-	claimErr         error
-	claimRequests    []NudgeClaimAuthorizationRequest
-	coverage         *testCommandPartitionCoverageLedger
-	terminalIntents  map[CommandPartitionTerminalIntent]struct{}
-	finalized        map[string]CommandPartitionTerminalResolution
+	mu                sync.Mutex
+	references        map[string]NudgeAuthorization
+	mutate            func(*NudgeAuthorization)
+	disposition       NudgeAuthorizationDisposition
+	schema            uint32
+	calls             int
+	claimDisposition  NudgeAuthorizationDisposition
+	claimSchema       uint32
+	claimErr          error
+	claimRequests     []NudgeClaimAuthorizationRequest
+	coverage          *testCommandPartitionCoverageLedger
+	terminalIntents   map[CommandPartitionTerminalIntent]struct{}
+	finalized         map[string]CommandPartitionTerminalResolution
+	claimPreparations map[string]CommandClaimTransitionIntent
+	claimReceipts     map[string]CommandClaimTransitionReceipt
+	recoveryCalls     int
 }
 
 func newTestNudgeAuthority() *testNudgeAuthority {
 	return &testNudgeAuthority{
-		references:       make(map[string]NudgeAuthorization),
-		disposition:      NudgeAuthorizationAllowed,
-		schema:           NudgePrincipalSchemaVersion,
-		claimDisposition: NudgeAuthorizationAllowed,
-		claimSchema:      NudgePrincipalSchemaVersion,
-		coverage:         newTestCommandPartitionCoverageLedger(),
-		terminalIntents:  make(map[CommandPartitionTerminalIntent]struct{}),
-		finalized:        make(map[string]CommandPartitionTerminalResolution),
+		references:        make(map[string]NudgeAuthorization),
+		disposition:       NudgeAuthorizationAllowed,
+		schema:            NudgePrincipalSchemaVersion,
+		claimDisposition:  NudgeAuthorizationAllowed,
+		claimSchema:       NudgePrincipalSchemaVersion,
+		coverage:          newTestCommandPartitionCoverageLedger(),
+		terminalIntents:   make(map[CommandPartitionTerminalIntent]struct{}),
+		finalized:         make(map[string]CommandPartitionTerminalResolution),
+		claimPreparations: make(map[string]CommandClaimTransitionIntent),
+		claimReceipts:     make(map[string]CommandClaimTransitionReceipt),
 	}
 }
 
@@ -334,6 +533,89 @@ func (a *testNudgeAuthority) RecordCommandPartitionAdmission(ctx context.Context
 	return a.coverage.RecordCommandPartitionAdmission(ctx, admission)
 }
 
+func (a *testNudgeAuthority) VerifyCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error {
+	return nil
+}
+
+func (a *testNudgeAuthority) RecordCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error {
+	return nil
+}
+
+func (a *testNudgeAuthority) PrepareCommandClaimTransition(ctx context.Context, intent CommandClaimTransitionIntent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateCommandClaimTransitionIntent(intent); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, finalized := a.claimReceipts[intent.CommandID]; finalized {
+		return errors.New("test claim transition is already finalized")
+	}
+	if existing, found := a.claimPreparations[intent.CommandID]; found && existing != intent {
+		if existing.Store != intent.Store || existing.CommandID != intent.CommandID || existing.Sequence != intent.Sequence ||
+			existing.Partition != intent.Partition || existing.BeforeCommandDigest != intent.BeforeCommandDigest {
+			return errors.New("conflicting test claim transition")
+		}
+	}
+	a.claimPreparations[intent.CommandID] = intent
+	return nil
+}
+
+func (a *testNudgeAuthority) ReleaseCommandClaimTransitionWriter(context.Context, CommandClaimTransitionIntent) error {
+	return nil
+}
+
+func (a *testNudgeAuthority) AbortCommandClaimTransition(ctx context.Context, intent CommandClaimTransitionIntent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, found := a.claimPreparations[intent.CommandID]; found {
+		if existing != intent {
+			return errors.New("conflicting test claim transition abort")
+		}
+		delete(a.claimPreparations, intent.CommandID)
+		return nil
+	}
+	if _, finalized := a.claimReceipts[intent.CommandID]; finalized {
+		return errors.New("test claim transition is already finalized")
+	}
+	return nil
+}
+
+func (a *testNudgeAuthority) FinalizeCommandClaimTransition(ctx context.Context, receipt CommandClaimTransitionReceipt) (CommandClaimReceiptDisposition, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := validateCommandClaimTransitionReceipt(receipt); err != nil {
+		return "", err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, found := a.claimReceipts[receipt.CommandID]; found {
+		if !sameCommandClaimTransitionReceipt(existing, receipt) {
+			return "", errors.New("conflicting test claim receipt")
+		}
+		return CommandClaimReceiptAlreadyFinalized, nil
+	}
+	intent, found := a.claimPreparations[receipt.CommandID]
+	if !found || !claimIntentMatchesReceipt(intent, receipt) {
+		return "", errors.New("test claim receipt has no exact preparation")
+	}
+	delete(a.claimPreparations, receipt.CommandID)
+	a.claimReceipts[receipt.CommandID] = receipt
+	return CommandClaimReceiptFinalized, nil
+}
+
+func (a *testNudgeAuthority) claimTransitionCounts() (int, int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.claimPreparations), len(a.claimReceipts)
+}
+
 func (a *testNudgeAuthority) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -377,6 +659,10 @@ func (a *testNudgeAuthority) PrepareCommandPartitionTerminal(_ context.Context, 
 		}
 	}
 	a.terminalIntents[intent] = struct{}{}
+	return nil
+}
+
+func (a *testNudgeAuthority) ReleaseCommandPartitionTerminalWriter(_ context.Context, _ CommandPartitionTerminalIntent) error {
 	return nil
 }
 
@@ -461,6 +747,28 @@ func (a *testNudgeAuthority) RepairCommandPartitionTerminals(ctx context.Context
 
 func (a *testNudgeAuthority) RepairCommandPartitionAdmissions(context.Context, CommandPartitionRecoveryReader) error {
 	return nil
+}
+
+func (a *testNudgeAuthority) RecoverCommandAuthority(ctx context.Context, repository *CommandRepository) error {
+	if repository == nil {
+		return errors.New("test command repository is required")
+	}
+	a.mu.Lock()
+	a.recoveryCalls++
+	a.mu.Unlock()
+	if _, err := repository.RepairLineage(ctx); err != nil {
+		return err
+	}
+	if err := a.RepairCommandPartitionAdmissions(ctx, repository); err != nil {
+		return err
+	}
+	return a.RepairCommandPartitionTerminals(ctx, repository)
+}
+
+func (a *testNudgeAuthority) recoveryCallCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.recoveryCalls
 }
 
 func (a *testNudgeAuthority) ResolveCommandPartitionCoverage(ctx context.Context, request CommandPartitionCoverageRequest) (CommandPartitionCoverage, error) {
@@ -569,6 +877,5 @@ var (
 	_ TrustedCityPartitionResolver              = (*TrustedNudgeIngress)(nil)
 	_ TrustedCommandPartitionCoverageResolver   = (*TrustedNudgeIngress)(nil)
 	_ TrustedCommandPartitionMembershipRecorder = (*TrustedNudgeIngress)(nil)
-	_ TrustedCommandPartitionAdmissionRecovery  = (*TrustedNudgeIngress)(nil)
-	_ TrustedCommandPartitionTerminalRecovery   = (*TrustedNudgeIngress)(nil)
+	_ TrustedCommandAuthorityRecovery           = (*TrustedNudgeIngress)(nil)
 )

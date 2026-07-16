@@ -1087,6 +1087,7 @@ func TestCommandV1ActionResultMatrixIsClosedAndExhaustive(t *testing.T) {
 		CommandActionResultTargetMissing,
 		CommandActionResultRejected,
 		CommandActionResultAuthorizationDenied,
+		CommandActionResultUnauthorizedProvenance,
 		CommandActionResultRetryExhausted,
 		CommandActionResultDeadLettered,
 	}
@@ -1379,6 +1380,18 @@ func validCommandForActionResultV1(result CommandActionResult) Command {
 		command := validCommandV1(CommandStatePending)
 		command.State = CommandStateDeadLettered
 		command.Terminal = authorizationDeniedTerminalV1(command.CreatedAt.Add(2 * time.Second))
+		return command
+	case CommandActionResultUnauthorizedProvenance:
+		command := validCommandV1(CommandStatePending)
+		command.State = CommandStateDeadLettered
+		command.Terminal = &CommandTerminal{
+			At:            command.CreatedAt.Add(2 * time.Second),
+			ActionResult:  CommandActionResultUnauthorizedProvenance,
+			ErrorClass:    CommandErrorClassUnauthorizedProvenance,
+			Detail:        "command has no trusted ingress admission",
+			ProviderStage: ProviderStageNotEntered,
+			Completion:    CompletionStateNotCompleted,
+		}
 		return command
 	case CommandActionResultRetryExhausted:
 		command := validRetriedTerminalCommandV1(CommandActionResultRetryExhausted)

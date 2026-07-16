@@ -87,8 +87,10 @@ type TrustedNudgeAuthority interface {
 	TrustedCommandPartitionCoverageResolver
 	TrustedCommandPartitionMembershipRecorder
 	TrustedCommandPartitionTerminalIntentAuthority
-	TrustedCommandPartitionAdmissionRecovery
-	TrustedCommandPartitionTerminalRecovery
+	TrustedCommandClaimTransitionAuthority
+	TrustedCommandAuthorityRecovery
+	VerifyCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error
+	RecordCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error
 }
 
 // NudgeIngressRequest is the complete caller-owned nudge payload. Authority and
@@ -419,6 +421,60 @@ func (i *TrustedNudgeIngress) ResolveCommandPartitionMembership(ctx context.Cont
 	return i.authority.ResolveCommandPartitionMembership(ctx, request)
 }
 
+// VerifyCommandRepositoryEffectFence delegates the monotonic pre-effect store
+// fence to the independently retained authority journal.
+func (i *TrustedNudgeIngress) VerifyCommandRepositoryEffectFence(ctx context.Context, state CommandRepositoryState) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress effect fence is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.VerifyCommandRepositoryEffectFence(ctx, state)
+}
+
+// RecordCommandRepositoryEffectFence delegates the post-claim, pre-provider
+// monotonic watermark to the independently retained authority journal.
+func (i *TrustedNudgeIngress) RecordCommandRepositoryEffectFence(ctx context.Context, state CommandRepositoryState) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress effect fence is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.RecordCommandRepositoryEffectFence(ctx, state)
+}
+
+// PrepareCommandClaimTransition delegates exact claim write-ahead persistence
+// to the independently durable authority journal.
+func (i *TrustedNudgeIngress) PrepareCommandClaimTransition(ctx context.Context, intent CommandClaimTransitionIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress claim transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.PrepareCommandClaimTransition(ctx, intent)
+}
+
+// ReleaseCommandClaimTransitionWriter delegates in-process writer release
+// without changing durable preparation evidence.
+func (i *TrustedNudgeIngress) ReleaseCommandClaimTransitionWriter(ctx context.Context, intent CommandClaimTransitionIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress claim transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.ReleaseCommandClaimTransitionWriter(ctx, intent)
+}
+
+// AbortCommandClaimTransition delegates exact rolled-back preparation removal
+// to the independently durable authority journal.
+func (i *TrustedNudgeIngress) AbortCommandClaimTransition(ctx context.Context, intent CommandClaimTransitionIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress claim transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.AbortCommandClaimTransition(ctx, intent)
+}
+
+// FinalizeCommandClaimTransition delegates atomic exact-receipt and effect
+// high-water publication to the independently durable authority journal.
+func (i *TrustedNudgeIngress) FinalizeCommandClaimTransition(ctx context.Context, receipt CommandClaimTransitionReceipt) (CommandClaimReceiptDisposition, error) {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return "", fmt.Errorf("%w: trusted ingress claim transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.FinalizeCommandClaimTransition(ctx, receipt)
+}
+
 // RecordCommandPartitionAdmission delegates an idempotent admission
 // publication to the independently retained ingress authority.
 func (i *TrustedNudgeIngress) RecordCommandPartitionAdmission(ctx context.Context, admission CommandPartitionAdmission) error {
@@ -446,6 +502,15 @@ func (i *TrustedNudgeIngress) PrepareCommandPartitionTerminal(ctx context.Contex
 	return i.authority.PrepareCommandPartitionTerminal(ctx, intent)
 }
 
+// ReleaseCommandPartitionTerminalWriter delegates the in-memory-only release
+// for a store writer that will not proceed to terminal membership publication.
+func (i *TrustedNudgeIngress) ReleaseCommandPartitionTerminalWriter(ctx context.Context, intent CommandPartitionTerminalIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress terminal intent authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	return i.authority.ReleaseCommandPartitionTerminalWriter(ctx, intent)
+}
+
 // VerifyCommandPartitionTerminal revalidates a durable write-ahead intent for
 // an exact terminal command. It never derives intent from the command store.
 func (i *TrustedNudgeIngress) VerifyCommandPartitionTerminal(ctx context.Context, resolution CommandPartitionTerminalResolution) error {
@@ -464,28 +529,92 @@ func (i *TrustedNudgeIngress) AbortCommandPartitionTerminal(ctx context.Context,
 	return i.authority.AbortCommandPartitionTerminal(ctx, intent)
 }
 
-// RepairCommandPartitionTerminals resolves authority-owned preparations before
-// a production partition reader or writer is published.
-func (i *TrustedNudgeIngress) RepairCommandPartitionTerminals(ctx context.Context, reader CommandPartitionRecoveryReader) error {
+// RecoverCommandAuthority delegates the sole ordered startup recovery gate to
+// the trusted authority bound to this exact repository.
+func (i *TrustedNudgeIngress) RecoverCommandAuthority(ctx context.Context, repository *CommandRepository) error {
 	if i == nil || isNilRepositoryDependency(i.authority) {
-		return fmt.Errorf("%w: trusted ingress terminal recovery is not fully bound", ErrNudgeAuthorizationUnknown)
+		return fmt.Errorf("%w: trusted ingress command authority recovery is not fully bound", ErrNudgeAuthorizationUnknown)
 	}
-	if isNilRepositoryDependency(reader) {
-		return fmt.Errorf("%w: command repository recovery reader is required", ErrNudgeAuthorizationInvalid)
+	if repository == nil || i.repository == nil {
+		return fmt.Errorf("%w: recovery repository is required", ErrNudgeAuthorizationInvalid)
 	}
-	return i.authority.RepairCommandPartitionTerminals(ctx, reader)
+	if err := validateRepositoryContext(ctx); err != nil {
+		return err
+	}
+	ctx, budget := withCommandAuthorityRecoveryBudget(ctx)
+	for {
+		boundState, retry, err := trustedNudgeRecoveryBindingState(ctx, i.repository)
+		if err != nil {
+			return fmt.Errorf("%w: reading trusted ingress repository binding: %w", ErrNudgeAuthorizationUnknown, err)
+		}
+		if retry {
+			if err := budget.takePass("repairing trusted ingress repository binding"); err != nil {
+				return err
+			}
+			continue
+		}
+		recoveryState, retry, err := trustedNudgeRecoveryBindingState(ctx, repository)
+		if err != nil {
+			return fmt.Errorf("%w: reading recovery repository binding: %w", ErrNudgeAuthorizationUnknown, err)
+		}
+		if retry {
+			if err := budget.takePass("repairing recovery repository binding"); err != nil {
+				return err
+			}
+			continue
+		}
+		if boundState.Store != recoveryState.Store || boundState.SchemaVersion != recoveryState.SchemaVersion ||
+			boundState.WriterVersion != recoveryState.WriterVersion {
+			return fmt.Errorf("%w: recovery repository differs from trusted ingress durable binding", ErrNudgeAuthorizationInvalid)
+		}
+		return i.authority.RecoverCommandAuthority(ctx, repository)
+	}
 }
 
-// RepairCommandPartitionAdmissions resolves authority grants whose exact
-// command create committed before membership publication.
-func (i *TrustedNudgeIngress) RepairCommandPartitionAdmissions(ctx context.Context, reader CommandPartitionRecoveryReader) error {
-	if i == nil || isNilRepositoryDependency(i.authority) {
-		return fmt.Errorf("%w: trusted ingress admission recovery is not fully bound", ErrNudgeAuthorizationUnknown)
+func trustedNudgeRecoveryBindingState(ctx context.Context, repository *CommandRepository) (CommandRepositoryState, bool, error) {
+	state, err := repository.State(ctx)
+	if err == nil {
+		return state, false, nil
 	}
-	if isNilRepositoryDependency(reader) {
-		return fmt.Errorf("%w: command repository recovery reader is required", ErrNudgeAuthorizationInvalid)
+	retry, repairErr := repairTrustedNudgeRecoveryBindingAdvance(ctx, repository, err)
+	if repairErr != nil {
+		return CommandRepositoryState{}, false, errors.Join(err, fmt.Errorf("repairing monotonic repository binding advance: %w", repairErr))
 	}
-	return i.authority.RepairCommandPartitionAdmissions(ctx, reader)
+	if retry {
+		return CommandRepositoryState{}, true, nil
+	}
+	return CommandRepositoryState{}, false, err
+}
+
+func repairTrustedNudgeRecoveryBindingAdvance(ctx context.Context, repository *CommandRepository, stateErr error) (bool, error) {
+	var lineageErr *CommandRepositoryLineageError
+	var decisionErr *RestoreAnchorDecisionError
+	if !errors.As(stateErr, &lineageErr) || !errors.As(stateErr, &decisionErr) ||
+		decisionErr.Decision.Disposition != RestoreAnchorAdvanceRequired {
+		return false, nil
+	}
+	state := lineageErr.State
+	candidate := decisionErr.Decision.Candidate
+	if state.SchemaVersion != CommandRepositorySchemaVersion || state.WriterVersion != CommandRepositoryWriterVersion ||
+		candidate == nil || candidate.Store != state.Store || candidate.HighestAcceptedRevision != state.Revision ||
+		candidate.HighestAcceptedSequence != state.SequenceHighWater {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	repaired, err := repository.RepairLineage(ctx)
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return false, contextErr
+		}
+		return false, err
+	}
+	if repaired.Store != state.Store || repaired.SchemaVersion != state.SchemaVersion || repaired.WriterVersion != state.WriterVersion ||
+		repaired.Revision < state.Revision || repaired.SequenceHighWater < state.SequenceHighWater {
+		return false, fmt.Errorf("%w: repaired repository binding did not retain the observed same-store monotonic advance", ErrNudgeAuthorizationInvalid)
+	}
+	return true, nil
 }
 
 func classifyNudgeAuthorization(authorization NudgeAuthorization) error {

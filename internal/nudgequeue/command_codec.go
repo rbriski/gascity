@@ -877,6 +877,7 @@ func knownCommandErrorClass(errorClass CommandErrorClass) bool {
 		CommandErrorClassProviderAmbiguous,
 		CommandErrorClassTargetMissing,
 		CommandErrorClassAuthorizationDenied,
+		CommandErrorClassUnauthorizedProvenance,
 		CommandErrorClassRetryExhausted,
 		CommandErrorClassExpired,
 		CommandErrorClassSuperseded,
@@ -991,6 +992,14 @@ func commandTerminalRuleFor(result CommandActionResult) (commandTerminalRule, bo
 			completion:    CompletionStateNotCompleted,
 			errorClasses:  [2]CommandErrorClass{CommandErrorClassAuthorizationDenied},
 			evidence:      commandTerminalEvidenceAuthorization,
+		},
+		{
+			result:        CommandActionResultUnauthorizedProvenance,
+			state:         CommandStateDeadLettered,
+			providerStage: ProviderStageNotEntered,
+			completion:    CompletionStateNotCompleted,
+			errorClasses:  [2]CommandErrorClass{CommandErrorClassUnauthorizedProvenance},
+			evidence:      commandTerminalEvidenceNone,
 		},
 		{
 			result:        CommandActionResultRetryExhausted,

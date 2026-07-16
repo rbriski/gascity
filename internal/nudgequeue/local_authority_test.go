@@ -108,7 +108,7 @@ func TestLocalNudgeAuthorityMaintainsHistoricalMembershipAndTerminalDigest(t *te
 	active, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
 		Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, MaxCommands: 1, Partition: partition,
 	})
-	if err != nil || active.AdmittedCount != 1 || len(active.ActiveEntries) != 1 || active.ActiveEntries[0] != (CommandPartitionCoverageEntry{CommandID: commandID, Sequence: 1}) {
+	if err != nil || active.DecidedCount != 1 || len(active.ActiveEntries) != 1 || active.ActiveEntries[0] != (CommandPartitionCoverageEntry{CommandID: commandID, Sequence: 1}) {
 		t.Fatalf("active coverage = %#v, err=%v", active, err)
 	}
 	intent := CommandPartitionTerminalIntent{
@@ -129,6 +129,9 @@ func TestLocalNudgeAuthorityMaintainsHistoricalMembershipAndTerminalDigest(t *te
 	terminal := CommandPartitionTerminal{Store: state.Store, RepositoryRevision: 2, CommandID: commandID, Sequence: 1, Partition: partition}
 	if err := authority.RecordCommandPartitionTerminal(t.Context(), terminal); err != nil {
 		t.Fatalf("RecordCommandPartitionTerminal: %v", err)
+	}
+	if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+		t.Fatalf("ReleaseCommandPartitionTerminalWriter: %v", err)
 	}
 	if err := authority.Close(); err != nil {
 		t.Fatalf("Close first authority: %v", err)
@@ -183,6 +186,179 @@ func TestLocalNudgeAuthorityMaintainsHistoricalMembershipAndTerminalDigest(t *te
 			_ = rewound.Close()
 		}
 		t.Fatalf("reopen after observed repository rewind = %v, err=%v; want conflict", rewound, err)
+	}
+}
+
+func TestLocalNudgeAuthorityRejectsUnadmittedSequenceWithoutWedgingLaterAdmission(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	state, err := repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+
+	forged := repositoryCommandForRequest(t, state.Store, "raw-store-request", "self-asserted provenance")
+	forgedPartition := trustedCityPartitionFromAuthority(forged.TrustedIngress)
+	forgedEntry, created, err := repository.create(t.Context(), "raw-store-request", forged, forgedPartition)
+	if err != nil || !created || forgedEntry.Command == nil || forgedEntry.Command.Order.Sequence != 1 {
+		t.Fatalf("raw store create = %#v, created=%t err=%v", forgedEntry, created, err)
+	}
+
+	now := time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC)
+	ingress, err := newTrustedNudgeIngressWithClock(repository, authority, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("newTrustedNudgeIngressWithClock: %v", err)
+	}
+	request := validNudgeIngressRequest(now)
+	request.RequestID = "authorized-after-raw-request"
+	admitted, err := ingress.Admit(WithAuthenticatedNudgeRequester(t.Context(), localAuthorityRequester()), request)
+	if err != nil || admitted.Entry.Command == nil || admitted.Entry.Command.Order.Sequence != 2 {
+		t.Fatalf("authorized admission after raw row = %#v, err=%v", admitted, err)
+	}
+
+	if _, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
+		Store: state.Store, RepositoryRevision: 2, SequenceHighWater: 2, MaxCommands: 2, Partition: admitted.Partition,
+	}); !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
+		t.Fatalf("coverage before provenance recovery error = %v, want dense-decision conflict", err)
+	}
+
+	if err := authority.RepairCommandProvenanceRejections(t.Context(), repository); err != nil {
+		t.Fatalf("RepairCommandProvenanceRejections: %v", err)
+	}
+	if err := authority.RepairCommandProvenanceRejections(t.Context(), repository); err != nil {
+		t.Fatalf("idempotent RepairCommandProvenanceRejections: %v", err)
+	}
+
+	resolved, err := repository.Get(t.Context(), forgedEntry.Command.ID)
+	if err != nil || !resolved.Found || resolved.Entry.Command == nil {
+		t.Fatalf("Get rejected raw command = %#v, err=%v", resolved, err)
+	}
+	rejected := resolved.Entry.Command
+	if rejected.State != CommandStateDeadLettered || rejected.Terminal == nil ||
+		rejected.Terminal.ActionResult != CommandActionResultUnauthorizedProvenance ||
+		rejected.Terminal.ErrorClass != CommandErrorClassUnauthorizedProvenance ||
+		rejected.Terminal.ProviderStage != ProviderStageNotEntered ||
+		rejected.Terminal.Completion != CompletionStateNotCompleted {
+		t.Fatalf("rejected raw command = %#v, want durable unauthorized-provenance terminal", rejected)
+	}
+	claimAt := rejected.Terminal.At.Add(time.Second)
+	claim, err := repository.ClaimAuthorized(t.Context(), CommandClaimRequest{
+		CommandID: rejected.ID, ClaimID: "rejected-provenance-claim", OwnerID: "rejected-provenance-owner",
+		AttemptID: "rejected-provenance-attempt", BoundLaunchIdentity: "rejected-provenance-launch",
+		Partition: forgedPartition, ClaimedAt: claimAt, LeaseUntil: claimAt.Add(time.Second),
+	}, authority, authority)
+	if err != nil || claim.Disposition != CommandClaimDenied || claim.HasTerminalTransitionWitness() {
+		t.Fatalf("claim of finalized provenance rejection = %#v, err=%v; want denied without publication witness", claim, err)
+	}
+
+	reader, err := NewCommandPartitionReader(repository, admitted.Partition, ingress)
+	if err != nil {
+		t.Fatalf("NewCommandPartitionReader: %v", err)
+	}
+	snapshot, err := reader.Snapshot(t.Context(), 2)
+	if err != nil {
+		t.Fatalf("Snapshot after provenance recovery: %v", err)
+	}
+	if snapshot.SequenceHighWater != 2 || len(snapshot.Entries) != 1 ||
+		commandIndexEntryRouting(snapshot.Entries[0]).CommandID != admitted.Entry.Command.ID {
+		t.Fatalf("snapshot after provenance recovery = %#v, want only later admitted command", snapshot)
+	}
+}
+
+func TestLocalNudgeAuthorityRebasesPreparedRejectionAfterUnrelatedRepositoryWrite(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	state, err := repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+
+	firstRequest := "prepared-rejection-first"
+	first := repositoryCommandForRequest(t, state.Store, firstRequest, firstRequest)
+	firstEntry, _, err := repository.createForTest(t.Context(), firstRequest, first)
+	if err != nil || firstEntry.Command == nil {
+		t.Fatalf("create first raw command = %#v, err=%v", firstEntry, err)
+	}
+	store.failNextCommandUpdate(errors.New("injected pre-commit rejection failure"))
+	if err := authority.RepairCommandProvenanceRejections(t.Context(), repository); err == nil {
+		t.Fatal("first rejection repair error = nil, want injected pre-commit failure")
+	}
+	if pending, err := authority.localAuthorityRejectionPreparationCount(t.Context()); err != nil || pending != 1 {
+		t.Fatalf("rejection preparations after rollback = %d, err=%v; want one", pending, err)
+	}
+
+	secondRequest := "prepared-rejection-second"
+	second := repositoryCommandForRequest(t, state.Store, secondRequest, secondRequest)
+	secondEntry, _, err := repository.createForTest(t.Context(), secondRequest, second)
+	if err != nil || secondEntry.Command == nil || secondEntry.Command.Order.Sequence != 2 {
+		t.Fatalf("unrelated raw create = %#v, err=%v", secondEntry, err)
+	}
+	if err := authority.RepairCommandProvenanceRejections(t.Context(), repository); err != nil {
+		t.Fatalf("repaired rejection after unrelated write: %v", err)
+	}
+
+	for _, commandID := range []string{firstEntry.Command.ID, secondEntry.Command.ID} {
+		resolved, err := repository.Get(t.Context(), commandID)
+		if err != nil || resolved.Entry.Command == nil || resolved.Entry.Command.Terminal == nil ||
+			resolved.Entry.Command.Terminal.ActionResult != CommandActionResultUnauthorizedProvenance {
+			t.Fatalf("rejected command %q = %#v, err=%v", commandID, resolved, err)
+		}
+	}
+	coverage, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
+		Store: state.Store, RepositoryRevision: 4, SequenceHighWater: 2, MaxCommands: 2,
+		Partition: trustedCityPartitionFromAuthority(first.TrustedIngress),
+	})
+	if err != nil || coverage.DecidedCount != 2 || len(coverage.ActiveEntries) != 0 {
+		t.Fatalf("coverage after rebased rejections = %#v, err=%v", coverage, err)
+	}
+}
+
+func TestLocalNudgeAuthorityFinalizesRejectionAfterLostStoreCommitResponse(t *testing.T) {
+	store := newRepositoryAtomicTestStore()
+	repository := newVerifiedCommandRepository(t, store)
+	state, err := repository.State(t.Context())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	authority, err := OpenLocalNudgeAuthority(t.Context(), t.TempDir(), state, localAuthorityOptions())
+	if err != nil {
+		t.Fatalf("OpenLocalNudgeAuthority: %v", err)
+	}
+	t.Cleanup(func() { _ = authority.Close() })
+	requestID := "lost-rejection-commit-response"
+	command := repositoryCommandForRequest(t, state.Store, requestID, requestID)
+	entry, _, err := repository.createForTest(t.Context(), requestID, command)
+	if err != nil || entry.Command == nil {
+		t.Fatalf("create raw command = %#v, err=%v", entry, err)
+	}
+	store.failAfterCommitNext = errors.New("injected lost rejection commit response")
+	if err := authority.RepairCommandProvenanceRejections(t.Context(), repository); err == nil {
+		t.Fatal("first rejection repair error = nil, want lost response")
+	}
+	if pending, err := authority.localAuthorityRejectionPreparationCount(t.Context()); err != nil || pending != 1 {
+		t.Fatalf("rejection preparations after lost response = %d, err=%v; want one", pending, err)
+	}
+
+	if err := authority.RepairCommandProvenanceRejections(t.Context(), repository); err != nil {
+		t.Fatalf("restart rejection repair: %v", err)
+	}
+	resolved, err := repository.Get(t.Context(), entry.Command.ID)
+	if err != nil || resolved.Entry.Command == nil || resolved.Entry.Command.Terminal == nil ||
+		resolved.Entry.Command.Terminal.ActionResult != CommandActionResultUnauthorizedProvenance {
+		t.Fatalf("recovered terminal rejection = %#v, err=%v", resolved, err)
+	}
+	if pending, err := authority.localAuthorityRejectionPreparationCount(t.Context()); err != nil || pending != 0 {
+		t.Fatalf("rejection preparations after recovery = %d, err=%v; want zero", pending, err)
 	}
 }
 
@@ -596,7 +772,7 @@ func TestLocalNudgeAuthorityAdvancesDensePrefixAfterOutOfOrderAdmissions(t *test
 		t.Fatalf("RecordCommandPartitionAdmission(2): %v", err)
 	}
 	coverage, err := authority.ResolveCommandPartitionCoverage(t.Context(), coverageRequest)
-	if err != nil || coverage.AdmittedCount != 3 || len(coverage.ActiveEntries) != 3 {
+	if err != nil || coverage.DecidedCount != 3 || len(coverage.ActiveEntries) != 3 {
 		t.Fatalf("coverage after closing sequence gap = %#v, err=%v", coverage, err)
 	}
 }
@@ -662,8 +838,8 @@ func TestLocalNudgeAuthorityCoverageQueriesUseBoundedIndexesWithoutTempSort(t *t
 		index string
 		args  []any
 	}{
-		{name: "current active", query: localAuthorityActiveCoverageQuery, index: "memberships_partition_active", args: []any{partition, bound, bound, 11}},
-		{name: "historical active", query: localAuthorityHistoricalCoverageQuery, index: "memberships_partition_terminal", args: []any{partition, bound, bound, bound, 11}},
+		{name: "current active", query: localAuthorityActiveCoverageQuery, index: "admission_decisions_partition_active", args: []any{partition, bound, bound, 11}},
+		{name: "historical active", query: localAuthorityHistoricalCoverageQuery, index: "admission_decisions_partition_terminal", args: []any{partition, bound, bound, bound, 11}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			rows, err := authority.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN `+test.query, test.args...)
@@ -713,11 +889,17 @@ func TestLocalNudgeAuthorityAdmissionRecoveryScalesWithOutstandingPreparations(t
 		requests[index] = request
 	}
 	reader := &countingLocalAuthorityRecoveryReader{localAuthorityRecoveryReader: localAuthorityRecoveryReader{state: state, entries: map[string]CommandIndexResolution{}}}
+	if err := authority.RepairCommandPartitionAdmissions(t.Context(), reader); !errors.Is(err, ErrCommandAuthorityRecoveryYield) {
+		t.Fatalf("RepairCommandPartitionAdmissions first error = %v, want ErrCommandAuthorityRecoveryYield", err)
+	}
+	if reader.gets != commandAuthorityRecoveryMaxWork {
+		t.Fatalf("first recovery Get calls = %d, want bounded work %d", reader.gets, commandAuthorityRecoveryMaxWork)
+	}
 	if err := authority.RepairCommandPartitionAdmissions(t.Context(), reader); err != nil {
-		t.Fatalf("RepairCommandPartitionAdmissions first: %v", err)
+		t.Fatalf("RepairCommandPartitionAdmissions resume: %v", err)
 	}
 	if reader.gets != len(requests) {
-		t.Fatalf("first recovery Get calls = %d, want %d outstanding grants", reader.gets, len(requests))
+		t.Fatalf("resumed recovery Get calls = %d, want %d outstanding grants", reader.gets, len(requests))
 	}
 	if err := authority.RepairCommandPartitionAdmissions(t.Context(), reader); err != nil {
 		t.Fatalf("RepairCommandPartitionAdmissions settled: %v", err)
@@ -753,6 +935,12 @@ func TestLocalNudgeAuthorityRejectsCompetingTerminalPreparations(t *testing.T) {
 	if err := authority.PrepareCommandPartitionTerminal(t.Context(), competing); !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
 		t.Fatalf("competing terminal preparation error = %v, want conflict", err)
 	}
+	if err := authority.AbortCommandPartitionTerminal(t.Context(), intent); err != nil {
+		t.Fatalf("AbortCommandPartitionTerminal: %v", err)
+	}
+	if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+		t.Fatalf("ReleaseCommandPartitionTerminalWriter: %v", err)
+	}
 }
 
 func TestLocalNudgeAuthorityRepairsExactTerminalAfterState(t *testing.T) {
@@ -764,6 +952,9 @@ func TestLocalNudgeAuthorityRepairsExactTerminalAfterState(t *testing.T) {
 	}
 	if err := authority.PrepareCommandPartitionTerminal(t.Context(), intent); err != nil {
 		t.Fatalf("PrepareCommandPartitionTerminal: %v", err)
+	}
+	if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+		t.Fatalf("ReleaseCommandPartitionTerminalWriter: %v", err)
 	}
 	reader := localAuthorityRecoveryReaderFor(state, after)
 	if err := authority.RepairCommandPartitionTerminals(t.Context(), reader); err != nil {
@@ -788,7 +979,7 @@ func TestLocalNudgeAuthorityRepairsOnlyExactPristineAdmission(t *testing.T) {
 		coverage, err := authority.ResolveCommandPartitionCoverage(t.Context(), CommandPartitionCoverageRequest{
 			Store: state.Store, RepositoryRevision: 1, SequenceHighWater: 1, MaxCommands: 1, Partition: partition,
 		})
-		if err != nil || coverage.AdmittedCount != 1 || len(coverage.ActiveEntries) != 1 || coverage.ActiveEntries[0].CommandID != pending.ID {
+		if err != nil || coverage.DecidedCount != 1 || len(coverage.ActiveEntries) != 1 || coverage.ActiveEntries[0].CommandID != pending.ID {
 			t.Fatalf("recovered admission coverage = %#v, err=%v", coverage, err)
 		}
 	})
@@ -803,7 +994,7 @@ func TestLocalNudgeAuthorityRepairsOnlyExactPristineAdmission(t *testing.T) {
 	})
 }
 
-func TestLocalNudgeAuthorityAbortsOnlyExactUnadvancedTerminalBeforeState(t *testing.T) {
+func TestLocalNudgeAuthorityAbortsOnlyExactTerminalBeforeState(t *testing.T) {
 	t.Run("exact unchanged before-state aborts", func(t *testing.T) {
 		authority, state, pending, partition := localAuthorityPendingCommand(t, "request-terminal-abort")
 		after := localAuthorityDeadLetteredCommand(t, pending)
@@ -814,15 +1005,24 @@ func TestLocalNudgeAuthorityAbortsOnlyExactUnadvancedTerminalBeforeState(t *test
 		if err := authority.PrepareCommandPartitionTerminal(t.Context(), intent); err != nil {
 			t.Fatalf("PrepareCommandPartitionTerminal: %v", err)
 		}
+		if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+			t.Fatalf("ReleaseCommandPartitionTerminalWriter: %v", err)
+		}
 		if err := authority.RepairCommandPartitionTerminals(t.Context(), localAuthorityRecoveryReaderFor(state, pending)); err != nil {
 			t.Fatalf("RepairCommandPartitionTerminals: %v", err)
 		}
 		if err := authority.PrepareCommandPartitionTerminal(t.Context(), intent); err != nil {
 			t.Fatalf("terminal preparation was not safely aborted: %v", err)
 		}
+		if err := authority.AbortCommandPartitionTerminal(t.Context(), intent); err != nil {
+			t.Fatalf("AbortCommandPartitionTerminal cleanup: %v", err)
+		}
+		if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+			t.Fatalf("ReleaseCommandPartitionTerminalWriter cleanup: %v", err)
+		}
 	})
 
-	t.Run("advanced repository refuses abort", func(t *testing.T) {
+	t.Run("unrelated repository advance still aborts exact before-state", func(t *testing.T) {
 		authority, state, pending, partition := localAuthorityPendingCommand(t, "request-terminal-advanced")
 		after := localAuthorityDeadLetteredCommand(t, pending)
 		intent, err := terminalIntentForTransition(state.Revision, pending, after, partition)
@@ -832,24 +1032,29 @@ func TestLocalNudgeAuthorityAbortsOnlyExactUnadvancedTerminalBeforeState(t *test
 		if err := authority.PrepareCommandPartitionTerminal(t.Context(), intent); err != nil {
 			t.Fatalf("PrepareCommandPartitionTerminal: %v", err)
 		}
+		if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+			t.Fatalf("ReleaseCommandPartitionTerminalWriter: %v", err)
+		}
 		reader := localAuthorityRecoveryReaderFor(state, pending)
 		reader.state.Revision++
 		resolution := reader.entries[pending.ID]
 		resolution.Revision++
 		reader.entries[pending.ID] = resolution
-		if err := authority.RepairCommandPartitionTerminals(t.Context(), reader); !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
-			t.Fatalf("advanced before-state recovery error = %v, want conflict", err)
+		if err := authority.RepairCommandPartitionTerminals(t.Context(), reader); err != nil {
+			t.Fatalf("advanced before-state recovery: %v", err)
 		}
-		terminalResolution, err := terminalResolutionForCommand(after, partition)
-		if err != nil {
-			t.Fatalf("terminalResolutionForCommand: %v", err)
+		if err := authority.PrepareCommandPartitionTerminal(t.Context(), intent); err != nil {
+			t.Fatalf("advanced exact before-state preparation was not aborted: %v", err)
 		}
-		if err := authority.VerifyCommandPartitionTerminal(t.Context(), terminalResolution); err != nil {
-			t.Fatalf("advanced refusal did not retain terminal preparation: %v", err)
+		if err := authority.AbortCommandPartitionTerminal(t.Context(), intent); err != nil {
+			t.Fatalf("AbortCommandPartitionTerminal cleanup: %v", err)
+		}
+		if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+			t.Fatalf("ReleaseCommandPartitionTerminalWriter cleanup: %v", err)
 		}
 	})
 
-	t.Run("advanced exact-read watermark refuses abort", func(t *testing.T) {
+	t.Run("advanced exact-read watermark still aborts exact before-state", func(t *testing.T) {
 		authority, state, pending, partition := localAuthorityPendingCommand(t, "request-terminal-read-advanced")
 		after := localAuthorityDeadLetteredCommand(t, pending)
 		intent, err := terminalIntentForTransition(state.Revision, pending, after, partition)
@@ -859,12 +1064,24 @@ func TestLocalNudgeAuthorityAbortsOnlyExactUnadvancedTerminalBeforeState(t *test
 		if err := authority.PrepareCommandPartitionTerminal(t.Context(), intent); err != nil {
 			t.Fatalf("PrepareCommandPartitionTerminal: %v", err)
 		}
+		if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+			t.Fatalf("ReleaseCommandPartitionTerminalWriter: %v", err)
+		}
 		reader := localAuthorityRecoveryReaderFor(state, pending)
 		resolution := reader.entries[pending.ID]
 		resolution.Revision++
 		reader.entries[pending.ID] = resolution
-		if err := authority.RepairCommandPartitionTerminals(t.Context(), reader); !errors.Is(err, ErrLocalNudgeAuthorityConflict) {
-			t.Fatalf("advanced exact-read recovery error = %v, want conflict", err)
+		if err := authority.RepairCommandPartitionTerminals(t.Context(), reader); err != nil {
+			t.Fatalf("advanced exact-read recovery: %v", err)
+		}
+		if err := authority.PrepareCommandPartitionTerminal(t.Context(), intent); err != nil {
+			t.Fatalf("advanced exact-read preparation was not aborted: %v", err)
+		}
+		if err := authority.AbortCommandPartitionTerminal(t.Context(), intent); err != nil {
+			t.Fatalf("AbortCommandPartitionTerminal cleanup: %v", err)
+		}
+		if err := authority.ReleaseCommandPartitionTerminalWriter(t.Context(), intent); err != nil {
+			t.Fatalf("ReleaseCommandPartitionTerminalWriter cleanup: %v", err)
 		}
 	})
 }
@@ -997,7 +1214,7 @@ func TestLocalNudgeAuthorityRejectsCorruptOrPartialSQLite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open missing-index fixture: %v", err)
 		}
-		if _, err := db.Exec(`DROP INDEX memberships_partition_active`); err != nil {
+		if _, err := db.Exec(`DROP INDEX admission_decisions_partition_active`); err != nil {
 			_ = db.Close()
 			t.Fatalf("drop authority index: %v", err)
 		}
@@ -1023,7 +1240,7 @@ func TestLocalNudgeAuthorityRejectsCorruptOrPartialSQLite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open trigger fixture: %v", err)
 		}
-		if _, err := db.Exec(`CREATE TRIGGER unexpected_membership_trigger AFTER INSERT ON memberships BEGIN UPDATE authority_meta SET dense_admission_high_water = dense_admission_high_water WHERE singleton = 1; END`); err != nil {
+		if _, err := db.Exec(`CREATE TRIGGER unexpected_decision_trigger AFTER INSERT ON admission_decisions BEGIN UPDATE authority_meta SET dense_decision_high_water = dense_decision_high_water WHERE singleton = 1; END`); err != nil {
 			_ = db.Close()
 			t.Fatalf("create unexpected authority trigger: %v", err)
 		}
@@ -1054,11 +1271,11 @@ func TestLocalNudgeAuthorityRejectsSameNameSchemaWeakening(t *testing.T) {
 			}
 			switch scenario {
 			case "partial index predicate removed":
-				if _, err := db.Exec(`DROP INDEX memberships_partition_active`); err != nil {
+				if _, err := db.Exec(`DROP INDEX admission_decisions_partition_active`); err != nil {
 					_ = db.Close()
 					t.Fatalf("drop authority index: %v", err)
 				}
-				if _, err := db.Exec(`CREATE INDEX memberships_partition_active ON memberships(partition_id)`); err != nil {
+				if _, err := db.Exec(`CREATE INDEX admission_decisions_partition_active ON admission_decisions(partition_id)`); err != nil {
 					_ = db.Close()
 					t.Fatalf("recreate weakened authority index: %v", err)
 				}
@@ -1107,8 +1324,11 @@ func TestLocalNudgeAuthorityRejectsForeignKeyOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open foreign-key fixture: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO memberships (command_id, sequence, admission_revision, partition_id) VALUES (?, ?, ?, ?)`,
-		"orphan-command", encodeLocalAuthorityUint64(1), encodeLocalAuthorityUint64(1), make([]byte, sha256.Size)); err != nil {
+	if _, err := db.Exec(`INSERT INTO admission_decisions
+		(sequence, command_id, decision_kind, allocation_revision, decision_revision,
+		 grant_command_id, grant_reference_id, partition_id)
+		VALUES (?, ?, 'admitted', ?, ?, ?, ?, ?)`, encodeLocalAuthorityUint64(1), "orphan-command",
+		encodeLocalAuthorityUint64(1), encodeLocalAuthorityUint64(1), "orphan-command", "orphan-reference", make([]byte, sha256.Size)); err != nil {
 		_ = db.Close()
 		t.Fatalf("insert foreign-key orphan: %v", err)
 	}
@@ -1181,8 +1401,11 @@ func TestLocalNudgeAuthorityConnectionPragmasSurvivePoolChurn(t *testing.T) {
 			t.Fatalf("iteration %d pragmas = foreign_keys=%d synchronous=%d journal_mode=%q", iteration, foreignKeys, synchronous, journalMode)
 		}
 	}
-	if _, err := authority.db.ExecContext(t.Context(), `INSERT INTO memberships (command_id, sequence, admission_revision, partition_id) VALUES (?, ?, ?, ?)`,
-		"orphan-command", encodeLocalAuthorityUint64(1), encodeLocalAuthorityUint64(1), make([]byte, sha256.Size)); err == nil {
+	if _, err := authority.db.ExecContext(t.Context(), `INSERT INTO admission_decisions
+		(sequence, command_id, decision_kind, allocation_revision, decision_revision,
+		 grant_command_id, grant_reference_id, partition_id)
+		VALUES (?, ?, 'admitted', ?, ?, ?, ?, ?)`, encodeLocalAuthorityUint64(1), "orphan-command",
+		encodeLocalAuthorityUint64(1), encodeLocalAuthorityUint64(1), "orphan-command", "orphan-reference", make([]byte, sha256.Size)); err == nil {
 		t.Fatal("foreign-key violation after connection churn succeeded")
 	}
 }

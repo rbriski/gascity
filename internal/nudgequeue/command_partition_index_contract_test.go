@@ -216,7 +216,7 @@ func TestCommandPartitionReaderRejectsUnavailableOrStaleTrustedCoverage(t *testi
 			coverage.RepositoryRevision--
 		}},
 		"incomplete admission history": {mutate: func(coverage *CommandPartitionCoverage) {
-			coverage.AdmittedCount--
+			coverage.DecidedCount--
 		}},
 		"extra command": {mutate: func(coverage *CommandPartitionCoverage) {
 			coverage.ActiveEntries = append(coverage.ActiveEntries, CommandPartitionCoverageEntry{

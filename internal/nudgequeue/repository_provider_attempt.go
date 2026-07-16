@@ -67,7 +67,7 @@ func (r CommandCompletionResult) HasTerminalTransitionWitness() bool {
 // terminal. The command wire, closed-row status, and repository revision share
 // one backing transaction; a response-loss retry resolves the existing result
 // instead of writing a second terminal outcome.
-func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request CommandCompletionRequest, partition TrustedCityPartition, terminalAuthority TrustedCommandPartitionTerminalIntentAuthority) (CommandCompletionResult, error) {
+func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request CommandCompletionRequest, partition TrustedCityPartition, terminalAuthority TrustedCommandPartitionTerminalIntentAuthority) (result CommandCompletionResult, retErr error) {
 	if r == nil {
 		return CommandCompletionResult{}, fmt.Errorf("%w: repository is nil", ErrCommandProviderAttemptInvalid)
 	}
@@ -83,6 +83,19 @@ func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request
 	if isNilRepositoryDependency(terminalAuthority) {
 		return CommandCompletionResult{}, fmt.Errorf("%w: terminal intent authority is required", ErrCommandProviderAttemptInvalid)
 	}
+	var preparedTerminalIntent *CommandPartitionTerminalIntent
+	defer func() {
+		if preparedTerminalIntent == nil || (retErr == nil && result.HasTerminalTransitionWitness()) {
+			return
+		}
+		releaseErr := releaseCommandPartitionTerminalWriter(
+			context.WithoutCancel(ctx), terminalAuthority, *preparedTerminalIntent,
+		)
+		if releaseErr != nil {
+			result = CommandCompletionResult{}
+			retErr = errors.Join(retErr, releaseErr)
+		}
+	}()
 	before, err := r.State(ctx)
 	if err != nil {
 		before, err = r.repairLineage(ctx, "pre-completion lineage repair")
@@ -91,10 +104,7 @@ func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request
 		}
 	}
 
-	var (
-		result  CommandCompletionResult
-		mutated bool
-	)
+	var mutated bool
 	err = r.reader.store.AtomicReadWrite(ctx, "gc: complete durable nudge provider attempt", func(tx beads.AtomicReadWriteTx) error {
 		state, err := readCommandRepositoryState(tx)
 		if err != nil {
@@ -166,6 +176,7 @@ func (r *CommandRepository) CompleteProviderAttempt(ctx context.Context, request
 		if err != nil {
 			return err
 		}
+		preparedTerminalIntent = &intent
 		closed := "closed"
 		if err := tx.Update(completed.ID, beads.UpdateOpts{
 			Status: &closed,

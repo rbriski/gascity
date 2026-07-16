@@ -225,6 +225,10 @@ const (
 	// CommandActionResultAuthorizationDenied records a claim-time policy denial
 	// before provider entry.
 	CommandActionResultAuthorizationDenied CommandActionResult = "authorization_denied"
+	// CommandActionResultUnauthorizedProvenance records a command-store row that
+	// had no matching trusted-ingress admission. It is partitionless authority
+	// quarantine and proves the controller never entered a provider for the row.
+	CommandActionResultUnauthorizedProvenance CommandActionResult = "unauthorized_provenance"
 	// CommandActionResultRetryExhausted records bounded definite pre-effect
 	// failures whose retry budget is exhausted.
 	CommandActionResultRetryExhausted CommandActionResult = "retry_exhausted"
@@ -252,6 +256,9 @@ const (
 	CommandErrorClassTargetMissing CommandErrorClass = "target_missing"
 	// CommandErrorClassAuthorizationDenied is a terminal claim-time denial.
 	CommandErrorClassAuthorizationDenied CommandErrorClass = "authorization_denied"
+	// CommandErrorClassUnauthorizedProvenance is a terminal rejection of a
+	// command-store row absent from the independent ingress authority journal.
+	CommandErrorClassUnauthorizedProvenance CommandErrorClass = "unauthorized_provenance"
 	// CommandErrorClassRetryExhausted is bounded retry-budget exhaustion.
 	CommandErrorClassRetryExhausted CommandErrorClass = "retry_exhausted"
 	// CommandErrorClassExpired is mechanical delivery-window expiry.

@@ -124,9 +124,9 @@ func TestStartNudgeKeyBeforeReadinessRetriesTransientWhileUnpublished(t *testing
 	cr.nudgeKeyTickerFactory = func(time.Duration) nudgeKeyPeriodicTicker {
 		return nudgeKeyPeriodicTicker{ticks: periodicTicks, stop: func() {}}
 	}
-	cr.nudgeKeyRetryTimerFactory = func(time.Duration) nudgeKeyPeriodicTicker {
+	cr.nudgeKeyRetryTimerFactory = func(time.Duration) nudgeKeyRetryTimer {
 		retryArmed <- struct{}{}
-		return nudgeKeyPeriodicTicker{ticks: retryTicks, stop: func() {}}
+		return nudgeKeyRetryTimer{ticks: retryTicks, stop: func() {}}
 	}
 	type readinessResult struct {
 		stop  func()

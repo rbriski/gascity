@@ -251,6 +251,34 @@ func TestLocalParallelAllowlistIncludesObservableEnv(t *testing.T) {
 	}
 }
 
+// TestLocalParallelRunsJobsInNonLoginShell guards the hermetic per-job
+// environment against login-shell PATH rewriting. Each job command is wrapped
+// in `env -i` with an explicit allowlist — crucially a curated PATH — and then
+// executed in a shell. That shell MUST be non-login (`bash -c`, never
+// `bash -lc`): a login shell re-sources /etc/profile, and on macOS path_helper
+// then front-loads /usr/local/go/bin. A stale `go` there (e.g. go1.17.2)
+// shadows the intended toolchain and rejects the go.mod `go` directive, failing
+// every job with "invalid go version" and breaking the pre-push hook (ga-9dn).
+func TestLocalParallelRunsJobsInNonLoginShell(t *testing.T) {
+	repoRoot := repoRoot(t)
+	script, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "test-local-parallel"))
+	if err != nil {
+		t.Fatalf("read test-local-parallel: %v", err)
+	}
+	// Scan executable lines only. A comment may name the forbidden `bash -lc`
+	// flag pedagogically; the contract is that no job is *run* through one.
+	for i, line := range strings.Split(string(script), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if strings.Contains(line, "bash -lc") {
+			t.Fatalf("test-local-parallel:%d runs a job in a login shell (bash -lc); use bash -c. "+
+				"A login shell re-sources /etc/profile and on macOS path_helper front-loads "+
+				"/usr/local/go/bin, letting a stale go shadow the intended toolchain (ga-9dn)", i+1)
+		}
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()

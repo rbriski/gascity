@@ -180,6 +180,13 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
   log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
   echo "[$label] start"
+  # Run each job in a NON-login shell (bash -c below, never bash -lc). This
+  # block builds a hermetic environment with `env -i` and an explicit
+  # allowlist, including a curated PATH. A login shell would re-source
+  # /etc/profile, and on macOS path_helper then front-loads /usr/local/go/bin;
+  # a stale `go` there (e.g. go1.17.2) shadows the intended toolchain and
+  # rejects the go.mod `go` directive, breaking every job (ga-9dn). Non-login
+  # preserves the exact PATH -- the same `go` the env probes above resolved.
   if ${TEST_LOCAL_NICE:-} env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -211,7 +218,7 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    bash -c "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?

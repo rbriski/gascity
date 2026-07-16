@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -70,6 +71,23 @@ type nudgeFailProvider struct{ *runtime.Fake }
 func (p nudgeFailProvider) Nudge(name string, content []runtime.ContentBlock) error {
 	_ = p.Fake.Nudge(name, content) // still record the call for CountCalls
 	return fmt.Errorf("nudge failed: transport down")
+}
+
+// inertMetadataFailStore injects bounded SetMetadataBatch failures while
+// delegating every other store operation to the real in-memory store.
+type inertMetadataFailStore struct {
+	beads.Store
+	failures int
+	calls    int
+}
+
+func (s *inertMetadataFailStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.calls++
+	if s.failures > 0 {
+		s.failures--
+		return errors.New("metadata unavailable")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 // A desired session inert on a Codex transport failure is observed on the first
@@ -245,9 +263,40 @@ func TestRecoverInertSessions_GivesUpAtCap(t *testing.T) {
 	store := beads.SessionStore{Store: beads.NewMemStoreFrom(0, sessions, nil)}
 	var out bytes.Buffer
 
-	recoverInertSessions(sp, cfg, store, sessions, map[string]bool{"worker-1": true}, map[string]time.Time{}, base.Add(time.Hour), &out)
+	checkpoint := map[string]time.Time{}
+	recoverInertSessions(sp, cfg, store, sessions, map[string]bool{"worker-1": true}, checkpoint, base.Add(time.Hour), &out)
+	recoverInertSessions(sp, cfg, store, sessions, map[string]bool{"worker-1": true}, checkpoint, base.Add(time.Hour+time.Second), &out)
 	if n := sp.CountCalls("Nudge", "worker-1"); n != 0 {
 		t.Fatalf("must not nudge past the cap; nudges=%d", n)
+	}
+	if n := sp.CountCalls("Peek", "worker-1"); n != 1 {
+		t.Fatalf("unchanged exhausted episode must not be peeked every tick; peeks=%d", n)
+	}
+}
+
+// Once an episode is marked, unchanged activity does not need another pane
+// read until its grace/backoff deadline. Activity changes still bypass this
+// checkpoint so recovery can be detected and the marker cleared.
+func TestRecoverInertSessions_SkipsPeekUntilMarkedDeadline(t *testing.T) {
+	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	sp := inertFake(t, "worker-1", base, codexTransportInertPane)
+	cfg := inertTestCfg()
+	s := inertSession("s-1", "worker-1", "polecat")
+	s.Metadata[sessionpkg.InertRecoveryFingerprintKey] = "stream_disconnected"
+	s.Metadata[sessionpkg.InertRecoveryAttemptsKey] = "1"
+	s.Metadata[sessionpkg.InertRecoveryAtKey] = base.Format(time.RFC3339)
+	sessions := []beads.Bead{s}
+	store := beads.SessionStore{Store: beads.NewMemStoreFrom(0, sessions, nil)}
+	checkpoint := map[string]time.Time{"worker-1": base}
+
+	recoverInertSessions(sp, cfg, store, sessions, map[string]bool{"worker-1": true}, checkpoint, base.Add(time.Minute), &bytes.Buffer{})
+	if n := sp.CountCalls("Peek", "worker-1"); n != 0 {
+		t.Fatalf("inside backoff with unchanged activity must skip peek; peeks=%d", n)
+	}
+
+	recoverInertSessions(sp, cfg, store, sessions, map[string]bool{"worker-1": true}, checkpoint, base.Add(inertRecoveryBackoff+time.Second), &bytes.Buffer{})
+	if n := sp.CountCalls("Peek", "worker-1"); n != 1 {
+		t.Fatalf("past backoff must re-inspect before retry; peeks=%d", n)
 	}
 }
 
@@ -279,6 +328,69 @@ func TestRecoverInertSessions_PersistsCountWhenNudgeErrors(t *testing.T) {
 	}
 }
 
+// The attempt marker is the storm-prevention boundary. If it cannot be
+// persisted, the runtime must not receive a nudge that the next tick cannot
+// account for.
+func TestRecoverInertSessions_DoesNotNudgeWhenAttemptMarkerFails(t *testing.T) {
+	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	sp := inertFake(t, "worker-1", base, codexTransportInertPane)
+	cfg := inertTestCfg()
+	s := inertSession("s-1", "worker-1", "polecat")
+	s.Metadata[sessionpkg.InertRecoveryFingerprintKey] = "stream_disconnected"
+	s.Metadata[sessionpkg.InertRecoveryAttemptsKey] = "0"
+	s.Metadata[sessionpkg.InertRecoveryAtKey] = base.Format(time.RFC3339)
+	sessions := []beads.Bead{s}
+	backing := beads.NewMemStoreFrom(0, sessions, nil)
+	failing := &inertMetadataFailStore{Store: backing, failures: 1}
+	store := beads.SessionStore{Store: failing}
+	var out bytes.Buffer
+
+	recoverInertSessions(sp, cfg, store, sessions, map[string]bool{"worker-1": true}, map[string]time.Time{}, base.Add(inertRecoveryGrace+time.Second), &out)
+	if n := sp.CountCalls("Nudge", "worker-1"); n != 0 {
+		t.Fatalf("must not nudge without a persisted attempt marker; nudges=%d", n)
+	}
+	if failing.calls != 1 {
+		t.Fatalf("metadata writes = %d, want 1", failing.calls)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("marking")) {
+		t.Fatalf("expected metadata failure telemetry, got: %q", out.String())
+	}
+}
+
+// A failed first-observation write must not poison the activity checkpoint.
+// The next tick with unchanged pane activity retries the inspection and can
+// arm the durable state machine once persistence is healthy again.
+func TestRecoverInertSessions_RetriesObservationAfterMarkerFailure(t *testing.T) {
+	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	sp := inertFake(t, "worker-1", base, codexTransportInertPane)
+	cfg := inertTestCfg()
+	sessions := []beads.Bead{inertSession("s-1", "worker-1", "polecat")}
+	backing := beads.NewMemStoreFrom(0, sessions, nil)
+	failing := &inertMetadataFailStore{Store: backing, failures: 1}
+	store := beads.SessionStore{Store: failing}
+	desired := map[string]bool{"worker-1": true}
+	checkpoint := map[string]time.Time{}
+	var out bytes.Buffer
+	now := base.Add(inertRecoveryQuietGrace + time.Second)
+
+	recoverInertSessions(sp, cfg, store, sessions, desired, checkpoint, now, &out)
+	recoverInertSessions(sp, cfg, store, sessions, desired, checkpoint, now.Add(time.Second), &out)
+
+	if n := sp.CountCalls("Peek", "worker-1"); n != 2 {
+		t.Fatalf("failed observation marker must be retried; peeks=%d", n)
+	}
+	if failing.calls != 2 {
+		t.Fatalf("metadata writes = %d, want 2", failing.calls)
+	}
+	stored, err := backing.Get("s-1")
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	if got := stored.Metadata[sessionpkg.InertRecoveryFingerprintKey]; got != "stream_disconnected" {
+		t.Fatalf("expected durable marker after retry, got %q", got)
+	}
+}
+
 // Once a session recovers (its pane no longer shows a transport failure), the
 // marker is cleared so the next episode starts fresh.
 func TestRecoverInertSessions_ClearsMarkerOnRecovery(t *testing.T) {
@@ -295,6 +407,53 @@ func TestRecoverInertSessions_ClearsMarkerOnRecovery(t *testing.T) {
 	recoverInertSessions(sp, cfg, store, sessions, map[string]bool{"worker-1": true}, map[string]time.Time{}, base.Add(inertRecoveryQuietGrace+time.Second), &bytes.Buffer{})
 	if got := sessions[0].Metadata[sessionpkg.InertRecoveryFingerprintKey]; got != "" {
 		t.Fatalf("marker should be cleared on recovery, got %q", got)
+	}
+}
+
+// A dead or no-longer-desired session cannot belong to the same recovery
+// episode. Clear its marker without peeking so a later process with the same
+// session bead starts with a fresh attempt budget.
+func TestRecoverInertSessions_ClearsMarkerWhenSessionIsNoLongerEligible(t *testing.T) {
+	base := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name    string
+		running bool
+		desired bool
+	}{
+		{name: "stopped", running: false, desired: true},
+		{name: "not desired", running: true, desired: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sp := inertFake(t, "worker-1", base, codexTransportInertPane)
+			if !tt.running {
+				if err := sp.Stop("worker-1"); err != nil {
+					t.Fatalf("stop fake: %v", err)
+				}
+			}
+			s := inertSession("s-1", "worker-1", "polecat")
+			s.Metadata[sessionpkg.InertRecoveryFingerprintKey] = "stream_disconnected"
+			s.Metadata[sessionpkg.InertRecoveryAttemptsKey] = "2"
+			s.Metadata[sessionpkg.InertRecoveryAtKey] = base.Format(time.RFC3339)
+			sessions := []beads.Bead{s}
+			backing := beads.NewMemStoreFrom(0, sessions, nil)
+			desired := map[string]bool{}
+			if tt.desired {
+				desired["worker-1"] = true
+			}
+
+			recoverInertSessions(sp, inertTestCfg(), beads.SessionStore{Store: backing}, sessions, desired, map[string]time.Time{}, base.Add(time.Hour), &bytes.Buffer{})
+
+			if n := sp.CountCalls("Peek", "worker-1"); n != 0 {
+				t.Fatalf("ineligible session must clear without peek; peeks=%d", n)
+			}
+			stored, err := backing.Get("s-1")
+			if err != nil {
+				t.Fatalf("load stored session: %v", err)
+			}
+			if got := stored.Metadata[sessionpkg.InertRecoveryFingerprintKey]; got != "" {
+				t.Fatalf("stale marker was not cleared, got %q", got)
+			}
+		})
 	}
 }
 

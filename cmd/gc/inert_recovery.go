@@ -57,8 +57,9 @@ const inertRecoveryContinuationFallback = "Your previous turn ended on a provide
 //     session bead, so a controller restart cannot replay it.
 //   - Peeks are bounded by a quiet gate and an in-memory activity checkpoint, so
 //     an ordinary completed turn triggers at most one inspection.
-//   - Nudges are capped per episode; the count is persisted even when a nudge
-//     errors, so a failed nudge still advances the backoff.
+//   - Nudges are capped per episode; the count is persisted before delivery, so
+//     a provider error still advances the backoff and a metadata error sends no
+//     unaccounted nudge.
 func recoverInertSessions(
 	sp runtime.Provider,
 	cfg *config.City,
@@ -84,8 +85,13 @@ func recoverInertSessions(
 
 		// Eligibility: only rescue a session the orchestrator wants running.
 		// Assigned work is a sufficient reason to be desired but not necessary —
-		// an always-on Mayor or patrol with no assignee bead is still desired.
+		// an always-on named session with no assignee bead is still desired.
 		if !desiredNames[name] || !sp.IsRunning(name) {
+			// Death or removal from desired state ends the episode. Clear the
+			// durable marker now so a later process using the same session bead
+			// starts with a fresh attempt budget, without needing a pane read.
+			clearInertRecoveryMarker(sessStore, s, stdout)
+			delete(checkpoint, name)
 			continue
 		}
 
@@ -97,12 +103,16 @@ func recoverInertSessions(
 			continue // still producing output; let it settle (and self-recover)
 		}
 
-		marked := strings.TrimSpace(s.Metadata[sessionpkg.InertRecoveryFingerprintKey]) != ""
+		markedFingerprint := strings.TrimSpace(s.Metadata[sessionpkg.InertRecoveryFingerprintKey])
+		marked := markedFingerprint != ""
+		attempts := atoiOr0(s.Metadata[sessionpkg.InertRecoveryAttemptsKey])
+		lastActionAt := parseRFC3339OrZero(s.Metadata[sessionpkg.InertRecoveryAtKey])
 		// Activity checkpoint: one completed turn → at most one inspection. Skip
-		// re-peeking an unmarked session whose activity is unchanged since the
-		// last look. A marked session (a live failure episode) always re-inspects
-		// so it can drive the observe→nudge→backoff cycle and detect recovery.
-		if !marked && checkpoint[name].Equal(la) {
+		// re-peeking unchanged ordinary output. A marked episode re-inspects only
+		// when its grace/backoff deadline is due; an exhausted episode waits for
+		// new activity. Any activity change bypasses the checkpoint so recovery
+		// can be detected and the marker cleared.
+		if checkpoint[name].Equal(la) && !inertRecoveryReinspectionDue(marked, attempts, lastActionAt, now) {
 			continue
 		}
 
@@ -113,15 +123,14 @@ func recoverInertSessions(
 		checkpoint[name] = la
 		recoverable, fingerprint := runtime.ClassifyInertTransportFailure(pane)
 
-		attempts := atoiOr0(s.Metadata[sessionpkg.InertRecoveryAttemptsKey])
 		facts := sessionpkg.InertRecoveryFacts{
 			Alive:             true,
 			Eligible:          true,
 			TransportFailure:  recoverable,
 			Fingerprint:       fingerprint,
-			MarkedFingerprint: strings.TrimSpace(s.Metadata[sessionpkg.InertRecoveryFingerprintKey]),
+			MarkedFingerprint: markedFingerprint,
 			Attempts:          attempts,
-			LastActionAt:      parseRFC3339OrZero(s.Metadata[sessionpkg.InertRecoveryAtKey]),
+			LastActionAt:      lastActionAt,
 			Now:               now,
 			Grace:             inertRecoveryGrace,
 			Backoff:           inertRecoveryBackoff,
@@ -130,13 +139,19 @@ func recoverInertSessions(
 
 		switch sessionpkg.DecideInertRecovery(facts) {
 		case sessionpkg.RecoverObserve:
-			applyInertRecoveryMarker(sessStore, s, sessionpkg.InertRecoveryObservePatch(fingerprint, now), stdout)
+			if !applyInertRecoveryMarker(sessStore, s, sessionpkg.InertRecoveryObservePatch(fingerprint, now), stdout) {
+				// The activity checkpoint must not hide an episode whose durable
+				// observation marker failed. Reinspect the same pane next tick.
+				delete(checkpoint, name)
+			}
 		case sessionpkg.RecoverNudge:
+			// The marker is the storm-prevention boundary: persist the attempt and
+			// cooldown BEFORE delivery. If persistence is unavailable, send no
+			// unaccounted nudge that a controller restart or next tick could replay.
+			if !applyInertRecoveryMarker(sessStore, s, sessionpkg.InertRecoveryNudgePatch(fingerprint, attempts+1, now), stdout) {
+				continue
+			}
 			nudgeErr := sp.Nudge(name, runtime.TextContent(inertContinuationNudge(cfg, *s)))
-			// Persist the attempt count and cooldown REGARDLESS of nudge success,
-			// so a failed nudge still advances the backoff and cannot re-nudge
-			// every tick.
-			applyInertRecoveryMarker(sessStore, s, sessionpkg.InertRecoveryNudgePatch(fingerprint, attempts+1, now), stdout)
 			if nudgeErr != nil {
 				fmt.Fprintf(stdout, "inert-recovery: nudge %s failed after transport failure %q (attempt %d/%d): %v\n", name, fingerprint, attempts+1, inertRecoveryMaxAttempts, nudgeErr) //nolint:errcheck // best-effort telemetry
 			} else {
@@ -157,6 +172,17 @@ func recoverInertSessions(
 	}
 }
 
+func inertRecoveryReinspectionDue(marked bool, attempts int, lastActionAt, now time.Time) bool {
+	if !marked || attempts >= inertRecoveryMaxAttempts {
+		return false
+	}
+	wait := inertRecoveryBackoff
+	if attempts <= 0 {
+		wait = inertRecoveryGrace
+	}
+	return lastActionAt.IsZero() || now.Sub(lastActionAt) >= wait
+}
+
 // inertContinuationNudge resolves the continuation nudge for a session: the
 // agent's own configured Nudge (which re-engages it with its work) when set,
 // otherwise a generic, role-neutral resume message.
@@ -169,12 +195,14 @@ func inertContinuationNudge(cfg *config.City, session beads.Bead) string {
 
 // applyInertRecoveryMarker persists the inert-recovery state machine onto the
 // session bead and mirrors it into the in-memory snapshot so the rest of this
-// tick reads the just-written values.
-func applyInertRecoveryMarker(sessStore beads.SessionStore, s *beads.Bead, patch sessionpkg.MetadataPatch, stdout io.Writer) {
+// tick reads the just-written values. It reports whether the durable write
+// succeeded; callers must not perform an action whose retry bound depends on a
+// marker that was not stored.
+func applyInertRecoveryMarker(sessStore beads.SessionStore, s *beads.Bead, patch sessionpkg.MetadataPatch, stdout io.Writer) bool {
 	kvs := map[string]string(patch)
 	if err := sessStore.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "inert-recovery: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
-		return
+		return false
 	}
 	if s.Metadata == nil {
 		s.Metadata = make(map[string]string, len(kvs))
@@ -182,6 +210,7 @@ func applyInertRecoveryMarker(sessStore beads.SessionStore, s *beads.Bead, patch
 	for k, v := range kvs {
 		s.Metadata[k] = v
 	}
+	return true
 }
 
 // clearInertRecoveryMarker wipes the marker once a session is no longer inert on

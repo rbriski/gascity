@@ -24,37 +24,42 @@ const (
 
 // transportFailureTailLines bounds how close to the current prompt a transport
 // failure must appear to count as the turn's final output. A tight recent
-// suffix is what keeps pasted or scrolled-back error text from false-triggering
-// recovery: only a live-turn failure that left the session inert at its prompt
-// qualifies (ga-qox forensic guidance).
+// suffix plus terminal-block matching keeps pasted, scrolled-back, or
+// successfully-retried error text from false-triggering recovery: only a
+// live-turn failure immediately preceding the current idle prompt qualifies
+// (ga-qox forensic guidance).
 const transportFailureTailLines = 20
 
 // ClassifyInertTransportFailure reports whether pane content shows a provider
 // transport failure that aborted the turn and left the session inert at its
 // prompt, plus a stable coarse reason token for dedup and telemetry.
 //
-// recoverable is true only when BOTH hold within the recent tail:
-//   - a high-confidence, provider-neutral transport-failure signature (Codex
-//     WebSockets→HTTPS fallback timeout / HTTPS stream disconnect, or a DNS
-//     lookup failure such as Claude's ENOTFOUND), and
-//   - an idle prompt indicator, proving the turn ended and the agent is waiting
-//     for input rather than still working.
+// recoverable is true only when a high-confidence, provider-neutral
+// transport-failure block (Codex WebSockets→HTTPS fallback timeout / HTTPS
+// stream disconnect, or a DNS lookup failure such as Claude's ENOTFOUND)
+// immediately precedes the current idle prompt in the recent pane tail.
 //
-// Requiring the idle prompt means an active turn (still retrying internally, no
-// prompt) is never classified; requiring the signature means an ordinary idle
-// prompt is never classified; bounding both to the recent tail means historical
-// or pasted error text cannot false-trigger. The classifier is pure and
-// provider-neutral — it matches provider error strings, never a role or a
-// provider name in Go control flow.
+// Requiring the prompt after the terminal block means a prompt retained from a
+// prior turn cannot make a currently-active retry look idle. Requiring the
+// immediately preceding block means a warning followed by a successful HTTPS
+// fallback, or any historical/pasted error followed by healthy output, cannot
+// false-trigger. The classifier is pure and provider-neutral — it matches
+// provider error strings, never a role or a provider name in Go control flow.
 func ClassifyInertTransportFailure(content string) (recoverable bool, reason string) {
 	tail := recentTail(content, transportFailureTailLines)
 	if tail == "" {
 		return false, ""
 	}
-	if !containsPromptIndicator(tail) {
+	terminalBlock := terminalOutputBlockBeforePrompt(tail)
+	if terminalBlock == "" {
 		return false, ""
 	}
-	reason = transportFailureReason(tail)
+	for _, line := range strings.Split(terminalBlock, "\n") {
+		if !isTransportFailureBlockLine(line) {
+			return false, ""
+		}
+	}
+	reason = transportFailureReason(terminalBlock)
 	return reason != "", reason
 }
 
@@ -63,6 +68,10 @@ func ClassifyInertTransportFailure(content string) (recoverable bool, reason str
 // most actionable root cause first: a name-resolution failure is reported over
 // the downstream stream/transport symptoms it triggers.
 func transportFailureReason(content string) string {
+	// capture-pane can split a long terminal message across physical lines.
+	// Collapse whitespace before matching so a wrapped
+	// "failed to lookup address information" retains its DNS fingerprint.
+	content = strings.Join(strings.Fields(content), " ")
 	switch {
 	case containsDNSLookupFailure(content):
 		return transportFailureDNSLookup
@@ -75,6 +84,130 @@ func transportFailureReason(content string) string {
 	default:
 		return ""
 	}
+}
+
+// terminalOutputBlockBeforePrompt returns the final contiguous output block
+// immediately before the most recent prompt in content. Blank lines and TUI
+// horizontal rules directly around the prompt are presentation chrome. A
+// prompt that appears before newer output yields no terminal block after it,
+// which is how an active turn with an old retained prompt is rejected.
+func terminalOutputBlockBeforePrompt(content string) string {
+	lines := strings.Split(content, "\n")
+	prompt := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if isAgentPromptIndicator(lines[i]) {
+			prompt = i
+			break
+		}
+	}
+	if prompt < 0 {
+		return ""
+	}
+	// The most recent prompt may belong to a completed failed turn while a newer
+	// turn is already producing output below it. In that case the session is not
+	// inert on the old error, even though the old error/prompt pair remains in
+	// the bounded tail.
+	if suffix := strings.Join(lines[prompt+1:], "\n"); transportFailureReason(suffix) != "" || containsTurnOutput(suffix) {
+		return ""
+	}
+
+	i := prompt - 1
+	for i >= 0 && isPromptSpacingOrChrome(lines[i]) {
+		i--
+	}
+	if i < 0 {
+		return ""
+	}
+	end := i
+	for i >= 0 && !isPromptSpacingOrChrome(lines[i]) {
+		i--
+	}
+	return strings.Join(lines[i+1:end+1], "\n")
+}
+
+// isAgentPromptIndicator is the narrow live-agent subset of the generic
+// dialog prompt detector. Shell prompts ($/%/#) are deliberately excluded: if
+// the provider process exited back to a shell, injecting a continuation nudge
+// as shell input would not preserve or resume the agent conversation.
+func isAgentPromptIndicator(line string) bool {
+	trimmed := strings.ReplaceAll(line, "\u00a0", " ")
+	trimmed = strings.TrimRight(trimmed, " \t")
+	trimmed = stripLeadingBoxBorder(trimmed)
+	for _, prefix := range []string{"❯", "›", ">"} {
+		rest, ok := strings.CutPrefix(trimmed, prefix+" ")
+		if trimmed == prefix || (ok && !isNumberedMenuRow(rest)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTurnOutput(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		for _, prefix := range []string{"●", "•", "⏺", "⎿", "└", "·", "✶", "✻"} {
+			if strings.HasPrefix(line, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isTransportFailureBlockLine accepts only terminal error text and the small
+// set of physical-line continuations produced when tmux wraps the known
+// provider messages. Rejecting arbitrary lines in the terminal block is what
+// distinguishes a failed turn from a warning followed by healthy output.
+func isTransportFailureBlockLine(line string) bool {
+	line = strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+	if line == "" {
+		return true
+	}
+	// Provider UIs prefix healthy assistant/tool output with these glyphs. An
+	// exact error string quoted in a successful final explanation is evidence,
+	// not a terminal provider error.
+	for _, prefix := range []string{"●", "•", "⏺", "⎿", "└", "✓"} {
+		if strings.HasPrefix(line, prefix) {
+			return false
+		}
+	}
+	if transportFailureReason(line) != "" {
+		return true
+	}
+	lower := strings.ToLower(line)
+	for _, fragment := range []string{
+		"stream error:",
+		"api error:",
+		"request timed out",
+		"getaddrinfo",
+		"nodename nor servname",
+		"servname provided",
+		"or not known",
+		"chatgpt.com/backend-api",
+		"codex/responses",
+		"api.anthropic.com",
+	} {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPromptSpacingOrChrome(line string) bool {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+	if trimmed == "" {
+		return true
+	}
+	for _, r := range trimmed {
+		switch r {
+		case '─', '━', '═', '┄', '┅', '┈', '┉', '╌', '╍', '-', '_':
+			// Horizontal TUI rule.
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // containsDNSLookupFailure detects a name-resolution failure across providers:

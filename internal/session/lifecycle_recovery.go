@@ -28,8 +28,9 @@ const (
 	// InertRecoveryFingerprintKey holds the coarse reason token of the failure
 	// episode currently being recovered.
 	InertRecoveryFingerprintKey = "inert_recovery_fingerprint"
-	// InertRecoveryAttemptsKey holds the count of continuation nudges delivered
-	// for that episode.
+	// InertRecoveryAttemptsKey holds the count of continuation-nudge attempts
+	// reserved for that episode. The caller persists an attempt before delivery,
+	// so provider errors and controller restarts cannot replay it unboundedly.
 	InertRecoveryAttemptsKey = "inert_recovery_count"
 	// InertRecoveryAtKey holds the RFC3339 time of the last observation or nudge.
 	InertRecoveryAtKey = "inert_recovery_at"
@@ -64,9 +65,9 @@ type InertRecoveryFacts struct {
 	// Alive reports the session process is running.
 	Alive bool
 	// Eligible reports the session is one the orchestrator wants making progress
-	// — a desired/live session (an always-on named role, a Mayor or human-turn
+	// — a desired/live session (an always-on named role or human-turn
 	// session, or a pool worker with routed work). Durable assigned work is a
-	// sufficient signal but not a necessary one: a Mayor or patrol session with
+	// sufficient signal but not a necessary one: a named control session with
 	// no assignee bead is still eligible. The caller decides eligibility; this
 	// package only gates recovery on it so a session the orchestrator is not
 	// keeping alive is never nudged.
@@ -140,8 +141,9 @@ func InertRecoveryObservePatch(fingerprint string, now time.Time) MetadataPatch 
 	return inertRecoveryMarker(fingerprint, 0, now)
 }
 
-// InertRecoveryNudgePatch records a delivered continuation nudge: the
-// fingerprint, the new attempt count, and the nudge time.
+// InertRecoveryNudgePatch reserves a continuation-nudge attempt: the
+// fingerprint, the new attempt count, and the attempt time. Callers persist it
+// before delivery so the retry bound remains durable even when delivery fails.
 func InertRecoveryNudgePatch(fingerprint string, attempts int, now time.Time) MetadataPatch {
 	return inertRecoveryMarker(fingerprint, attempts, now)
 }

@@ -27,6 +27,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -189,6 +191,112 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 		}
 		return !WorkflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef)
 	})
+	slices.SortFunc(roots, func(a, b beads.Bead) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return roots, nil
+}
+
+// WorkflowSourceTerminal reports whether the source work a graph workflow root
+// processes is already terminal (closed/tombstone). It prefers the explicit
+// gc.source_bead_id link, falling back to the root's gc.input_convoy_id and the
+// members that convoy tracks — graph.v2 pool-routed roots clear
+// gc.source_bead_id, so the input-convoy members are their only durable link
+// back to the work issue (see cmd/gc collectInputConvoyWorkflowRoots).
+//
+// It returns true only when at least one source item resolves and every
+// resolved source item is terminal. A root with no source link, an
+// unresolvable source, an empty input convoy, or any still-open (or unresolved,
+// "unknown"-status) member returns false, so callers never force-finalize a
+// workflow whose work might still be live. memberStores supplies additional
+// per-class stores to probe for a source that lives in a different store than
+// the root; single-store deployments pass none.
+func WorkflowSourceTerminal(store beads.Store, root beads.Bead, memberStores ...beads.Store) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	if src := NormalizeSourceBeadID(root.Metadata[beadmeta.SourceBeadIDMetadataKey]); src != "" {
+		probe := append([]beads.Store{store}, memberStores...)
+		bead, err := storeref.Resolve(src, probe)
+		if err != nil {
+			// An unresolvable source is not proof of terminality; leave the
+			// workflow alone rather than force-finalize on a read miss.
+			return false, nil //nolint:nilerr
+		}
+		return convoycore.IsTerminalStatus(bead.Status), nil
+	}
+	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if convoyID == "" {
+		return false, nil
+	}
+	members, err := convoycore.Members(store, convoyID, true, memberStores...)
+	if err != nil {
+		return false, err
+	}
+	if len(members) == 0 {
+		return false, nil
+	}
+	for _, member := range members {
+		if !convoycore.IsTerminalStatus(member.Status) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// ListLiveRootsByInputConvoy returns the live (non-terminal) graph.v2 workflow
+// roots linked to id through gc.input_convoy_id. It covers the two ways id can
+// name a stale workflow's source: id is itself the input convoy, or id is a
+// work bead that a synthetic one-item input convoy tracks. Graph.v2
+// pool-routed roots clear gc.source_bead_id, so this input-convoy path is the
+// only discovery that reaches them — the source-bead-keyed ListLiveRoots
+// cannot (see the gc.source_bead_id clearing in internal/sling
+// doStartGraphWorkflow).
+//
+// Only graph.v2 roots are returned: a legacy gc.kind=workflow root keeps its
+// gc.source_bead_id link and is reached through ListLiveRoots instead, so
+// force-closing it off an input-convoy match would be wrong (this mirrors
+// cmd/gc collectInputConvoyWorkflowRoots). memberStores is accepted for
+// signature parity with the other membership-aware helpers.
+func ListLiveRootsByInputConvoy(store beads.Store, id string, memberStores ...beads.Store) ([]beads.Bead, error) {
+	id = strings.TrimSpace(id)
+	if store == nil || id == "" {
+		return nil, nil
+	}
+	// id may be the input convoy itself, or a work bead the input convoy
+	// tracks; collect both candidate convoy ids.
+	convoyIDs := map[string]struct{}{id: {}}
+	convoys, err := convoycore.TrackingConvoysForItem(store, id, memberStores...)
+	if err != nil {
+		return nil, fmt.Errorf("listing tracking convoys for %s: %w", id, err)
+	}
+	for _, convoy := range convoys {
+		convoyIDs[convoy.ID] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	var roots []beads.Bead
+	for convoyID := range convoyIDs {
+		matches, err := store.ListByMetadata(
+			map[string]string{beadmeta.InputConvoyIDMetadataKey: convoyID},
+			0, beads.WithBothTiers,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("listing workflow roots for input convoy %s: %w", convoyID, err)
+		}
+		for _, root := range matches {
+			if _, ok := seen[root.ID]; ok {
+				continue
+			}
+			if convoycore.IsTerminalStatus(root.Status) || !IsWorkflowRoot(root) {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
+				continue
+			}
+			seen[root.ID] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
 	slices.SortFunc(roots, func(a, b beads.Bead) int {
 		return strings.Compare(a.ID, b.ID)
 	})

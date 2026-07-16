@@ -107,6 +107,13 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 
+	// inertScanCheckpoint records, per session name, the GetLastActivity value
+	// the inert-recovery lane last inspected (ga-qox). It bounds pane peeks so an
+	// ordinary completed turn triggers at most one inspection; it is in-memory
+	// (fine to lose on restart — only detected-failure state is persisted on the
+	// session bead) and pruned to live sessions each tick.
+	inertScanCheckpoint map[string]time.Time
+
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
@@ -2371,6 +2378,21 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
 	} else {
 		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, assignedWorkBeads, time.Now(), cr.stdout)
+		// Inert-recovery: rescue a desired session left alive but inert after a
+		// provider transport failure (ga-qox / incident ci-emg). Reuses the same
+		// session-bead snapshot; keys eligibility on the orchestrator-desired set
+		// so it is role-neutral (Mayor, patrols, and pool slots alike). tmux's
+		// relaunch/respawn heals only a DIED session; this heals a live one frozen
+		// at its prompt after a DNS/WebSocket/HTTPS/stream drop. See
+		// recoverInertSessions for the full invariant.
+		if cr.inertScanCheckpoint == nil {
+			cr.inertScanCheckpoint = make(map[string]time.Time)
+		}
+		desiredNames := make(map[string]bool, len(desiredState))
+		for sn := range desiredState {
+			desiredNames[sn] = true
+		}
+		recoverInertSessions(cr.sp, cr.cfg, sessStore, stalledPoolBeads, desiredNames, cr.inertScanCheckpoint, time.Now(), cr.stdout)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }

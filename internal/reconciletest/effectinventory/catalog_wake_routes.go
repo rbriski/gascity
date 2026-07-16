@@ -2,9 +2,27 @@ package effectinventory
 
 // wakeCatalogReviewedExplicitRoutes records the source-reviewed logical ownership
 // paths for production waits that are reachable from more than one process anchor,
-// plus the five reviewed sites whose reverse-reachability candidates were narrowed
+// plus the eleven reviewed sites whose reverse-reachability candidates were narrowed
 // to a single process. Every edge is re-proved against production SSA by the bound-head test.
 var wakeCatalogReviewedExplicitRoutes = map[string][]catalogExplicitRoute{
+	wakeCatalogReviewedSiteKey("wake.context.done", OperationSelectReceive, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "CachingStore", "cachedCountContext", "internal/beads/caching_store_reads.go"), 1): {
+		wakeCatalogCachingCountRoute(wakeClassControllerAPI),
+	},
+	wakeCatalogReviewedSiteKey("wake.context.done", OperationSelectReceive, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "MemStore", "ReadyContext", "internal/beads/memstore.go"), 1): {
+		wakeCatalogMemReadyRoute(wakeClassControllerAPI),
+	},
+	wakeCatalogReviewedSiteKey("wake.context.done", OperationSelectReceive, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/runtime/tmux", "Provider", "NudgeEffect", "internal/runtime/tmux/nudge_effect.go"), 1): {
+		wakeCatalogTmuxNudgeEffectRoute(wakeClassControllerController),
+	},
+	wakeCatalogReviewedSiteKey("wake.time.ticker", OperationSelectReceive, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "CachingStore", "cachedCountContext", "internal/beads/caching_store_reads.go"), 1): {
+		wakeCatalogCachingCountRoute(wakeClassTimersAPI),
+	},
+	wakeCatalogReviewedSiteKey("wake.time.ticker", OperationSelectReceive, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "MemStore", "ReadyContext", "internal/beads/memstore.go"), 1): {
+		wakeCatalogMemReadyRoute(wakeClassTimersAPI),
+	},
+	wakeCatalogReviewedSiteKey("wake.time.timer", OperationSelectReceive, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/runtime/tmux", "Provider", "NudgeEffect", "internal/runtime/tmux/nudge_effect.go"), 1): {
+		wakeCatalogTmuxNudgeEffectRoute(wakeClassTimersController),
+	},
 	wakeCatalogReviewedSiteKey("wake.context.done", OperationSelectReceive, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/cmd/gc", "", "acquireProviderSemaphore", "cmd/gc/beads_provider_lifecycle.go"), 1): {
 		{Class: wakeClassControllerAPI, LogicalOwner: wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/api", "", "reassignOpenWorkAssignedToSession", "internal/api/session_resolution.go"), Hops: []RouteHop{
 			wakeCatalogReviewedHop(OperationCall, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/api", "", "reassignOpenWorkAssignedToSession", "internal/api/session_resolution.go"), 1, HopDispatchVTA, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "NativeDoltStore", "List", "internal/beads/native_dolt_store.go")),
@@ -455,6 +473,33 @@ var wakeCatalogReviewedExplicitRoutes = map[string][]catalogExplicitRoute{
 			wakeCatalogReviewedHop(OperationCall, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/sourceworkflow", "", "WithLock", "internal/sourceworkflow/sourceworkflow.go"), 1, HopDispatchExact, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/sourceworkflow", "", "lockFile", "internal/sourceworkflow/sourceworkflow.go")),
 		}},
 	},
+}
+
+func wakeCatalogCachingCountRoute(classID catalogRouteClassID) catalogExplicitRoute {
+	logicalOwner := wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/api", "", "statusCountWork", "internal/api/handler_status.go")
+	count := wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "CachingStore", "Count", "internal/beads/caching_store_reads.go")
+	return catalogExplicitRoute{Class: classID, LogicalOwner: logicalOwner, Hops: []RouteHop{
+		wakeCatalogReviewedHop(OperationCall, logicalOwner, 1, HopDispatchVTA, count),
+		wakeCatalogReviewedHop(OperationCall, count, 1, HopDispatchExact, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "CachingStore", "cachedCountContext", "internal/beads/caching_store_reads.go")),
+	}}
+}
+
+func wakeCatalogMemReadyRoute(classID catalogRouteClassID) catalogExplicitRoute {
+	logicalOwner := wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/api", "", "statusReadyStoreWithTimeout", "internal/api/handler_status.go")
+	return catalogExplicitRoute{Class: classID, LogicalOwner: logicalOwner, Hops: []RouteHop{
+		wakeCatalogReviewedHop(OperationCall, logicalOwner, 1, HopDispatchVTA, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/beads", "MemStore", "ReadyContext", "internal/beads/memstore.go")),
+	}}
+}
+
+func wakeCatalogTmuxNudgeEffectRoute(classID catalogRouteClassID) catalogExplicitRoute {
+	logicalOwner := wakeCatalogReviewedFunction("github.com/gastownhall/gascity/cmd/gc", "nudgeKeyEffectOwner", "reconcile", "cmd/gc/nudge_key_effect_owner.go")
+	handleNudge := wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/worker", "RuntimeHandle", "Nudge", "internal/worker/runtime_handle.go")
+	handleEffect := wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/worker", "RuntimeHandle", "nudgeEffect", "internal/worker/runtime_handle.go")
+	return catalogExplicitRoute{Class: classID, LogicalOwner: logicalOwner, Hops: []RouteHop{
+		wakeCatalogReviewedHop(OperationCall, logicalOwner, 1, HopDispatchVTA, handleNudge),
+		wakeCatalogReviewedHop(OperationCall, handleNudge, 1, HopDispatchExact, handleEffect),
+		wakeCatalogReviewedHop(OperationCall, handleEffect, 1, HopDispatchVTA, wakeCatalogReviewedFunction("github.com/gastownhall/gascity/internal/runtime/tmux", "Provider", "NudgeEffect", "internal/runtime/tmux/nudge_effect.go")),
+	}}
 }
 
 func wakeCatalogReviewedFunction(packagePath, receiver, name, file string, closurePath ...int) FunctionRef {

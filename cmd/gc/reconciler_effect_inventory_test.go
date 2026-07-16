@@ -110,8 +110,8 @@ func assertBoundHeadEffectCounts(t *testing.T, compiled effectinventory.Compiled
 	t.Helper()
 	const (
 		wantBoundaries    = 80
-		wantRegistrations = 1091
-		wantRoutes        = 1142
+		wantRegistrations = 1102
+		wantRoutes        = 1153
 	)
 	if got := len(compiled.Boundaries); got != wantBoundaries {
 		t.Errorf("effect boundaries = %d, want %d", got, wantBoundaries)
@@ -145,7 +145,7 @@ func assertBoundHeadEffectCounts(t *testing.T, compiled effectinventory.Compiled
 		effectinventory.KindProviderMutation: 241,
 		effectinventory.KindProcessMutation:  54,
 		effectinventory.KindEventEmission:    90,
-		effectinventory.KindWakeSource:       292,
+		effectinventory.KindWakeSource:       303,
 	} {
 		if got := registrationsByKind[kind]; got != want {
 			t.Errorf("%s physical registrations = %d, want %d", kind, got, want)

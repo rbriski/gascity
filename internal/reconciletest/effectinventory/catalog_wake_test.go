@@ -10,19 +10,19 @@ import (
 )
 
 const (
-	wakeScaffoldFingerprint      = "a12c326a68cbbd1fd33088b0ccca306ec53042595ad5c9c8d99a4477f7559958"
-	wakeSemanticFingerprint      = "83dee76c3904d814c5abc3fee833b7224a0d9ebf53997f89af462f1a0a4a130e"
-	wakeExplicitRouteFingerprint = "7601613241a309de90bd47ee4e524d5cf078380e20ec46fa21c7a27364b1b060"
+	wakeScaffoldFingerprint      = "6b652eca069cbf3a9c3e324e77b6ca6ac2e81cc4e05475ec87c02788c77924c1"
+	wakeSemanticFingerprint      = "d2e64025a9a361fae8a4804c641ecc5367b5eb06bf700370e65f9d5258251264"
+	wakeExplicitRouteFingerprint = "1ece5212a846dc531a526bd752345d97ad715784e70142158fb1fe6d8a7dbcc4"
 )
 
 func TestWakeCatalogCoversTypedScaffoldExactlyOnce(t *testing.T) {
-	assertProcessEventCatalogScaffold(t, KindWakeSource, wakeCatalogSiteRows(), 292, "wake-scaffold-site-v1", wakeScaffoldFingerprint)
+	assertProcessEventCatalogScaffold(t, KindWakeSource, wakeCatalogSiteRows(), 303, "wake-scaffold-site-v1", wakeScaffoldFingerprint)
 }
 
 func TestWakeCatalogPinsEveryPhysicalSiteSemanticClassSelection(t *testing.T) {
 	rows := wakeCatalogSiteRows()
-	records := make([]string, 0, 327)
-	explicitRouteRecords := make([]string, 0, 62)
+	records := make([]string, 0, 338)
+	explicitRouteRecords := make([]string, 0, 68)
 	for _, row := range rows {
 		physicalKey := registrationPhysicalKey(row.BoundaryID, row.Matcher)
 		classes := append([]catalogRouteClassID(nil), row.Classes...)
@@ -50,8 +50,8 @@ func TestWakeCatalogPinsEveryPhysicalSiteSemanticClassSelection(t *testing.T) {
 			))
 		}
 	}
-	if got := len(records); got != 327 {
-		t.Fatalf("wake semantic selections = %d, want 327 physical-route pairs", got)
+	if got := len(records); got != 338 {
+		t.Fatalf("wake semantic selections = %d, want 338 physical-route pairs", got)
 	}
 	sort.Strings(records)
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(records, "\n"))))
@@ -59,8 +59,8 @@ func TestWakeCatalogPinsEveryPhysicalSiteSemanticClassSelection(t *testing.T) {
 		t.Fatalf("wake semantic fingerprint = %q, want exact class-selection fingerprint %q", fingerprint, wakeSemanticFingerprint)
 	}
 
-	if got := len(explicitRouteRecords); got != 62 {
-		t.Fatalf("wake reviewed explicit-route evidence records = %d, want 62", got)
+	if got := len(explicitRouteRecords); got != 68 {
+		t.Fatalf("wake reviewed explicit-route evidence records = %d, want 68", got)
 	}
 	sort.Strings(explicitRouteRecords)
 	explicitRouteFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(explicitRouteRecords, "\n"))))
@@ -254,8 +254,8 @@ func TestWakeCatalogAuthorsDistinctCLIAndSidecarOriginsForSharedProductMetricsWa
 }
 
 func TestWakeCatalogAuthorsEveryReviewedProductionOwnershipRouteExplicitly(t *testing.T) {
-	if got := len(wakeCatalogReviewedExplicitRoutes); got != 30 {
-		t.Fatalf("reviewed production explicit-route keys = %d, want 30", got)
+	if got := len(wakeCatalogReviewedExplicitRoutes); got != 36 {
+		t.Fatalf("reviewed production explicit-route keys = %d, want 36", got)
 	}
 	for _, spec := range wakeCatalogSiteSpecs {
 		physicalKey := wakeCatalogReviewedSiteKey(spec.BoundaryID, spec.Operation, FunctionRef{
@@ -314,11 +314,11 @@ func TestWakeCatalogAuthorsEveryReviewedProductionOwnershipRouteExplicitly(t *te
 		}
 	}
 
-	if explicitSites != 30 || explicitRoutes != 62 {
-		t.Fatalf("reviewed production explicit sites/routes = %d/%d, want 30/62", explicitSites, explicitRoutes)
+	if explicitSites != 36 || explicitRoutes != 68 {
+		t.Fatalf("reviewed production explicit sites/routes = %d/%d, want 36/68", explicitSites, explicitRoutes)
 	}
-	if singletonSites != 5 || sharedSites != 25 {
-		t.Fatalf("reviewed production singleton/shared explicit sites = %d/%d, want 5/25", singletonSites, sharedSites)
+	if singletonSites != 11 || sharedSites != 25 {
+		t.Fatalf("reviewed production singleton/shared explicit sites = %d/%d, want 11/25", singletonSites, sharedSites)
 	}
 	for physicalKey := range wakeCatalogReviewedExplicitRoutes {
 		if !matchedKeys[physicalKey] {

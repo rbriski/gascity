@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-const storeScaffoldFingerprint = "79b0c4c97f8e8f68897aaa50aac6f56874ece2d8a4f35b1987e61873261e3a55"
+const storeScaffoldFingerprint = "7227878a65b97cedb40d251cd48fa3ee122579be7f3035e39e8eb49551e8a5e9"
 
 func TestStoreCatalogCoversScaffoldExactlyOnce(t *testing.T) {
 	rows := storeCatalogSiteRows()

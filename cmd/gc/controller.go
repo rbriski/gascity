@@ -1364,7 +1364,8 @@ func runControllerWithLease(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	rolloutFlags, nudgeEffectSelection, err := resolveNudgeEffectStartup(context.Background(), cfg, sp)
+	cityName := loadedCityName(cfg, cityPath)
+	rolloutFlags, nudgeEffectSelection, err := resolveNudgeEffectStartupForCity(context.Background(), cfg, sp, cityPath, cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: nudge effect owner: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1372,6 +1373,14 @@ func runControllerWithLease(
 	if nudgeEffectSelection.Notice != "" {
 		fmt.Fprintf(stderr, "gc start: nudge effect owner: %s\n", nudgeEffectSelection.Notice) //nolint:errcheck // best-effort stderr
 	}
+	nudgeBindingTransferred := false
+	defer func() {
+		if !nudgeBindingTransferred && nudgeEffectSelection.Binding != nil {
+			if err := nudgeEffectSelection.Binding.Close(); err != nil {
+				fmt.Fprintf(stderr, "gc start: nudge effect owner cleanup: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1418,7 +1427,6 @@ func runControllerWithLease(
 	}
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
-	cityName := loadedCityName(cfg, cityPath)
 	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
@@ -1445,9 +1453,12 @@ func runControllerWithLease(
 		PokeCh:                  pokeCh,
 		ControlDispatcherCh:     controlDispatcherCh,
 		NudgeEffectOwnership:    nudgeEffectSelection.Ownership,
+		NudgeAuthorityBinding:   nudgeEffectSelection.Binding,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
 	})
+	nudgeBindingTransferred = true
+	defer cr.shutdown()
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for

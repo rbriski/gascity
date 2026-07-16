@@ -13,7 +13,10 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-var errNudgeEffectStartupRefused = errors.New("keyed nudge effect ownership startup refused")
+var (
+	errNudgeEffectStartupRefused  = errors.New("keyed nudge effect ownership startup refused")
+	errNudgeEffectStartupDegraded = errors.New("keyed nudge effect ownership startup degraded")
+)
 
 // nudgeEffectStartupCapabilities is the complete mechanical evidence required
 // before a process may become the durable keyed nudge effect owner. Booleans
@@ -27,13 +30,25 @@ type nudgeEffectStartupCapabilities struct {
 	TrustedCityPartition         bool
 	TrustedCityPartitionResolver bool
 	ClaimAuthorizer              bool
+	CommandProducersCovered      bool
 	ProviderEffect               bool
 	CommandSecurity              nudgequeue.CommandSecurityCapabilities
 }
 
 type nudgeEffectStartupSelection struct {
-	Ownership nudgeEffectOwnership
-	Notice    string
+	Ownership  nudgeEffectOwnership
+	Notice     string
+	Binding    *productionNudgeAuthorityBinding
+	Diagnostic error
+}
+
+// nudgeEffectStartupDegradation is retained in auto mode so callers can emit
+// and observe a typed reason while the legacy owner remains authoritative.
+type nudgeEffectStartupDegradation struct {
+	Mode    rollout.Mode
+	Profile nudgequeue.CommandSecurityProfile
+	Reason  string
+	cause   error
 }
 
 // nudgeEffectStartupRefusal is the typed startup failure retained by both the
@@ -51,12 +66,39 @@ func resolveBootRolloutFlags(cfg *config.City) (rollout.Flags, error) {
 	return rollout.Resolve(cfg, rollout.ResolveOptions{})
 }
 
-// resolveNudgeEffectStartup resolves the boot latch once, then selects nudge
-// effect ownership from current production evidence without re-reading config.
-func resolveNudgeEffectStartup(
+type productionNudgeAuthorityBindingOpener func(
+	context.Context,
+	string,
+	string,
+	rollout.Mode,
+) (*productionNudgeAuthorityBinding, error)
+
+// resolveNudgeEffectStartupForCity resolves and retains the production
+// authority bundle for one canonical controller-selected city identity.
+func resolveNudgeEffectStartupForCity(
 	ctx context.Context,
 	cfg *config.City,
 	sp runtime.Provider,
+	cityPath string,
+	canonicalCityIdentity string,
+) (rollout.Flags, nudgeEffectStartupSelection, error) {
+	return resolveNudgeEffectStartupForCityWithOpener(
+		ctx,
+		cfg,
+		sp,
+		cityPath,
+		canonicalCityIdentity,
+		openProductionNudgeAuthorityBinding,
+	)
+}
+
+func resolveNudgeEffectStartupForCityWithOpener(
+	ctx context.Context,
+	cfg *config.City,
+	sp runtime.Provider,
+	cityPath string,
+	canonicalCityIdentity string,
+	opener productionNudgeAuthorityBindingOpener,
 ) (rollout.Flags, nudgeEffectStartupSelection, error) {
 	flags, err := resolveBootRolloutFlags(cfg)
 	if err != nil {
@@ -71,15 +113,97 @@ func resolveNudgeEffectStartup(
 			err,
 		)
 	}
-	selection, err := selectNudgeEffectOwnership(
+	mode := flags.NudgeEffectOwner()
+	if mode == rollout.ModeUnset || mode == rollout.Off {
+		return flags, nudgeEffectStartupSelection{Ownership: nudgeEffectOwnershipLegacy}, nil
+	}
+	profile := nudgequeue.CommandSecurityProfile("")
+	if cfg != nil {
+		profile = nudgequeue.CommandSecurityProfile(cfg.Beads.CommandSecurityProfile)
+	}
+	binding, bindingErr := loadProductionNudgeAuthorityBinding(ctx, mode, profile, func(ctx context.Context) (*productionNudgeAuthorityBinding, error) {
+		if opener == nil {
+			return nil, errors.New("production nudge authority binding opener is nil")
+		}
+		return opener(ctx, cityPath, canonicalCityIdentity, flags.BeadsConditionalWrites())
+	})
+	if bindingErr != nil {
+		if errors.Is(bindingErr, errNudgeEffectStartupRefused) {
+			return flags, nudgeEffectStartupSelection{}, bindingErr
+		}
+		reason := "opening production authority binding: " + bindingErr.Error()
+		if mode == rollout.Auto {
+			diagnostic := newNudgeEffectStartupDegradation(mode, profile, reason, bindingErr)
+			return flags, nudgeEffectStartupSelection{
+				Ownership:  nudgeEffectOwnershipLegacy,
+				Notice:     "keyed nudge effect ownership unavailable; retaining legacy owner: " + reason,
+				Diagnostic: diagnostic,
+			}, nil
+		}
+		return flags, nudgeEffectStartupSelection{}, newNudgeEffectStartupRefusal(mode, profile, reason, bindingErr)
+	}
+	if binding == nil || !binding.live() {
+		bindingErr = errors.New("production authority opener returned an incomplete or closed binding")
+		if binding != nil {
+			bindingErr = errors.Join(bindingErr, binding.Close())
+		}
+		reason := bindingErr.Error()
+		if mode == rollout.Auto {
+			diagnostic := newNudgeEffectStartupDegradation(mode, profile, reason, bindingErr)
+			return flags, nudgeEffectStartupSelection{
+				Ownership:  nudgeEffectOwnershipLegacy,
+				Notice:     "keyed nudge effect ownership unavailable; retaining legacy owner: " + reason,
+				Diagnostic: diagnostic,
+			}, nil
+		}
+		return flags, nudgeEffectStartupSelection{}, newNudgeEffectStartupRefusal(mode, profile, reason, bindingErr)
+	}
+
+	selection, selectionErr := selectNudgeEffectOwnership(
 		ctx,
 		flags,
-		cfg.Beads.CommandSecurityProfile,
+		string(profile),
 		func(context.Context) nudgeEffectStartupCapabilities {
-			return currentProductionNudgeEffectStartupCapabilities(cfg, sp)
+			return currentProductionNudgeEffectStartupCapabilities(cfg, sp, binding)
 		},
 	)
-	return flags, selection, err
+	if selectionErr != nil {
+		return flags, nudgeEffectStartupSelection{}, errors.Join(selectionErr, binding.Close())
+	}
+	if selection.Ownership != nudgeEffectOwnershipKeyed {
+		closeErr := binding.Close()
+		reason := selection.Notice
+		if reason == "" {
+			reason = "production startup evidence did not select keyed ownership"
+		}
+		selection.Diagnostic = newNudgeEffectStartupDegradation(mode, profile, reason, closeErr)
+		return flags, selection, nil
+	}
+	selection.Binding = binding
+	return flags, selection, nil
+}
+
+func (e *nudgeEffectStartupDegradation) Error() string {
+	if e == nil {
+		return errNudgeEffectStartupDegraded.Error()
+	}
+	return fmt.Sprintf("%s: mode=%s profile=%q: %s", errNudgeEffectStartupDegraded, e.Mode, e.Profile, e.Reason)
+}
+
+func (e *nudgeEffectStartupDegradation) Unwrap() []error {
+	if e == nil || e.cause == nil {
+		return []error{errNudgeEffectStartupDegraded}
+	}
+	return []error{errNudgeEffectStartupDegraded, e.cause}
+}
+
+func newNudgeEffectStartupDegradation(
+	mode rollout.Mode,
+	profile nudgequeue.CommandSecurityProfile,
+	reason string,
+	cause error,
+) *nudgeEffectStartupDegradation {
+	return &nudgeEffectStartupDegradation{Mode: mode, Profile: profile, Reason: reason, cause: cause}
 }
 
 func (e *nudgeEffectStartupRefusal) Error() string {
@@ -177,7 +301,7 @@ func newNudgeEffectStartupRefusal(
 }
 
 func (c nudgeEffectStartupCapabilities) complete() (bool, string) {
-	missing := make([]string, 0, 8)
+	missing := make([]string, 0, 9)
 	if !c.SupervisorDispatcher {
 		missing = append(missing, "supervisor nudge dispatcher")
 	}
@@ -199,6 +323,9 @@ func (c nudgeEffectStartupCapabilities) complete() (bool, string) {
 	if !c.ClaimAuthorizer {
 		missing = append(missing, "claim authorizer")
 	}
+	if !c.CommandProducersCovered {
+		missing = append(missing, "canonical CLI/API command ingress")
+	}
 	if !c.ProviderEffect {
 		missing = append(missing, "runtime nudge effect provider")
 	}
@@ -209,12 +336,15 @@ func (c nudgeEffectStartupCapabilities) complete() (bool, string) {
 }
 
 // currentProductionNudgeEffectStartupCapabilities reports only capabilities
-// the current production composition can prove. The protected command
-// namespace, trusted ingress, claim authority, opaque partition, and
-// independent authority journal are not wired yet, so they remain false. This
-// makes auto retain legacy and require refuse until those dependencies land.
-func currentProductionNudgeEffectStartupCapabilities(cfg *config.City, sp runtime.Provider) nudgeEffectStartupCapabilities {
-	return nudgeEffectStartupCapabilities{
+// the current production composition can prove. Local authority fields become
+// true only for one exact, complete, live binding; absent, duplicated,
+// incomplete, or closed evidence leaves them false.
+func currentProductionNudgeEffectStartupCapabilities(
+	cfg *config.City,
+	sp runtime.Provider,
+	bindings ...*productionNudgeAuthorityBinding,
+) nudgeEffectStartupCapabilities {
+	capabilities := nudgeEffectStartupCapabilities{
 		SupervisorDispatcher: nudgeDispatcherIsSupervisor(cfg),
 		ProviderEffect:       supportsNudgeEffectProvider(sp),
 		CommandSecurity: nudgequeue.CommandSecurityCapabilities{
@@ -224,6 +354,23 @@ func currentProductionNudgeEffectStartupCapabilities(cfg *config.City, sp runtim
 			ClaimAuthorizationAvailable:     false,
 		},
 	}
+	if len(bindings) != 1 {
+		return capabilities
+	}
+	completeBinding, commandProducersCovered := bindings[0].startupEvidence()
+	if !completeBinding {
+		return capabilities
+	}
+	capabilities.AtomicCommandRepository = true
+	capabilities.TrustedIngress = true
+	capabilities.IndependentAuthority = true
+	capabilities.TrustedCityPartition = true
+	capabilities.TrustedCityPartitionResolver = true
+	capabilities.ClaimAuthorizer = true
+	capabilities.CommandProducersCovered = commandProducersCovered
+	capabilities.CommandSecurity.TrustedIngressAvailable = true
+	capabilities.CommandSecurity.ClaimAuthorizationAvailable = true
+	return capabilities
 }
 
 func supportsNudgeEffectProvider(sp runtime.Provider) bool {

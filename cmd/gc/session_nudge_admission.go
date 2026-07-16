@@ -30,6 +30,10 @@ func newProductionSessionNudgeAdmission(resolve productionSessionNudgeAuthorityR
 	return &productionSessionNudgeAdmission{resolve: resolve}
 }
 
+func installSupervisorProductionNudgeAdmission(mux *api.SupervisorMux, registry *cityRegistry) {
+	mux.WithSessionNudgeAdmission(newProductionSessionNudgeAdmission(registry.resolveProductionNudgeAuthority))
+}
+
 func (a *productionSessionNudgeAdmission) AdmitSessionNudge(
 	ctx context.Context,
 	city string,

@@ -1549,6 +1549,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, commit, startedAt)
+	installSupervisorProductionNudgeAdmission(apiMux, registry)
 	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
 		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
 	}

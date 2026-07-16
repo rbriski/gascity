@@ -26,6 +26,11 @@ type cityView struct {
 	Started bool
 	Status  string
 
+	// cr is the exact runtime published for this immutable view. Runtime-owned
+	// lifecycle capabilities perform their own close synchronization, so a
+	// resolver may retain this pointer across a concurrent snapshot replacement.
+	cr *CityRuntime
+
 	// controllerState is a pointer to the city's api.State implementation.
 	// It is thread-safe via its own internal RWMutex.
 	cs api.State
@@ -43,11 +48,12 @@ type cityView struct {
 // citySnapshot is an immutable point-in-time view of all cities.
 // Rebuilt on every mutation, read lock-free via atomic.Pointer.
 type citySnapshot struct {
-	byName  map[string]*cityView // O(1) lookup by name
-	byPath  map[string]*cityView // O(1) lookup by path
-	all     []*cityView          // for ListCities iteration
-	gen     uint64               // monotonic generation counter
-	builtAt time.Time            // for staleness instrumentation
+	byName    map[string]*cityView // O(1) lookup by name
+	byPath    map[string]*cityView // O(1) lookup by path
+	nameCount map[string]uint32    // ambiguity evidence for authority-bearing routes
+	all       []*cityView          // for ListCities iteration
+	gen       uint64               // monotonic generation counter
+	builtAt   time.Time            // for staleness instrumentation
 }
 
 // cityRegistry owns the mutable cities map and the atomic snapshot.
@@ -83,11 +89,12 @@ func newCityRegistry() *cityRegistry {
 	// Initialize with empty snapshot to prevent nil-dereference panic
 	// if an API request arrives before the first reconciliation tick.
 	r.snap.Store(&citySnapshot{
-		byName:  make(map[string]*cityView),
-		byPath:  make(map[string]*cityView),
-		all:     make([]*cityView, 0),
-		gen:     0,
-		builtAt: time.Now(),
+		byName:    make(map[string]*cityView),
+		byPath:    make(map[string]*cityView),
+		nameCount: make(map[string]uint32),
+		all:       make([]*cityView, 0),
+		gen:       0,
+		builtAt:   time.Now(),
 	})
 	return r
 }
@@ -400,6 +407,29 @@ func (r *cityRegistry) CityState(name string) api.State {
 	return view.cs
 }
 
+// resolveProductionNudgeAuthority returns the exact authority owned by the
+// uniquely named, fully started runtime in the current immutable snapshot.
+// Close remains authoritative after resolution: the binding serializes Close
+// against admission and permanently fails closed once shutdown wins.
+func (r *cityRegistry) resolveProductionNudgeAuthority(name string) (productionSessionNudgeAuthority, bool) {
+	if r == nil || name == "" {
+		return nil, false
+	}
+	snap := r.snap.Load()
+	if snap == nil || snap.nameCount[name] != 1 {
+		return nil, false
+	}
+	view := snap.byName[name]
+	if view == nil || !view.Started || view.Tombstoned || view.cr == nil {
+		return nil, false
+	}
+	binding := view.cr.liveNudgeAuthorityBinding()
+	if binding == nil {
+		return nil, false
+	}
+	return binding, true
+}
+
 // ListCities returns info about all managed cities. Lock-free read from
 // the atomic snapshot. All cities (running, initializing, and failed) are
 // included in snap.all by rebuildSnapshotLocked.
@@ -461,18 +491,23 @@ func (r *cityRegistry) rebuildSnapshotLocked() {
 	totalEstimate := len(r.cities) + len(r.initStatus) + len(r.initFailures)
 
 	snap := &citySnapshot{
-		byName:  make(map[string]*cityView, totalEstimate),
-		byPath:  make(map[string]*cityView, totalEstimate),
-		all:     make([]*cityView, 0, totalEstimate),
-		gen:     r.gen,
-		builtAt: time.Now(),
+		byName:    make(map[string]*cityView, totalEstimate),
+		byPath:    make(map[string]*cityView, totalEstimate),
+		nameCount: make(map[string]uint32, totalEstimate),
+		all:       make([]*cityView, 0, totalEstimate),
+		gen:       r.gen,
+		builtAt:   time.Now(),
+	}
+	addByName := func(view *cityView) {
+		snap.byName[view.Name] = view
+		snap.nameCount[view.Name]++
 	}
 
 	// Build views for cities in the main map.
 	for path, mc := range r.cities {
 		view := r.toCityView(path, mc)
 		snap.byPath[path] = view
-		snap.byName[view.Name] = view
+		addByName(view)
 		snap.all = append(snap.all, view)
 	}
 
@@ -489,7 +524,7 @@ func (r *cityRegistry) rebuildSnapshotLocked() {
 			InitProgress: &ipCopy,
 		}
 		snap.byPath[path] = view
-		snap.byName[view.Name] = view
+		addByName(view)
 		snap.all = append(snap.all, view)
 	}
 
@@ -534,6 +569,7 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 		Path:       path,
 		Started:    mc.started,
 		Status:     mc.status,
+		cr:         mc.cr,
 		cs:         cs,
 		Tombstoned: mc.tombstoned.Load(),
 	}

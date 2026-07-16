@@ -226,6 +226,16 @@ func newProductionNudgeAdmissionHTTPHarness(
 	resolve productionSessionNudgeAuthorityResolver,
 	installWriteAuth bool,
 ) productionNudgeAdmissionHTTPHarness {
+	return newProductionNudgeAdmissionHTTPHarnessWithMuxSetup(t, func(mux *api.SupervisorMux) {
+		mux.WithSessionNudgeAdmission(newProductionSessionNudgeAdmission(resolve))
+	}, installWriteAuth)
+}
+
+func newProductionNudgeAdmissionHTTPHarnessWithMuxSetup(
+	t *testing.T,
+	setup func(*api.SupervisorMux),
+	installWriteAuth bool,
+) productionNudgeAdmissionHTTPHarness {
 	t.Helper()
 	const cityName = "city-a"
 	cityPath := t.TempDir()
@@ -233,7 +243,7 @@ func newProductionNudgeAdmissionHTTPHarness(
 	state := newControllerStateWithMemoryStore(t, cfg, cityName, cityPath)
 	mux := api.NewSupervisorMux(&singleCityStateResolver{state: state}, nil, false, "controller", "test", time.Now())
 	mux.WithAnyHostAllowed()
-	mux.WithSessionNudgeAdmission(newProductionSessionNudgeAdmission(resolve))
+	setup(mux)
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

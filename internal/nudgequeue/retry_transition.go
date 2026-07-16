@@ -71,6 +71,24 @@ type CommandRetryTransitionReceipt struct {
 	EffectSequenceHighWater  uint64
 }
 
+// CommandRetryClaimVerification binds a proposed next claim to the exact
+// latest immutable retry receipt and its canonical pending command digest.
+// Next claim and attempt identifiers are included so the authority can reject
+// reuse across retained attempt history.
+type CommandRetryClaimVerification struct {
+	Store                       CommandStoreBinding
+	RepositoryRevision          uint64
+	RepositorySequenceHighWater uint64
+	CommandID                   string
+	CommandRevision             uint64
+	Sequence                    uint64
+	Partition                   TrustedCityPartition
+	PendingCommandDigest        [sha256.Size]byte
+	Retry                       CommandRetry
+	NextClaimID                 string
+	NextAttemptID               string
+}
+
 // CommandRetryReceiptDisposition reports whether finalization consumed the
 // exact claim receipt now or recovered a previously finalized retry.
 type CommandRetryReceiptDisposition string
@@ -91,6 +109,71 @@ type TrustedCommandRetryTransitionAuthority interface {
 	ReleaseCommandRetryTransitionWriter(context.Context, CommandRetryTransitionIntent) error
 	AbortCommandRetryTransition(context.Context, CommandRetryTransitionIntent) error
 	FinalizeCommandRetryTransition(context.Context, CommandRetryTransitionCommit) (CommandRetryReceiptDisposition, error)
+}
+
+// TrustedCommandRetryClaimVerifier proves that a retry-pending command is the
+// exact state produced by the latest immutable definite-non-entry receipt.
+type TrustedCommandRetryClaimVerifier interface {
+	VerifyCommandRetryClaim(context.Context, CommandRetryClaimVerification) error
+}
+
+func commandRetryClaimVerificationFor(state CommandRepositoryState, command Command, request CommandClaimRequest, partition TrustedCityPartition) (CommandRetryClaimVerification, error) {
+	if validateCommandRepositoryBinding(state.Store) != nil || state.SchemaVersion != CommandRepositorySchemaVersion ||
+		state.WriterVersion != CommandRepositoryWriterVersion || state.SequenceHighWater > state.Revision ||
+		command.Store != state.Store || command.State != CommandStatePending || command.Claim != nil || command.Retry == nil || command.Terminal != nil ||
+		command.Order.Revision == 0 || command.Order.Revision > state.Revision || command.Order.Sequence == 0 ||
+		command.Order.Sequence > state.SequenceHighWater || !partition.valid() ||
+		validateCommandIdentity("next retry claim id", request.ClaimID) != nil || validateCommandIdentity("next retry attempt id", request.AttemptID) != nil ||
+		request.ClaimID == command.Retry.ClaimID || request.AttemptID == command.Retry.AttemptID {
+		return CommandRetryClaimVerification{}, fmt.Errorf("%w: retry claim verification input is invalid", ErrCommandRetryTransition)
+	}
+	wire, err := EncodeCommandV1(command)
+	if err != nil {
+		return CommandRetryClaimVerification{}, fmt.Errorf("%w: encoding retry-pending command: %w", ErrCommandRetryTransition, err)
+	}
+	verification := CommandRetryClaimVerification{
+		Store: state.Store, RepositoryRevision: state.Revision, RepositorySequenceHighWater: state.SequenceHighWater,
+		CommandID: command.ID, CommandRevision: command.Order.Revision, Sequence: command.Order.Sequence,
+		Partition: partition, PendingCommandDigest: sha256.Sum256(wire), Retry: cloneCommandRetry(*command.Retry),
+		NextClaimID: request.ClaimID, NextAttemptID: request.AttemptID,
+	}
+	if err := validateCommandRetryClaimVerification(verification); err != nil {
+		return CommandRetryClaimVerification{}, err
+	}
+	return verification, nil
+}
+
+func validateCommandRetryClaimVerification(verification CommandRetryClaimVerification) error {
+	if validateCommandRepositoryBinding(verification.Store) != nil || !verification.Partition.valid() ||
+		verification.RepositoryRevision == 0 || verification.RepositorySequenceHighWater > verification.RepositoryRevision ||
+		verification.CommandRevision == 0 || verification.CommandRevision > verification.RepositoryRevision ||
+		verification.Sequence == 0 || verification.Sequence > verification.RepositorySequenceHighWater ||
+		verification.PendingCommandDigest == ([sha256.Size]byte{}) ||
+		validateCommandIdentity("retry claim command id", verification.CommandID) != nil ||
+		validateCommandIdentity("next retry claim id", verification.NextClaimID) != nil ||
+		validateCommandIdentity("next retry attempt id", verification.NextAttemptID) != nil ||
+		verification.Retry.AttemptCount == 0 || verification.Retry.NextEligibleAt == nil ||
+		(verification.Retry.ErrorClass != CommandErrorClassProviderBusy && verification.Retry.ErrorClass != CommandErrorClassProviderUnavailable) ||
+		verification.NextClaimID == verification.Retry.ClaimID || verification.NextAttemptID == verification.Retry.AttemptID {
+		return fmt.Errorf("%w: retry claim verification is invalid", ErrCommandRetryTransition)
+	}
+	return nil
+}
+
+func retryReceiptMatchesClaimVerification(receipt CommandRetryTransitionReceipt, verification CommandRetryClaimVerification) bool {
+	return receipt.Store == verification.Store && receipt.RepositoryRevision == verification.CommandRevision &&
+		receipt.CommandID == verification.CommandID && receipt.Sequence == verification.Sequence &&
+		receipt.Partition == verification.Partition && receipt.AfterCommandDigest == verification.PendingCommandDigest &&
+		sameCommandRetry(receipt.Retry, verification.Retry) &&
+		receipt.EffectRepositoryRevision <= verification.RepositoryRevision &&
+		receipt.EffectSequenceHighWater <= verification.RepositorySequenceHighWater
+}
+
+func retryReceiptMatchesPendingCommand(receipt CommandRetryTransitionReceipt, state CommandRepositoryState, command Command, digest [sha256.Size]byte, partition TrustedCityPartition) bool {
+	return command.Retry != nil && receipt.Store == state.Store && receipt.RepositoryRevision == command.Order.Revision &&
+		receipt.CommandID == command.ID && receipt.Sequence == command.Order.Sequence && receipt.Partition == partition &&
+		receipt.AfterCommandDigest == digest && sameCommandRetry(receipt.Retry, *command.Retry) &&
+		receipt.EffectRepositoryRevision <= state.Revision && receipt.EffectSequenceHighWater <= state.SequenceHighWater
 }
 
 func commandRetryTransitionIntentFor(state CommandRepositoryState, before, after Command, observedAt time.Time, partition TrustedCityPartition) (CommandRetryTransitionIntent, error) {
@@ -193,9 +276,12 @@ func validateCommandRetryTransitionIntent(intent CommandRetryTransitionIntent) e
 		validateCommandIdentity("retry transition command id", intent.CommandID) != nil ||
 		validatePersistedCommandClaim(intent.CommandID, intent.Claim) != nil ||
 		validateCommandTime("retry transition observed_at", intent.ObservedAt) != nil ||
+		validateCommandTime("retry transition last_attempt_at", intent.Retry.LastAttemptAt) != nil ||
 		intent.ObservedAt.Before(intent.Claim.ClaimedAt) || intent.Retry.NextEligibleAt == nil ||
+		validateCommandTime("retry transition next_eligible_at", *intent.Retry.NextEligibleAt) != nil ||
 		!intent.Retry.NextEligibleAt.After(intent.ObservedAt) ||
 		(intent.Retry.ErrorClass != CommandErrorClassProviderBusy && intent.Retry.ErrorClass != CommandErrorClassProviderUnavailable) ||
+		intent.Retry.ErrorDetail == "" || validateCommandDetail("retry transition error detail", intent.Retry.ErrorDetail, MaxCommandRetryErrorDetailBytes) != nil ||
 		!retryMatchesClaim(intent.Retry, intent.Claim) {
 		return fmt.Errorf("%w: retry transition intent is invalid", ErrCommandRetryTransition)
 	}

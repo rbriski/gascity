@@ -97,6 +97,7 @@ type TrustedCommandClaimStateAuthority interface {
 	TrustedCommandPartitionCoverageResolver
 	TrustedCommandPartitionTerminalIntentAuthority
 	TrustedCommandClaimTransitionAuthority
+	TrustedCommandRetryClaimVerifier
 	VerifyCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error
 	RecordCommandRepositoryEffectFence(context.Context, CommandRepositoryState) error
 }
@@ -269,6 +270,15 @@ func (r *CommandRepository) ClaimAuthorized(ctx context.Context, request Command
 		if command.State != CommandStatePending {
 			result.Disposition = CommandClaimBusy
 			return nil
+		}
+		if command.Retry != nil {
+			verification, err := commandRetryClaimVerificationFor(state, command, request, request.Partition)
+			if err != nil {
+				return err
+			}
+			if err := commandAuthority.VerifyCommandRetryClaim(ctx, verification); err != nil {
+				return fmt.Errorf("%w: exact retry receipt: %w", ErrCommandClaimInvalid, err)
+			}
 		}
 		if request.ClaimedAt.Before(command.DeliverAfter) ||
 			(command.Retry != nil && command.Retry.NextEligibleAt != nil && request.ClaimedAt.Before(*command.Retry.NextEligibleAt)) {
@@ -547,8 +557,15 @@ func buildAuthorizedClaim(command Command, request CommandClaimRequest, authoriz
 	if request.LeaseUntil.After(command.ExpiresAt) {
 		return Command{}, fmt.Errorf("%w: claim lease extends beyond command expiry", ErrCommandClaimInvalid)
 	}
+	attemptCount := uint32(1)
 	if command.Retry != nil {
-		return Command{}, fmt.Errorf("%w: retry reauthorization requires the next command schema", ErrCommandClaimInvalid)
+		if command.Retry.AttemptCount == ^uint32(0) {
+			return Command{}, fmt.Errorf("%w: retry attempt count is exhausted", ErrCommandClaimInvalid)
+		}
+		if request.ClaimID == command.Retry.ClaimID || request.AttemptID == command.Retry.AttemptID {
+			return Command{}, fmt.Errorf("%w: retry claim and attempt identifiers must be fresh", ErrCommandClaimInvalid)
+		}
+		attemptCount = command.Retry.AttemptCount + 1
 	}
 	if command.Binding == nil {
 		command.Binding = &CommandBinding{LaunchIdentity: request.BoundLaunchIdentity, BoundAt: request.ClaimedAt}
@@ -567,7 +584,7 @@ func buildAuthorizedClaim(command Command, request CommandClaimRequest, authoriz
 	command.State = CommandStateInFlight
 	command.Claim = &claim
 	command.Retry = &CommandRetry{
-		AttemptCount:               1,
+		AttemptCount:               attemptCount,
 		LastAttemptAt:              request.ClaimedAt,
 		ClaimID:                    claim.ID,
 		OperationID:                claim.OperationID,

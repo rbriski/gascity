@@ -148,7 +148,10 @@ func (a *LocalNudgeAuthority) auditClaimPreparationPage(
 			return cursor, index + 1, false, false, fmt.Errorf("%w: prepared claim command %q has inconsistent repository identity", ErrLocalNudgeAuthorityConflict, commandID)
 		}
 		switch {
-		case digest == intent.BeforeCommandDigest && command.State == CommandStatePending && command.Claim == nil && command.Retry == nil && command.Terminal == nil:
+		case digest == intent.BeforeCommandDigest && command.State == CommandStatePending && command.Claim == nil && command.Terminal == nil:
+			if err := a.verifyLocalAuthorityPendingRetry(ctx, a.db, state, command, digest, intent.Partition); err != nil {
+				return cursor, index + 1, false, false, err
+			}
 			if ownedDuringRepositoryRead {
 				return next, index + 1, false, true, nil
 			}
@@ -272,8 +275,11 @@ func (a *LocalNudgeAuthority) auditActiveCommandClaimPage(
 		}
 		switch command.State {
 		case CommandStatePending:
-			if command.Claim != nil || command.Retry != nil || command.Terminal != nil || hasPreparation || hasReceipt {
+			if command.Claim != nil || command.Terminal != nil || hasPreparation || hasReceipt {
 				return cursor, index + 1, false, fmt.Errorf("%w: pending command %q retained claim evidence", ErrLocalNudgeAuthorityConflict, admission.commandID)
+			}
+			if err := a.verifyLocalAuthorityPendingRetry(ctx, a.db, state, command, digest, admission.partition); err != nil {
+				return cursor, index + 1, false, err
 			}
 		case CommandStateInFlight:
 			if command.Claim == nil || command.Retry == nil || command.Terminal != nil || hasPreparation == hasReceipt {
@@ -680,9 +686,12 @@ func validateLocalAuthorityClaimAuditCursor(cursor localAuthorityClaimAuditCurso
 	return nil
 }
 
-func (a *LocalNudgeAuthority) validateClaimAuditMetadata(ctx context.Context, state CommandRepositoryState) error {
+func (a *LocalNudgeAuthority) validateClaimAuditMetadata(ctx context.Context, state CommandRepositoryState, allowReset bool) error {
 	cursor, err := a.readLocalAuthorityClaimAuditCursor(ctx, a.db)
 	if errors.Is(err, errLocalAuthorityClaimAuditCheckpointInvalid) {
+		if !allowReset {
+			return fmt.Errorf("%w: v3 claim audit checkpoint is invalid before migration", ErrLocalNudgeAuthorityConflict)
+		}
 		return a.resetClaimAuditCursor(ctx, state)
 	}
 	if err != nil {
@@ -712,6 +721,9 @@ func (a *LocalNudgeAuthority) validateClaimAuditMetadata(ctx context.Context, st
 	// after a completed pass are audited by the next process, while preserving
 	// partial cursors that make large crash recovery resumable.
 	if cursor.phase == localAuthorityClaimAuditDone {
+		if !allowReset {
+			return nil
+		}
 		return a.resetClaimAuditCursor(ctx, state)
 	}
 	return nil

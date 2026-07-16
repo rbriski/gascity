@@ -395,6 +395,11 @@ func (a *LocalNudgeAuthority) PrepareCommandPartitionTerminal(ctx context.Contex
 		membership.admissionRevision > intent.RepositoryBeforeRevision {
 		return fmt.Errorf("%w: terminal intent has no matching active admission", ErrLocalNudgeAuthorityConflict)
 	}
+	if _, found, err := localAuthorityRetryPreparationByCommand(ctx, tx, a.store, intent.CommandID); err != nil {
+		return err
+	} else if found {
+		return fmt.Errorf("%w: terminal intent conflicts with an exact retry preparation", ErrLocalNudgeAuthorityConflict)
+	}
 	existing, found, err := localAuthorityPreparationByCommand(ctx, tx, a.store, intent.CommandID)
 	if err != nil {
 		return err
@@ -708,6 +713,11 @@ func (a *LocalNudgeAuthority) RecordCommandPartitionTerminal(ctx context.Context
 	if !found || preparation.Store != terminal.Store || preparation.RepositoryRevision != terminal.RepositoryRevision ||
 		preparation.Sequence != terminal.Sequence || preparation.Partition != terminal.Partition {
 		return fmt.Errorf("%w: terminal has no exact write-ahead preparation", ErrLocalNudgeAuthorityConflict)
+	}
+	if _, found, err := localAuthorityRetryPreparationByCommand(ctx, tx, a.store, terminal.CommandID); err != nil {
+		return err
+	} else if found {
+		return fmt.Errorf("%w: terminal transition retained a contradictory retry preparation", ErrLocalNudgeAuthorityConflict)
 	}
 	if _, found, err := localAuthorityClaimPreparationByCommand(ctx, tx, a.store, terminal.CommandID); err != nil {
 		return err

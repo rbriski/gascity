@@ -527,6 +527,19 @@ func (i *TrustedNudgeIngress) FinalizeCommandRetryTransition(ctx context.Context
 	return authority.FinalizeCommandRetryTransition(ctx, commit)
 }
 
+// VerifyCommandRetryClaim delegates exact latest-receipt and pending-digest
+// verification before a retry-pending command may mint its next claim.
+func (i *TrustedNudgeIngress) VerifyCommandRetryClaim(ctx context.Context, verification CommandRetryClaimVerification) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress retry claim verifier is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	verifier, ok := i.authority.(TrustedCommandRetryClaimVerifier)
+	if !ok || isNilRepositoryDependency(verifier) {
+		return fmt.Errorf("%w: trusted authority does not support retry claim verification", ErrNudgeAuthorizationUnknown)
+	}
+	return verifier.VerifyCommandRetryClaim(ctx, verification)
+}
+
 // RecordCommandPartitionAdmission delegates an idempotent admission
 // publication to the independently retained ingress authority.
 func (i *TrustedNudgeIngress) RecordCommandPartitionAdmission(ctx context.Context, admission CommandPartitionAdmission) error {

@@ -79,7 +79,7 @@ func commandClaimTransitionIntentFor(state CommandRepositoryState, before, after
 	if before.Store != state.Store || after.Store != state.Store || before.ID != after.ID ||
 		before.Order.Sequence == 0 || before.Order.Sequence != after.Order.Sequence ||
 		before.Order.Sequence > state.SequenceHighWater || before.Order.Revision == 0 || before.Order.Revision > state.Revision ||
-		after.Order.Revision != state.Revision+1 || before.State != CommandStatePending || before.Claim != nil || before.Retry != nil || before.Terminal != nil ||
+		after.Order.Revision != state.Revision+1 || before.State != CommandStatePending || before.Claim != nil || before.Terminal != nil ||
 		after.State != CommandStateInFlight || after.Claim == nil || after.Retry == nil || after.Terminal != nil {
 		return CommandClaimTransitionIntent{}, fmt.Errorf("%w: pending-to-in-flight states are inconsistent", ErrCommandClaimTransition)
 	}

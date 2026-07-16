@@ -28,8 +28,9 @@ const (
 	// The v1 filename is the physical lock-path generation, not the SQL schema
 	// version. Keeping it stable makes old and new binaries contend on one
 	// lifetime lock instead of silently opening split authority journals.
-	localNudgeAuthorityFileName = "local-authority-v1.sqlite"
-	localNudgeAuthoritySchema   = 3
+	localNudgeAuthorityFileName       = "local-authority-v1.sqlite"
+	localNudgeAuthorityPreviousSchema = 3
+	localNudgeAuthoritySchema         = 4
 	// LocalNudgeAuthorityProfileStoreWriterIsController is the sole security
 	// profile supported by the local single-controller authority journal.
 	LocalNudgeAuthorityProfileStoreWriterIsController = string(CommandSecurityProfileStoreWriterIsController)
@@ -88,6 +89,8 @@ type LocalNudgeAuthority struct {
 	terminalOwners      map[string]localAuthorityTerminalOwner
 	claimOwnershipMu    sync.Mutex
 	claimOwners         map[string]localAuthorityClaimOwner
+	retryOwnershipMu    sync.Mutex
+	retryOwners         map[string]localAuthorityRetryOwner
 	db                  *sql.DB
 	lock                *os.File
 	lockInfo            os.FileInfo
@@ -285,21 +288,41 @@ func (a *LocalNudgeAuthority) configure(ctx context.Context) error {
 
 func (a *LocalNudgeAuthority) initializeOrValidate(ctx context.Context, state CommandRepositoryState) error {
 	empty, err := validateLocalAuthoritySchema(ctx, a.db)
-	if err != nil {
-		return err
-	}
-	if empty {
+	if err == nil && empty {
 		if state.Revision != 0 || state.SequenceHighWater != 0 {
 			return fmt.Errorf("%w: empty authority database cannot bind a nonempty repository", ErrLocalNudgeAuthorityConflict)
 		}
 		return a.initializeSchema(ctx, state)
 	}
+	if err == nil {
+		return a.validateMetadata(ctx, state)
+	}
+	previousEmpty, previousErr := validateLocalAuthoritySchemaManifest(ctx, a.db, localNudgeAuthorityV3SchemaStatements)
+	if previousErr != nil || previousEmpty {
+		return err
+	}
+	if err := a.validateMetadataVersion(ctx, state, localNudgeAuthorityPreviousSchema, false); err != nil {
+		return err
+	}
+	if err := a.migrateV3ToV4(ctx); err != nil {
+		return err
+	}
+	if empty, err := validateLocalAuthoritySchema(ctx, a.db); err != nil || empty {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: migrated authority schema is empty", ErrLocalNudgeAuthorityConflict)
+	}
 	return a.validateMetadata(ctx, state)
 }
 
 func validateLocalAuthoritySchema(ctx context.Context, db *sql.DB) (bool, error) {
-	expected := make(map[string]localNudgeAuthoritySchemaStatement, len(localNudgeAuthoritySchemaStatements))
-	for _, statement := range localNudgeAuthoritySchemaStatements {
+	return validateLocalAuthoritySchemaManifest(ctx, db, localNudgeAuthoritySchemaStatements)
+}
+
+func validateLocalAuthoritySchemaManifest(ctx context.Context, db *sql.DB, manifest []localNudgeAuthoritySchemaStatement) (bool, error) {
+	expected := make(map[string]localNudgeAuthoritySchemaStatement, len(manifest))
+	for _, statement := range manifest {
 		expected[statement.objectType+":"+statement.name] = statement
 	}
 	rows, err := db.QueryContext(ctx, `SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
@@ -376,6 +399,9 @@ func (a *LocalNudgeAuthority) initializeSchema(ctx context.Context, state Comman
 		encodeLocalAuthorityUint64(0), encodeLocalAuthorityUint64(0), encodeLocalAuthorityUint64(0), initialClaimAuditDigest[:]); err != nil {
 		return fmt.Errorf("initializing local nudge authority metadata: %w", err)
 	}
+	if err := insertInitialLocalAuthorityRetryMetadata(ctx, tx, a.store, a.opts.AuthorityID); err != nil {
+		return fmt.Errorf("initializing local nudge retry authority metadata: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("initializing local nudge authority commit: %w", err)
 	}
@@ -389,7 +415,7 @@ type localNudgeAuthoritySchemaStatement struct {
 	sql        string
 }
 
-var localNudgeAuthoritySchemaStatements = []localNudgeAuthoritySchemaStatement{
+var localNudgeAuthorityV3SchemaStatements = []localNudgeAuthoritySchemaStatement{
 	{objectType: "table", name: "authority_meta", tableName: "authority_meta", sql: `CREATE TABLE authority_meta (
 		singleton INTEGER PRIMARY KEY CHECK (singleton = 1), schema_version INTEGER NOT NULL,
 		profile TEXT NOT NULL, store_uuid TEXT NOT NULL, restore_epoch BLOB NOT NULL CHECK (length(restore_epoch) = 8),
@@ -495,7 +521,76 @@ var localNudgeAuthoritySchemaStatements = []localNudgeAuthoritySchemaStatement{
 	{objectType: "index", name: "admission_decisions_partition_terminal", tableName: "admission_decisions", sql: `CREATE INDEX admission_decisions_partition_terminal ON admission_decisions(partition_id, terminal_revision, sequence) WHERE decision_kind = 'admitted' AND terminal_revision IS NOT NULL`},
 }
 
+var localNudgeAuthorityRetrySchemaStatements = []localNudgeAuthoritySchemaStatement{
+	{objectType: "table", name: "retry_meta", tableName: "retry_meta", sql: `CREATE TABLE retry_meta (
+		singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+		transition_generation BLOB NOT NULL CHECK (length(transition_generation) = 8),
+		preparation_count BLOB NOT NULL CHECK (length(preparation_count) = 8),
+		receipt_count BLOB NOT NULL CHECK (length(receipt_count) = 8),
+		audit_generation BLOB NOT NULL CHECK (length(audit_generation) = 8),
+		audit_repository_revision BLOB NOT NULL CHECK (length(audit_repository_revision) = 8),
+		audit_sequence_high_water BLOB NOT NULL CHECK (length(audit_sequence_high_water) = 8),
+		audit_phase TEXT NOT NULL CHECK (audit_phase IN ('idle', 'preparations', 'receipts', 'active', 'done')),
+		audit_after_command_id TEXT NOT NULL,
+		audit_after_attempt_id TEXT NOT NULL,
+		audit_identity BLOB NOT NULL CHECK (length(audit_identity) = 32),
+		audit_preparation_count BLOB NOT NULL CHECK (length(audit_preparation_count) = 8),
+		audit_receipt_count BLOB NOT NULL CHECK (length(audit_receipt_count) = 8),
+		audit_checkpoint_digest BLOB NOT NULL CHECK (length(audit_checkpoint_digest) = 32)
+	)`},
+	{objectType: "table", name: "retry_preparations", tableName: "retry_preparations", sql: `CREATE TABLE retry_preparations (
+		command_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, decision_kind TEXT NOT NULL DEFAULT 'admitted' CHECK (decision_kind = 'admitted'),
+		sequence BLOB NOT NULL CHECK (length(sequence) = 8), partition_id BLOB NOT NULL CHECK (length(partition_id) = 32),
+		repository_before_revision BLOB NOT NULL CHECK (length(repository_before_revision) = 8),
+		retry_revision BLOB NOT NULL CHECK (length(retry_revision) = 8),
+		sequence_high_water BLOB NOT NULL CHECK (length(sequence_high_water) = 8),
+		before_digest BLOB NOT NULL CHECK (length(before_digest) = 32), after_digest BLOB NOT NULL CHECK (length(after_digest) = 32),
+		claim_id TEXT NOT NULL, owner_id TEXT NOT NULL, operation_id TEXT NOT NULL, bound_launch_identity TEXT NOT NULL,
+		authorization_decision_id TEXT NOT NULL, authorization_policy_version TEXT NOT NULL,
+		claimed_at TEXT NOT NULL, lease_until TEXT NOT NULL,
+		retry_attempt_count INTEGER NOT NULL CHECK (retry_attempt_count > 0 AND retry_attempt_count <= 4294967295),
+		retry_last_attempt_at TEXT NOT NULL, retry_next_eligible_at TEXT NOT NULL,
+		retry_error_class TEXT NOT NULL CHECK (retry_error_class IN ('provider_busy', 'provider_unavailable')),
+		retry_error_detail TEXT NOT NULL, observed_at TEXT NOT NULL,
+		provider_stage TEXT NOT NULL CHECK (provider_stage = 'not_entered'),
+		completion TEXT NOT NULL CHECK (completion = 'not_completed'),
+		UNIQUE (command_id, attempt_id),
+		FOREIGN KEY (command_id, decision_kind) REFERENCES admission_decisions(command_id, decision_kind)
+	)`},
+	{objectType: "table", name: "retry_receipts", tableName: "retry_receipts", sql: `CREATE TABLE retry_receipts (
+		command_id TEXT NOT NULL, attempt_id TEXT NOT NULL, decision_kind TEXT NOT NULL DEFAULT 'admitted' CHECK (decision_kind = 'admitted'),
+		sequence BLOB NOT NULL CHECK (length(sequence) = 8), partition_id BLOB NOT NULL CHECK (length(partition_id) = 32),
+		repository_before_revision BLOB NOT NULL CHECK (length(repository_before_revision) = 8),
+		retry_revision BLOB NOT NULL CHECK (length(retry_revision) = 8),
+		sequence_high_water BLOB NOT NULL CHECK (length(sequence_high_water) = 8),
+		before_digest BLOB NOT NULL CHECK (length(before_digest) = 32), after_digest BLOB NOT NULL CHECK (length(after_digest) = 32),
+		claim_id TEXT NOT NULL, owner_id TEXT NOT NULL, operation_id TEXT NOT NULL, bound_launch_identity TEXT NOT NULL,
+		authorization_decision_id TEXT NOT NULL, authorization_policy_version TEXT NOT NULL,
+		claimed_at TEXT NOT NULL, lease_until TEXT NOT NULL,
+		retry_attempt_count INTEGER NOT NULL CHECK (retry_attempt_count > 0 AND retry_attempt_count <= 4294967295),
+		retry_last_attempt_at TEXT NOT NULL, retry_next_eligible_at TEXT NOT NULL,
+		retry_error_class TEXT NOT NULL CHECK (retry_error_class IN ('provider_busy', 'provider_unavailable')),
+		retry_error_detail TEXT NOT NULL, observed_at TEXT NOT NULL,
+		provider_stage TEXT NOT NULL CHECK (provider_stage = 'not_entered'),
+		completion TEXT NOT NULL CHECK (completion = 'not_completed'),
+		effect_revision BLOB NOT NULL CHECK (length(effect_revision) = 8),
+		effect_sequence_high_water BLOB NOT NULL CHECK (length(effect_sequence_high_water) = 8),
+		PRIMARY KEY (command_id, attempt_id),
+		FOREIGN KEY (command_id, decision_kind) REFERENCES admission_decisions(command_id, decision_kind)
+	)`},
+	{objectType: "index", name: "retry_receipts_latest", tableName: "retry_receipts", sql: `CREATE INDEX retry_receipts_latest ON retry_receipts(command_id, retry_revision DESC, attempt_id)`},
+}
+
+var localNudgeAuthoritySchemaStatements = append(
+	append([]localNudgeAuthoritySchemaStatement(nil), localNudgeAuthorityV3SchemaStatements...),
+	localNudgeAuthorityRetrySchemaStatements...,
+)
+
 func (a *LocalNudgeAuthority) validateMetadata(ctx context.Context, state CommandRepositoryState) error {
+	return a.validateMetadataVersion(ctx, state, localNudgeAuthoritySchema, true)
+}
+
+func (a *LocalNudgeAuthority) validateMetadataVersion(ctx context.Context, state CommandRepositoryState, expectedSchema int, advance bool) error {
 	var (
 		schema, principalSchema                                                                         int
 		profile, storeUUID, authorityID, issuer, tenantScope, cityScope, credentialClass, policyVersion string
@@ -532,22 +627,83 @@ func (a *LocalNudgeAuthority) validateMetadata(ctx context.Context, state Comman
 		return err
 	}
 	principalSchemaSupported := principalSchema == int(NudgePrincipalSchemaVersion) || principalSchema == int(NudgePrincipalSchemaVersion-1)
-	if schema != localNudgeAuthoritySchema || profile != a.opts.Profile || storeUUID != state.Store.StoreUUID || epoch != state.Store.RestoreEpoch ||
+	if schema != expectedSchema || profile != a.opts.Profile || storeUUID != state.Store.StoreUUID || epoch != state.Store.RestoreEpoch ||
 		authorityID != a.opts.AuthorityID || issuer != a.opts.Issuer || tenantScope != a.opts.TenantScope || cityScope != a.opts.CityScope ||
 		credentialClass != a.opts.CredentialClass || policyVersion != a.opts.PolicyVersion || !principalSchemaSupported ||
 		denseHighWater > highestSequence || highestSequence > state.SequenceHighWater || highestRevision > state.Revision {
 		return fmt.Errorf("%w: authority metadata differs from configured repository lineage", ErrLocalNudgeAuthorityConflict)
 	}
-	if err := a.validateClaimAuditMetadata(ctx, state); err != nil {
+	if err := a.validateClaimAuditMetadata(ctx, state, advance); err != nil {
 		return err
 	}
-	if principalSchema != int(NudgePrincipalSchemaVersion) || highestSequence != state.SequenceHighWater || highestRevision != state.Revision {
+	if expectedSchema == localNudgeAuthoritySchema {
+		if err := a.validateRetryMetadata(ctx, state); err != nil {
+			return err
+		}
+	}
+	if advance && (principalSchema != int(NudgePrincipalSchemaVersion) || highestSequence != state.SequenceHighWater || highestRevision != state.Revision) {
 		if _, err := a.db.ExecContext(ctx, `UPDATE authority_meta SET principal_schema = ?, highest_observed_sequence = ?, highest_observed_revision = ? WHERE singleton = 1`,
 			NudgePrincipalSchemaVersion, encodeLocalAuthorityUint64(state.SequenceHighWater), encodeLocalAuthorityUint64(state.Revision)); err != nil {
 			return fmt.Errorf("%w: advancing observed repository authority: %w", ErrLocalNudgeAuthorityUnavailable, err)
 		}
 	}
 	return nil
+}
+
+func (a *LocalNudgeAuthority) migrateV3ToV4(ctx context.Context) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migrating local nudge authority v3 to v4: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, statement := range localNudgeAuthorityRetrySchemaStatements {
+		if _, err := tx.ExecContext(ctx, statement.sql); err != nil {
+			return fmt.Errorf("migrating local nudge authority v3 to v4: creating %s:%s: %w", statement.objectType, statement.name, err)
+		}
+	}
+	if err := insertInitialLocalAuthorityRetryMetadata(ctx, tx, a.store, a.opts.AuthorityID); err != nil {
+		return fmt.Errorf("migrating local nudge authority v3 to v4: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE authority_meta SET schema_version = ? WHERE singleton = 1 AND schema_version = ?`,
+		localNudgeAuthoritySchema, localNudgeAuthorityPreviousSchema)
+	if err != nil {
+		return fmt.Errorf("migrating local nudge authority v3 to v4: advancing schema version: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return fmt.Errorf("%w: migrating local nudge authority v3 to v4 changed %d metadata rows: %w", ErrLocalNudgeAuthorityConflict, affected, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrating local nudge authority v3 to v4: commit: %w", err)
+	}
+	return osRestoreAnchorFileOps.syncDirectory(filepath.Dir(a.path))
+}
+
+func insertInitialLocalAuthorityRetryMetadata(ctx context.Context, tx *sql.Tx, store CommandStoreBinding, authorityID string) error {
+	identity := sha256.Sum256([]byte("gascity.local-retry-audit.v1"))
+	digest := localAuthorityRetryAuditCheckpointDigest(store, authorityID, identity)
+	zero := encodeLocalAuthorityUint64(0)
+	_, err := tx.ExecContext(ctx, `INSERT INTO retry_meta (
+		singleton, transition_generation, preparation_count, receipt_count,
+		audit_generation, audit_repository_revision, audit_sequence_high_water, audit_phase,
+		audit_after_command_id, audit_after_attempt_id, audit_identity,
+		audit_preparation_count, audit_receipt_count, audit_checkpoint_digest
+	) VALUES (1, ?, ?, ?, ?, ?, ?, 'idle', '', '', ?, ?, ?, ?)`,
+		zero, zero, zero, zero, zero, zero, identity[:], zero, zero, digest[:])
+	return err
+}
+
+func localAuthorityRetryAuditCheckpointDigest(store CommandStoreBinding, authorityID string, identity [sha256.Size]byte) [sha256.Size]byte {
+	digest := sha256.New()
+	_, _ = io.WriteString(digest, "gascity.local-retry-audit-checkpoint.v1\x00")
+	_, _ = io.WriteString(digest, store.StoreUUID)
+	var epoch [8]byte
+	binary.BigEndian.PutUint64(epoch[:], store.RestoreEpoch)
+	_, _ = digest.Write(epoch[:])
+	_, _ = io.WriteString(digest, authorityID)
+	_, _ = digest.Write(identity[:])
+	var result [sha256.Size]byte
+	copy(result[:], digest.Sum(nil))
+	return result
 }
 
 func encodeLocalAuthorityUint64(value uint64) []byte {

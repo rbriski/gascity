@@ -711,6 +711,45 @@ func (a *testNudgeAuthority) retryTransitionCounts() (int, int) {
 	return len(a.retryPreparations), len(a.retryReceipts)
 }
 
+func (a *testNudgeAuthority) VerifyCommandRetryClaim(ctx context.Context, verification CommandRetryClaimVerification) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateCommandRetryClaimVerification(verification); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, found := a.retryPreparations[verification.CommandID]; found {
+		return errors.New("test retry claim retained a preparation")
+	}
+	if _, found := a.claimPreparations[verification.CommandID]; found {
+		return errors.New("test retry claim retained a claim preparation")
+	}
+	if _, found := a.claimReceipts[verification.CommandID]; found {
+		return errors.New("test retry claim retained a prior claim receipt")
+	}
+	var latest CommandRetryTransitionReceipt
+	found := false
+	for _, receipt := range a.retryReceipts {
+		if receipt.CommandID != verification.CommandID {
+			continue
+		}
+		if !found || receipt.RepositoryRevision > latest.RepositoryRevision ||
+			(receipt.RepositoryRevision == latest.RepositoryRevision && receipt.Claim.AttemptID > latest.Claim.AttemptID) {
+			latest = receipt
+			found = true
+		}
+		if receipt.Claim.ID == verification.NextClaimID || receipt.Claim.AttemptID == verification.NextAttemptID {
+			return errors.New("test retry claim identifiers were reused")
+		}
+	}
+	if !found || !retryReceiptMatchesClaimVerification(latest, verification) {
+		return errors.New("test pending retry differs from latest receipt")
+	}
+	return nil
+}
+
 func (a *testNudgeAuthority) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

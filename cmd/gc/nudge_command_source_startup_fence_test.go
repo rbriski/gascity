@@ -138,6 +138,11 @@ func (a *startupFenceNudgeAuthority) RecordCommandRepositoryEffectFence(ctx cont
 	return a.ingress.RecordCommandRepositoryEffectFence(ctx, state)
 }
 
+func (a *startupFenceNudgeAuthority) VerifyCommandRetryClaim(ctx context.Context, verification nudgequeue.CommandRetryClaimVerification) error {
+	a.noteRead()
+	return a.ingress.VerifyCommandRetryClaim(ctx, verification)
+}
+
 func (a *startupFenceNudgeAuthority) RecordCommandPartitionAdmission(ctx context.Context, admission nudgequeue.CommandPartitionAdmission) error {
 	return a.ingress.RecordCommandPartitionAdmission(ctx, admission)
 }

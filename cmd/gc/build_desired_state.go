@@ -4631,8 +4631,9 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 		return
 	}
 	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs).Rig
-	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
+	overlayProviders := materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
+	ih := installHooksAfterOverlayStaging(config.ResolveInstallHooks(cfgAgent, bp.workspace), overlayProviders, bp.providers)
+	if len(ih) > 0 {
 		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
 		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
@@ -4640,6 +4641,45 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 	}
 }
 
+// installHooksAfterOverlayStaging augments the configured install-hook set with
+// any staged provider-overlay family whose managed hook file the generic
+// overlay merge can silently downgrade. It must be applied to the hook set used
+// for the post-staging re-install in prepareTemplateResolution.
+//
+// Provider overlays ship the managed Codex hooks as an unbound template
+// (matcher "", no --city binding). buildDesiredState stages that overlay on
+// every reconcile tick via the launch-family slot, but the post-staging hook
+// re-install was gated on install_agent_hooks alone. A Codex agent that relies
+// on the provider overlay (no explicit install_agent_hooks) therefore never had
+// its .codex/hooks.json re-bound, so the generic overlay merge reintroduced the
+// unbound managed command over a city-bound file and gc doctor reported
+// codex-hooks-drift again minutes after gc doctor --fix (ga-lk0). Re-installing
+// the Codex family here re-binds the managed commands so the projection
+// converges on the current managed form instead of downgrading it.
+func installHooksAfterOverlayStaging(installHooks, overlayProviders []string, providers map[string]config.ProviderSpec) []string {
+	if !containsCodexFamily(overlayProviders, providers) || containsCodexFamily(installHooks, providers) {
+		return installHooks
+	}
+	return append(append([]string(nil), installHooks...), "codex")
+}
+
+// containsCodexFamily reports whether any name in names resolves to the codex
+// provider family. An explicit standalone provider (base = "") is intentionally
+// excluded because it has opted out of the built-in codex hook surface.
+func containsCodexFamily(names []string, providers map[string]config.ProviderSpec) bool {
+	for _, name := range names {
+		if config.BuiltinFamily(name, providers) == "codex" {
+			return true
+		}
+	}
+	return false
+}
+
+// materializeProviderOverlaysBeforeFingerprint stages the pack and agent
+// provider overlays into workDir and returns the provider overlay slots it
+// staged. Callers use the returned slots to re-bind managed hook files that the
+// generic overlay merge can leave in stale template form (see
+// installHooksAfterOverlayStaging).
 func materializeProviderOverlaysBeforeFingerprint(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -4648,9 +4688,9 @@ func materializeProviderOverlaysBeforeFingerprint(
 	rigName string,
 	workDir string,
 	stderr io.Writer,
-) {
+) []string {
 	if bp == nil || cfgAgent == nil || resolved == nil || workDir == "" {
-		return
+		return nil
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -4675,6 +4715,7 @@ func materializeProviderOverlaysBeforeFingerprint(
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
+	return overlayProviders
 }
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {

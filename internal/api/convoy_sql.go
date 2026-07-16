@@ -63,14 +63,11 @@ func workflowSQLCandidatesForWorkflowID(
 // a pre-fetched dep map. Connects to the dolt server on the given port
 // using the given database name.
 func workflowSQLSnapshot(user, password, host string, port int, database, rootID string) ([]beads.Bead, map[string]beads.Bead, map[string][]beads.Dep, error) {
-	dsn := buildDoltDSN(user, password, host, port, database)
-	db, err := sql.Open("mysql", dsn)
+	db, err := openWorkflowSQLDB(user, password, host, port, database)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("sql open: %w", err)
+		return nil, nil, nil, err
 	}
 	defer db.Close() //nolint:errcheck // best-effort cleanup
-	db.SetMaxOpenConns(1)
-	db.SetConnMaxLifetime(30 * time.Second)
 
 	tableSets, err := workflowSQLAvailableTableSets(db)
 	if err != nil {
@@ -791,16 +788,32 @@ func buildDoltDSN(user, password, host string, port int, database string) string
 	if user == "" {
 		user = "root"
 	}
-	cfg := mysql.Config{
-		User:                 user,
-		Passwd:               password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", host, port),
-		DBName:               database,
-		AllowNativePasswords: true,
-		ParseTime:            true,
-		Timeout:              10 * time.Second,
-	}
+	// Build from NewConfig(), not a bare mysql.Config{} literal: NewConfig
+	// enables CheckConnLiveness (and the driver's other defaults). The managed
+	// Dolt server reaps idle client sockets when its listener read_timeout
+	// fires — the recurring "Error reading packet from client ... i/o timeout"
+	// server-log spam — so without liveness checking the pool hands a
+	// server-reaped, dead connection to the next context-less workflow-status
+	// query, which then fails with a client read error. Liveness checking makes
+	// the driver detect and transparently replace those reaped connections.
+	// See gastownhall/gascity ga-xy8.
+	cfg := mysql.NewConfig()
+	cfg.User = user
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = fmt.Sprintf("%s:%d", host, port)
+	cfg.DBName = database
+	cfg.AllowNativePasswords = true
+	cfg.ParseTime = true
+	cfg.Timeout = 10 * time.Second
+	// The workflow-status queries that use this DSN run without a context
+	// deadline (plain db.Query), so these DSN-level timeouts are the only
+	// backstop bounding an in-flight read/write against a transiently stalled
+	// server. Kept comfortably above the managed server's read_timeout so a
+	// healthy streaming query is never cut; a read that exceeds it is genuinely
+	// wedged and fails cleanly for the caller to retry.
+	cfg.ReadTimeout = 30 * time.Second
+	cfg.WriteTimeout = 30 * time.Second
 	return cfg.FormatDSN()
 }
 

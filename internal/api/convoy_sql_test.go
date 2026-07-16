@@ -246,26 +246,75 @@ func TestBuildDoltDSNUsesResolvedUserAndPassword(t *testing.T) {
 		name     string
 		user     string
 		password string
-		want     string
+		wantUser string
 	}{
-		{name: "explicit user", user: "agent", want: "agent@tcp(db.example.com:3307)/hq?checkConnLiveness=false&parseTime=true&timeout=10s&maxAllowedPacket=0"},
-		{name: "defaults to root", user: "", want: "root@tcp(db.example.com:3307)/hq?checkConnLiveness=false&parseTime=true&timeout=10s&maxAllowedPacket=0"},
-		{name: "escapes password", user: "agent", password: "p@ss:word", want: "agent:p@ss:word@tcp(db.example.com:3307)/hq?checkConnLiveness=false&parseTime=true&timeout=10s&maxAllowedPacket=0"},
+		{name: "explicit user", user: "agent", wantUser: "agent"},
+		{name: "defaults to root", user: "", wantUser: "root"},
+		{name: "escapes password", user: "agent", password: "p@ss:word", wantUser: "agent"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := buildDoltDSN(tt.user, tt.password, "db.example.com", 3307, "hq")
-			if got != tt.want {
-				t.Fatalf("buildDoltDSN() = %q, want %q", got, tt.want)
-			}
 			cfg, err := mysql.ParseDSN(got)
 			if err != nil {
 				t.Fatalf("ParseDSN(%q) error = %v", got, err)
 			}
+			if cfg.User != tt.wantUser {
+				t.Errorf("User = %q, want %q", cfg.User, tt.wantUser)
+			}
+			// Password must survive the DSN round-trip (escaping of @, :, etc.).
+			if cfg.Passwd != tt.password {
+				t.Errorf("Passwd = %q, want %q", cfg.Passwd, tt.password)
+			}
+			if cfg.Addr != "db.example.com:3307" {
+				t.Errorf("Addr = %q, want %q", cfg.Addr, "db.example.com:3307")
+			}
+			if cfg.DBName != "hq" {
+				t.Errorf("DBName = %q, want %q", cfg.DBName, "hq")
+			}
 			if !cfg.AllowNativePasswords {
-				t.Fatal("buildDoltDSN() disabled mysql native password authentication")
+				t.Error("AllowNativePasswords = false; buildDoltDSN disabled native password auth")
+			}
+			// Regression guard for ga-xy8: liveness checking MUST stay enabled so
+			// the driver discards a connection the managed Dolt server has reaped
+			// at its read_timeout instead of handing the dead socket to the next
+			// context-less workflow-status query — which surfaced as a recurring
+			// client read timeout. A bare mysql.Config{} literal zero-values this
+			// to false; buildDoltDSN must build from mysql.NewConfig().
+			if !cfg.CheckConnLiveness {
+				t.Error("CheckConnLiveness = false, want true (server reaps idle conns; see ga-xy8)")
+			}
+			if !cfg.ParseTime {
+				t.Error("ParseTime = false, want true")
+			}
+			if cfg.Timeout <= 0 {
+				t.Error("Timeout = 0; dial must be bounded")
+			}
+			// Workflow-status queries run without a context deadline (plain
+			// db.Query), so these DSN timeouts are the only backstop bounding an
+			// in-flight read/write against a transiently stalled server (ga-xy8).
+			if cfg.ReadTimeout <= 0 {
+				t.Error("ReadTimeout = 0; context-less reads must be bounded (ga-xy8)")
+			}
+			if cfg.WriteTimeout <= 0 {
+				t.Error("WriteTimeout = 0; context-less writes must be bounded (ga-xy8)")
 			}
 		})
+	}
+}
+
+func TestOpenWorkflowSQLDBBoundsConnectionPool(t *testing.T) {
+	// sql.Open is lazy: no server connection is made, so Stats reflects the
+	// configured caps and this needs no live Dolt. Both workflow-SQL open
+	// paths (workflowSQLFindRoot and workflowSQLSnapshot) must funnel through
+	// this single helper so they share identical, bounded pool settings.
+	db, err := openWorkflowSQLDB("root", "", "127.0.0.1", 3307, "hq")
+	if err != nil {
+		t.Fatalf("openWorkflowSQLDB() error = %v", err)
+	}
+	defer db.Close() //nolint:errcheck // best-effort cleanup
+	if got := db.Stats().MaxOpenConnections; got != 1 {
+		t.Errorf("MaxOpenConnections = %d, want 1", got)
 	}
 }
 

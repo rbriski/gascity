@@ -479,11 +479,13 @@ func newProductionNudgeCommandFixture(t *testing.T) productionNudgeCommandFixtur
 		t.Fatalf("Provision: %v", err)
 	}
 	authority := &productionNudgeTestAuthority{
-		references: make(map[string]nudgequeue.NudgeAuthorization),
-		admissions: make(map[string]nudgequeue.CommandPartitionAdmission),
-		terminals:  make(map[string]nudgequeue.CommandPartitionTerminal),
-		intents:    make(map[nudgequeue.CommandPartitionTerminalIntent]struct{}),
-		finalized:  make(map[string]nudgequeue.CommandPartitionTerminalResolution),
+		references:        make(map[string]nudgequeue.NudgeAuthorization),
+		admissions:        make(map[string]nudgequeue.CommandPartitionAdmission),
+		terminals:         make(map[string]nudgequeue.CommandPartitionTerminal),
+		intents:           make(map[nudgequeue.CommandPartitionTerminalIntent]struct{}),
+		finalized:         make(map[string]nudgequeue.CommandPartitionTerminalResolution),
+		claimPreparations: make(map[string]nudgequeue.CommandClaimTransitionIntent),
+		claimReceipts:     make(map[string]nudgequeue.CommandClaimTransitionReceipt),
 	}
 	ingress, err := nudgequeue.NewTrustedNudgeIngress(repository, authority)
 	if err != nil {
@@ -543,6 +545,8 @@ type productionNudgeTestAuthority struct {
 	terminals           map[string]nudgequeue.CommandPartitionTerminal
 	intents             map[nudgequeue.CommandPartitionTerminalIntent]struct{}
 	finalized           map[string]nudgequeue.CommandPartitionTerminalResolution
+	claimPreparations   map[string]nudgequeue.CommandClaimTransitionIntent
+	claimReceipts       map[string]nudgequeue.CommandClaimTransitionReceipt
 	terminalRecordCalls int
 	failTerminalRecord  error
 	failPrepareAfterPut error
@@ -649,6 +653,10 @@ func (a *productionNudgeTestAuthority) PrepareCommandPartitionTerminal(_ context
 	return nil
 }
 
+func (a *productionNudgeTestAuthority) ReleaseCommandPartitionTerminalWriter(_ context.Context, _ nudgequeue.CommandPartitionTerminalIntent) error {
+	return nil
+}
+
 func (a *productionNudgeTestAuthority) AbortCommandPartitionTerminal(_ context.Context, intent nudgequeue.CommandPartitionTerminalIntent) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -676,6 +684,120 @@ func (a *productionNudgeTestAuthority) VerifyCommandPartitionTerminal(_ context.
 		return errors.New("production-test terminal intent or finalized digest is missing")
 	}
 	return nil
+}
+
+func (a *productionNudgeTestAuthority) PrepareCommandClaimTransition(ctx context.Context, intent nudgequeue.CommandClaimTransitionIntent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, finalized := a.claimReceipts[intent.CommandID]; finalized {
+		return errors.New("production-test claim transition is already finalized")
+	}
+	if existing, found := a.claimPreparations[intent.CommandID]; found {
+		if !sameProductionNudgeClaimTransitionIntent(existing, intent) {
+			return errors.New("conflicting production-test claim transition")
+		}
+		return nil
+	}
+	if a.claimPreparations == nil {
+		a.claimPreparations = make(map[string]nudgequeue.CommandClaimTransitionIntent)
+	}
+	a.claimPreparations[intent.CommandID] = intent
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) ReleaseCommandClaimTransitionWriter(ctx context.Context, intent nudgequeue.CommandClaimTransitionIntent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, found := a.claimPreparations[intent.CommandID]; found && !sameProductionNudgeClaimTransitionIntent(existing, intent) {
+		return errors.New("conflicting production-test claim transition writer release")
+	}
+	if receipt, finalized := a.claimReceipts[intent.CommandID]; finalized && !productionNudgeClaimIntentMatchesReceipt(intent, receipt) {
+		return errors.New("production-test finalized claim receipt differs from writer release")
+	}
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) AbortCommandClaimTransition(ctx context.Context, intent nudgequeue.CommandClaimTransitionIntent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, found := a.claimPreparations[intent.CommandID]; found {
+		if !sameProductionNudgeClaimTransitionIntent(existing, intent) {
+			return errors.New("conflicting production-test claim transition abort")
+		}
+		delete(a.claimPreparations, intent.CommandID)
+		return nil
+	}
+	if _, finalized := a.claimReceipts[intent.CommandID]; finalized {
+		return errors.New("production-test claim transition is already finalized")
+	}
+	return nil
+}
+
+func (a *productionNudgeTestAuthority) FinalizeCommandClaimTransition(ctx context.Context, receipt nudgequeue.CommandClaimTransitionReceipt) (nudgequeue.CommandClaimReceiptDisposition, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, found := a.claimReceipts[receipt.CommandID]; found {
+		if !sameProductionNudgeClaimTransitionReceipt(existing, receipt) {
+			return "", errors.New("conflicting production-test claim receipt")
+		}
+		return nudgequeue.CommandClaimReceiptAlreadyFinalized, nil
+	}
+	intent, found := a.claimPreparations[receipt.CommandID]
+	if !found || !productionNudgeClaimIntentMatchesReceipt(intent, receipt) {
+		return "", errors.New("production-test claim receipt has no exact preparation")
+	}
+	delete(a.claimPreparations, receipt.CommandID)
+	if a.claimReceipts == nil {
+		a.claimReceipts = make(map[string]nudgequeue.CommandClaimTransitionReceipt)
+	}
+	a.claimReceipts[receipt.CommandID] = receipt
+	return nudgequeue.CommandClaimReceiptFinalized, nil
+}
+
+func sameProductionNudgeClaimTransitionIntent(left, right nudgequeue.CommandClaimTransitionIntent) bool {
+	return left.Store == right.Store &&
+		left.RepositoryBeforeRevision == right.RepositoryBeforeRevision &&
+		left.RepositoryRevision == right.RepositoryRevision &&
+		left.RepositorySequenceHighWater == right.RepositorySequenceHighWater &&
+		left.CommandID == right.CommandID && left.Sequence == right.Sequence && left.Partition == right.Partition &&
+		left.BeforeCommandDigest == right.BeforeCommandDigest && left.AfterCommandDigest == right.AfterCommandDigest &&
+		sameProductionNudgeCommandClaim(left.Claim, right.Claim)
+}
+
+func productionNudgeClaimIntentMatchesReceipt(intent nudgequeue.CommandClaimTransitionIntent, receipt nudgequeue.CommandClaimTransitionReceipt) bool {
+	return intent.Store == receipt.Store && intent.RepositoryRevision == receipt.RepositoryRevision &&
+		intent.CommandID == receipt.CommandID && intent.Sequence == receipt.Sequence && intent.Partition == receipt.Partition &&
+		intent.AfterCommandDigest == receipt.AfterCommandDigest && sameProductionNudgeCommandClaim(intent.Claim, receipt.Claim) &&
+		receipt.EffectRepositoryRevision >= intent.RepositoryRevision &&
+		receipt.EffectSequenceHighWater >= intent.RepositorySequenceHighWater
+}
+
+func sameProductionNudgeClaimTransitionReceipt(left, right nudgequeue.CommandClaimTransitionReceipt) bool {
+	return left.Store == right.Store && left.RepositoryRevision == right.RepositoryRevision &&
+		left.CommandID == right.CommandID && left.Sequence == right.Sequence && left.Partition == right.Partition &&
+		left.AfterCommandDigest == right.AfterCommandDigest && sameProductionNudgeCommandClaim(left.Claim, right.Claim) &&
+		left.EffectRepositoryRevision == right.EffectRepositoryRevision &&
+		left.EffectSequenceHighWater == right.EffectSequenceHighWater
+}
+
+func sameProductionNudgeCommandClaim(left, right nudgequeue.CommandClaim) bool {
+	return left.ID == right.ID && left.OwnerID == right.OwnerID && left.OperationID == right.OperationID &&
+		left.AttemptID == right.AttemptID && left.BoundLaunchIdentity == right.BoundLaunchIdentity &&
+		left.AuthorizationDecisionID == right.AuthorizationDecisionID &&
+		left.AuthorizationPolicyVersion == right.AuthorizationPolicyVersion &&
+		left.ClaimedAt.Equal(right.ClaimedAt) && left.LeaseUntil.Equal(right.LeaseUntil)
 }
 
 func (a *productionNudgeTestAuthority) failNextTerminalRecord(err error) {
@@ -785,7 +907,7 @@ func (a *productionNudgeTestAuthority) ResolveCommandPartitionCoverage(_ context
 		return nudgequeue.CommandPartitionCoverage{}, errors.New("production-test authority coverage differs from repository snapshot")
 	}
 	return nudgequeue.CommandPartitionCoverage{
-		Store: request.Store, RepositoryRevision: request.RepositoryRevision, SequenceHighWater: request.SequenceHighWater, AdmittedCount: admittedCount,
+		Store: request.Store, RepositoryRevision: request.RepositoryRevision, SequenceHighWater: request.SequenceHighWater, DecidedCount: admittedCount,
 		Partition: request.Partition, ActiveEntries: active,
 	}, nil
 }
@@ -794,7 +916,7 @@ func (a *productionNudgeTestAuthority) ResolveCommandPartitionMembership(_ conte
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	result := nudgequeue.CommandPartitionMembership{
-		Store: request.Store, RepositoryRevision: request.RepositoryRevision,
+		Store: request.Store, RepositoryRevision: request.RepositoryRevision, SequenceHighWater: request.SequenceHighWater,
 		CommandID: request.CommandID, Partition: request.Partition,
 	}
 	admission, found := a.admissions[request.CommandID]

@@ -14,11 +14,13 @@ import (
 // opener and injected into claims internally; an effect callback cannot choose
 // or forge city authority.
 type productionNudgeCommandSource struct {
-	repository *nudgequeue.CommandRepository
-	reader     *nudgequeue.CommandPartitionReader
-	partition  nudgequeue.TrustedCityPartition
-	membership nudgequeue.TrustedCommandPartitionMembershipRecorder
-	terminal   nudgequeue.TrustedCommandClaimStateAuthority
+	repository   *nudgequeue.CommandRepository
+	reader       *nudgequeue.CommandPartitionReader
+	partition    nudgequeue.TrustedCityPartition
+	membership   nudgequeue.TrustedCommandPartitionMembershipRecorder
+	terminal     nudgequeue.TrustedCommandClaimStateAuthority
+	recovery     nudgequeue.TrustedCommandAuthorityRecovery
+	recoveryGate chan struct{}
 }
 
 func openVerifiedProductionNudgeCommandSource(
@@ -36,7 +38,12 @@ func openVerifiedProductionNudgeCommandSource(
 		}
 		return nil, fmt.Errorf("constructing durable nudge command repository: %w", err)
 	}
-	source := &productionNudgeCommandSource{repository: repository, partition: partition}
+	source := &productionNudgeCommandSource{
+		repository:   repository,
+		partition:    partition,
+		recoveryGate: make(chan struct{}, 1),
+	}
+	source.recoveryGate <- struct{}{}
 	if _, err := repository.Provision(ctx); err != nil {
 		// A command commit can become durable before its independent anchor
 		// advance is acknowledged. This is an explicit writer path, so it may
@@ -61,19 +68,17 @@ func openVerifiedProductionNudgeCommandSource(
 	if !ok || terminal == nil {
 		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandPartitionTerminalIntent, nudgequeue.ErrCommandRepositoryPartition, errors.New("trusted command membership and terminal authority is required"))
 	}
-	admissionRecovery, ok := resolver.(nudgequeue.TrustedCommandPartitionAdmissionRecovery)
-	if !ok || admissionRecovery == nil {
-		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandRepositoryPartition, errors.New("trusted admission recovery authority is required"))
-	}
-	recovery, ok := resolver.(nudgequeue.TrustedCommandPartitionTerminalRecovery)
+	recovery, ok := resolver.(nudgequeue.TrustedCommandAuthorityRecovery)
 	if !ok || recovery == nil {
-		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandPartitionTerminalIntent, errors.New("trusted terminal recovery authority is required"))
+		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandRepositoryPartition, errors.New("trusted command authority recovery is required"))
 	}
-	if err := admissionRecovery.RepairCommandPartitionAdmissions(ctx, repository); err != nil {
-		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandRepositoryPartition, fmt.Errorf("repairing prepared command admissions: %w", err))
-	}
-	if err := recovery.RepairCommandPartitionTerminals(ctx, repository); err != nil {
-		return nil, errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrCommandPartitionTerminalIntent, fmt.Errorf("repairing prepared terminal transitions: %w", err))
+	source.recovery = recovery
+	if err := source.recovery.RecoverCommandAuthority(ctx, repository); err != nil {
+		failure := fmt.Errorf("recovering durable nudge command authority: %w", err)
+		if source.ClassifyNudgeCommandSourceError(failure) == nudgeCommandSourceErrorTransient {
+			return nil, retryableNudgeCommandSourceFailure(failure)
+		}
+		return nil, errors.Join(errNudgeCommandSourceUnverified, failure)
 	}
 	partitioned, err := nudgequeue.NewCommandPartitionReader(repository, partition, resolver)
 	if err != nil {
@@ -86,17 +91,85 @@ func openVerifiedProductionNudgeCommandSource(
 }
 
 func (s *productionNudgeCommandSource) Snapshot(ctx context.Context, limit int) (nudgequeue.CommandIndexSnapshot, error) {
-	if s == nil || s.reader == nil {
-		return nudgequeue.CommandIndexSnapshot{}, errors.New("snapshotting production nudge command source: partition reader is nil")
+	if s == nil || s.repository == nil || s.reader == nil || s.recovery == nil || s.recoveryGate == nil {
+		return nudgequeue.CommandIndexSnapshot{}, errors.New("snapshotting production nudge command source: source is not fully bound")
 	}
-	return s.reader.Snapshot(ctx, limit)
+	var snapshot nudgequeue.CommandIndexSnapshot
+	read := func() error {
+		var err error
+		snapshot, err = s.reader.Snapshot(ctx, limit)
+		return err
+	}
+	err := read()
+	if err == nil || !nudgeCommandReadNeedsAuthorityRecovery(err) {
+		return snapshot, err
+	}
+	return snapshot, s.recoverLiveRead(ctx, "snapshot", err, read)
 }
 
 func (s *productionNudgeCommandSource) Get(ctx context.Context, commandID string) (nudgequeue.CommandIndexResolution, error) {
-	if s == nil || s.reader == nil {
-		return nudgequeue.CommandIndexResolution{}, errors.New("reading production nudge command source: partition reader is nil")
+	if s == nil || s.repository == nil || s.reader == nil || s.recovery == nil || s.recoveryGate == nil {
+		return nudgequeue.CommandIndexResolution{}, errors.New("reading production nudge command source: source is not fully bound")
 	}
-	return s.reader.Get(ctx, commandID)
+	var resolution nudgequeue.CommandIndexResolution
+	read := func() error {
+		var err error
+		resolution, err = s.reader.Get(ctx, commandID)
+		return err
+	}
+	err := read()
+	if err == nil || !nudgeCommandReadNeedsAuthorityRecovery(err) {
+		return resolution, err
+	}
+	return resolution, s.recoverLiveRead(ctx, "exact read", err, read)
+}
+
+func nudgeCommandReadNeedsAuthorityRecovery(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, nudgequeue.ErrCommandProvenanceRejected) {
+		return false
+	}
+	if errors.Is(err, nudgequeue.ErrCommandRepositoryPartition) {
+		return true
+	}
+	var lineage *nudgequeue.CommandRepositoryLineageError
+	return errors.As(err, &lineage) && lineage != nil
+}
+
+func (s *productionNudgeCommandSource) recoverLiveRead(ctx context.Context, operation string, initialErr error, read func() error) error {
+	if ctx == nil {
+		return errors.New("recovering durable nudge command authority: context is nil")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.recoveryGate:
+	}
+	defer func() { s.recoveryGate <- struct{}{} }()
+
+	// Another failed reader may have repaired the same authority gap while this
+	// caller waited. Recheck while holding the recovery gate before doing durable work.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	readErr := read()
+	if readErr == nil {
+		return nil
+	}
+	if !nudgeCommandReadNeedsAuthorityRecovery(readErr) {
+		return readErr
+	}
+	if recoveryErr := s.recovery.RecoverCommandAuthority(ctx, s.repository); recoveryErr != nil {
+		return errors.Join(
+			initialErr,
+			readErr,
+			fmt.Errorf("recovering durable nudge command authority after live %s failure: %w", operation, recoveryErr),
+		)
+	}
+	if err := read(); err != nil {
+		return fmt.Errorf("%s after durable nudge command authority recovery: %w", operation, err)
+	}
+	return nil
 }
 
 func (s *productionNudgeCommandSource) ClaimAuthorized(ctx context.Context, request nudgeEffectClaimRequest, authorizer nudgequeue.NudgeClaimAuthorizer) (nudgequeue.CommandClaimResult, error) {
@@ -156,7 +229,15 @@ func (s *productionNudgeCommandSource) recordTerminalMembership(ctx context.Cont
 }
 
 func (s *productionNudgeCommandSource) ClassifyNudgeCommandSourceError(err error) nudgeCommandSourceErrorClass {
-	if errors.Is(err, context.DeadlineExceeded) ||
+	// A claim receipt mismatch is durable contradictory evidence even if a
+	// lower layer also reported availability noise while unwinding it.
+	if errors.Is(err, nudgequeue.ErrCommandClaimTransition) && errors.Is(err, nudgequeue.ErrLocalNudgeAuthorityConflict) {
+		return nudgeCommandSourceErrorInvariant
+	}
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, nudgequeue.ErrLocalNudgeAuthorityUnavailable) ||
+		errors.Is(err, nudgequeue.ErrCommandAuthorityRecoveryYield) ||
 		errors.Is(err, nudgequeue.ErrRestoreAnchorBusy) ||
 		errors.Is(err, nudgequeue.ErrRestoreAnchorConflict) ||
 		errors.Is(err, nudgequeue.ErrRestoreAnchorDurabilityUncertain) {

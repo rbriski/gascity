@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -243,4 +244,100 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errors.New("writer unavailable")
+}
+
+// TestStageSessionWorkDirInvokesRebindManagedHooksAfterStaging is the ga-jm0
+// mechanism guard. A hooks-aware caller injects Config.RebindManagedHooks so the
+// runtime session-start staging path can re-bind managed provider hook files the
+// generic overlay merge downgrades (the unbound Codex SessionStart template
+// appended over a city-bound .codex/hooks.json). The callback must run AFTER the
+// overlays are staged (so it sees the staged file) and receive the staged work
+// directory plus the resolved overlay provider slots.
+func TestStageSessionWorkDirInvokesRebindManagedHooksAfterStaging(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+
+	overlayHook := filepath.Join(packOverlay, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("mkdir codex overlay: %v", err)
+	}
+	if err := os.WriteFile(overlayHook, []byte(`{"hooks":{}}`), 0o644); err != nil {
+		t.Fatalf("write codex overlay hook: %v", err)
+	}
+
+	cfg := Config{
+		WorkDir:         workDir,
+		ProviderName:    "codex",
+		PackOverlayDirs: []string{packOverlay},
+	}
+
+	var gotWorkDir string
+	var gotProviders []string
+	calls := 0
+	cfg.RebindManagedHooks = func(wd string, providers []string) error {
+		calls++
+		gotWorkDir = wd
+		gotProviders = providers
+		// Ordering: the overlay must already be staged when the rebind runs,
+		// otherwise there is nothing to re-bind.
+		if _, err := os.Stat(filepath.Join(wd, ".codex", "hooks.json")); err != nil {
+			t.Errorf("rebind ran before overlay staging: %v", err)
+		}
+		return nil
+	}
+
+	if err := StageSessionWorkDir(cfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("RebindManagedHooks called %d times, want 1", calls)
+	}
+	if gotWorkDir != workDir {
+		t.Fatalf("RebindManagedHooks workDir = %q, want %q", gotWorkDir, workDir)
+	}
+	want := EffectiveOverlayProviderNames(cfg)
+	if !slices.Equal(gotProviders, want) {
+		t.Fatalf("RebindManagedHooks stagedProviders = %v, want %v", gotProviders, want)
+	}
+}
+
+// TestStageSessionWorkDirRebindManagedHooksErrorPropagates ensures a rebind
+// failure fails the staging call rather than launching a session over an
+// unre-bound (downgraded) hooks file.
+func TestStageSessionWorkDirRebindManagedHooksErrorPropagates(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		WorkDir: t.TempDir(),
+		RebindManagedHooks: func(string, []string) error {
+			return errors.New("rebind boom")
+		},
+	}
+
+	err := StageSessionWorkDir(cfg)
+	if err == nil || !strings.Contains(err.Error(), "rebind boom") {
+		t.Fatalf("StageSessionWorkDir error = %v, want it to wrap \"rebind boom\"", err)
+	}
+}
+
+// TestStageSessionWorkDirSkipsRebindWithoutWorkDir guards the no-op path: with
+// no work dir there is nothing staged, so the rebind callback must not run.
+func TestStageSessionWorkDirSkipsRebindWithoutWorkDir(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	cfg := Config{
+		RebindManagedHooks: func(string, []string) error {
+			called = true
+			return nil
+		},
+	}
+	if err := StageSessionWorkDir(cfg); err != nil {
+		t.Fatalf("StageSessionWorkDir: %v", err)
+	}
+	if called {
+		t.Fatal("RebindManagedHooks ran with an empty WorkDir")
+	}
 }

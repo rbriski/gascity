@@ -32,8 +32,9 @@ func StageSessionWorkDir(cfg Config) error {
 // agent overlay, and CopyFiles staging before a provider starts the session
 // process. Nonfatal overlay preservation warnings are written to warnings.
 func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
+	var overlayProviders []string
 	if cfg.WorkDir != "" {
-		overlayProviders := EffectiveOverlayProviderNames(cfg)
+		overlayProviders = EffectiveOverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
 			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
@@ -45,7 +46,29 @@ func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 			}
 		}
 	}
-	return stageCopyFiles(cfg.WorkDir, cfg.CopyFiles)
+	if err := stageCopyFiles(cfg.WorkDir, cfg.CopyFiles); err != nil {
+		return err
+	}
+	return RebindManagedHooksAfterStaging(cfg, overlayProviders)
+}
+
+// RebindManagedHooksAfterStaging invokes cfg.RebindManagedHooks (when set) so a
+// hooks-aware caller can re-bind managed provider hook files that the generic
+// overlay merge leaves in downgraded form — the unbound (matcher "", no --city)
+// managed Codex SessionStart template the overlay appends over a city-bound
+// .codex/hooks.json (ga-jm0). It is a no-op when no work dir was staged or no
+// callback was injected, so provider staging paths can call it unconditionally.
+// stagedProviders is the resolved overlay provider slot list
+// (EffectiveOverlayProviderNames) the caller staged, letting the callback gate
+// the re-bind on whether a codex-family overlay was actually applied.
+func RebindManagedHooksAfterStaging(cfg Config, stagedProviders []string) error {
+	if cfg.WorkDir == "" || cfg.RebindManagedHooks == nil {
+		return nil
+	}
+	if err := cfg.RebindManagedHooks(cfg.WorkDir, stagedProviders); err != nil {
+		return fmt.Errorf("rebinding managed hooks in %q: %w", cfg.WorkDir, err)
+	}
+	return nil
 }
 
 // EffectiveOverlayProviderNames returns the provider overlay slots to stage for

@@ -4675,6 +4675,38 @@ func containsCodexFamily(names []string, providers map[string]config.ProviderSpe
 	return false
 }
 
+// managedHookRebindForLaunch returns the runtime.Config.RebindManagedHooks
+// closure the local session-start staging paths (subprocess/acp/tmux) invoke
+// after staging provider overlays into the session work dir. It mirrors the
+// controller's post-staging re-install (installHooksAfterOverlayStaging +
+// hooks.Install): when a codex-family overlay was staged, it re-binds the managed
+// Codex hooks to cityPath so a freshly launched Codex session cannot read the
+// downgraded (unbound, appended) .codex/hooks.json the generic overlay merge
+// leaves behind before the next controller reconcile tick converges it (ga-jm0,
+// follow-up to ga-lk0). hooks.Install is upgrade-aware and idempotent, so it
+// re-binds --city and dedupes the appended stale entry without churn when the
+// file is already current.
+//
+// Returns nil (no callback) when no city context is available — e.g. the
+// cityPath="" prepared-start path — so those launches keep prior behavior. The
+// re-bind is scoped to the codex family the overlay merge can downgrade; other
+// managed hooks are left to the controller reconcile projection. The remote k8s
+// staging path is intentionally not wired here: it stages into a local temp dir
+// copied to the pod, where cityPath binds the wrong --city, so it needs a
+// pod-aware re-bind tracked separately.
+func managedHookRebindForLaunch(cityPath string, cfg *config.City) func(workDir string, stagedProviders []string) error {
+	if cityPath == "" || cfg == nil {
+		return nil
+	}
+	providers := cfg.Providers
+	return func(workDir string, stagedProviders []string) error {
+		if !containsCodexFamily(stagedProviders, providers) {
+			return nil
+		}
+		return hooks.Install(fsys.OSFS{}, cityPath, workDir, []string{"codex"})
+	}
+}
+
 // materializeProviderOverlaysBeforeFingerprint stages the pack and agent
 // provider overlays into workDir and returns the provider overlay slots it
 // staged. Callers use the returned slots to re-bind managed hook files that the

@@ -123,6 +123,7 @@ var excludedFromCore = map[string]string{
 	"PackOverlayDirs":        "additive pack file staging, not hashed",
 	"PromptSuffix":           "volatile beacon text, deliberately excluded",
 	"PromptFlag":             "command-reconstruction hint, not hashed",
+	"RebindManagedHooks":     "injected post-staging hook-rebind behavior, not session identity (and funcs are not hashable)",
 }
 
 // TestFingerprintPartitionAccountsForEveryConfigField is the FP-1/GAP-6

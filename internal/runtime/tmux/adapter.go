@@ -127,7 +127,10 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 		}
 		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
 	}
-	return nil
+	// Re-bind managed provider hook files the overlay merge can downgrade (the
+	// unbound Codex SessionStart template appended over a city-bound
+	// .codex/hooks.json) before the tmux session launches and reads them (ga-jm0).
+	return runtime.RebindManagedHooksAfterStaging(cfg, overlayProviders)
 }
 
 func ensureInstanceToken(env map[string]string) (map[string]string, error) {

@@ -104,3 +104,60 @@ func writeTmuxScaffoldFixture(t *testing.T, path, content string) {
 		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 }
+
+// TestStageStartFilesInvokesRebindManagedHooks guards the tmux arm of ga-jm0:
+// the tmux launch stages provider overlays via its own stageStartFiles path, so
+// it must also invoke Config.RebindManagedHooks after staging (with the staged
+// work dir and overlay provider slots) or a tmux-launched Codex session reads
+// the downgraded .codex/hooks.json until the next controller reconcile tick.
+func TestStageStartFilesInvokesRebindManagedHooks(t *testing.T) {
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+
+	overlayHook := filepath.Join(packOverlay, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("mkdir codex overlay: %v", err)
+	}
+	if err := os.WriteFile(overlayHook, []byte(`{"hooks":{}}`), 0o644); err != nil {
+		t.Fatalf("write codex overlay hook: %v", err)
+	}
+
+	cfg := runtime.Config{
+		WorkDir:         workDir,
+		ProviderName:    "codex",
+		PackOverlayDirs: []string{packOverlay},
+	}
+
+	var gotWorkDir string
+	calls := 0
+	cfg.RebindManagedHooks = func(wd string, providers []string) error {
+		calls++
+		gotWorkDir = wd
+		if _, err := os.Stat(filepath.Join(wd, ".codex", "hooks.json")); err != nil {
+			t.Errorf("rebind ran before overlay staging: %v", err)
+		}
+		if !containsString(providers, "codex") {
+			t.Errorf("stagedProviders = %v, want it to include codex", providers)
+		}
+		return nil
+	}
+
+	if err := stageStartFiles(cfg, &bytes.Buffer{}); err != nil {
+		t.Fatalf("stageStartFiles: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("RebindManagedHooks called %d times, want 1", calls)
+	}
+	if gotWorkDir != workDir {
+		t.Fatalf("RebindManagedHooks workDir = %q, want %q", gotWorkDir, workDir)
+	}
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}

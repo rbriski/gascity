@@ -669,6 +669,23 @@ type Config struct {
 	// separately so the tmux adapter's file-expansion path can
 	// reconstruct the command correctly for long prompts.
 	PromptFlag string
+
+	// RebindManagedHooks, when non-nil, is invoked after the provider
+	// overlays are staged into WorkDir, receiving the staged work directory
+	// and the staged overlay provider slots (EffectiveOverlayProviderNames).
+	// It re-binds managed provider hook files that the generic overlay merge
+	// can leave in downgraded form — specifically the unbound (matcher "",
+	// no --city) managed Codex SessionStart template the overlay appends over
+	// a city-bound .codex/hooks.json, which a freshly launched Codex session
+	// would otherwise read until the next controller reconcile tick re-binds
+	// it (ga-jm0, follow-up to ga-lk0).
+	//
+	// internal/runtime cannot import internal/hooks (import cycle via
+	// internal/config), so a hooks-aware caller in cmd/gc injects this
+	// closure; it closes over the city dir, filesystem, and provider map.
+	// Excluded from the fingerprint: it is behavior injection, not session
+	// identity, and funcs are not hashable.
+	RebindManagedHooks func(workDir string, stagedProviders []string) error
 }
 
 // OverlayProviderNames returns the effective provider overlay slots to stage for

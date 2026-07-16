@@ -933,6 +933,13 @@ func buildPreparedStartWithWorkDirResolver(
 	tp := candidate.tp
 	agentCfg, delivery := templateParamsToConfigWithDelivery(tp)
 
+	// Inject the session-start managed-hook re-bind (ga-jm0). After the runtime
+	// stages provider overlays into the work dir, this re-binds a downgraded
+	// managed Codex .codex/hooks.json so the launching session reads the current
+	// (city-bound, deduped) form rather than the unbound entry the overlay merge
+	// appends. Excluded from the fingerprint, so setting it never moves a hash.
+	agentCfg.RebindManagedHooks = managedHookRebindForLaunch(cityPath, cfg)
+
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
 	// override the agent's default CLI flags for specific options.

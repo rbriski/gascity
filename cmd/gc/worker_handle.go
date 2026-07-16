@@ -151,6 +151,11 @@ func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, 
 	if hints == nil || cfg == nil || resolved == nil {
 		return
 	}
+	// Re-bind a downgraded managed Codex .codex/hooks.json after the runtime
+	// stages provider overlays, so this controller-down create/resume path does
+	// not launch a Codex session over the unbound entry the overlay merge
+	// appends (ga-jm0). Mirrors the reconciler launch path.
+	hints.RebindManagedHooks = managedHookRebindForLaunch(cityPath, cfg)
 	// ProviderName is the launch family (BuiltinAncestor, e.g. "pi" for a
 	// base="builtin:pi" provider); ProviderOverlayName is the concrete provider
 	// name — identical to resolveTemplate's hint assignment.

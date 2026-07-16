@@ -206,3 +206,92 @@ func TestInstallHooksAfterOverlayStaging(t *testing.T) {
 		})
 	}
 }
+
+// TestManagedHookRebindForLaunch_KeepsCodexHooksCurrentThroughSessionStartStaging
+// is the ga-jm0 end-to-end regression guard for the local session-start path.
+// It first reproduces the bug (session-start overlay staging downgrades a
+// city-bound .codex/hooks.json), then proves the injected rebind converges it —
+// exactly the gap ga-lk0 closed for the controller reconcile projection but at
+// the moment a session actually launches.
+func TestManagedHookRebindForLaunch_KeepsCodexHooksCurrentThroughSessionStartStaging(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Stale provider overlay: the pack ships the unbound managed-hook template.
+	packOverlay := filepath.Join(cityPath, "packs", "core", "overlay")
+	overlayHook := filepath.Join(packOverlay, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(overlayHook), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	if err := os.WriteFile(overlayHook, []byte(staleCodexOverlayHooks), 0o644); err != nil {
+		t.Fatalf("WriteFile(overlay hook): %v", err)
+	}
+
+	workDir := filepath.Join(cityPath, "worker")
+	codexHooks := filepath.Join(workDir, ".codex", "hooks.json")
+
+	// Simulate `gc doctor --fix`: bind the managed Codex hooks to the city root.
+	if err := hooks.Install(fsys.OSFS{}, cityPath, workDir, []string{"codex"}); err != nil {
+		t.Fatalf("hooks.Install (simulating doctor --fix): %v", err)
+	}
+	assertCodexHooksCurrent(t, codexHooks, cityPath, "after doctor --fix")
+
+	base := "builtin:codex"
+	cityCfg := &config.City{Providers: map[string]config.ProviderSpec{"codex": {Base: &base}}}
+	stageCfg := runtime.Config{
+		WorkDir:         workDir,
+		ProviderName:    "codex",
+		PackOverlayDirs: []string{packOverlay},
+	}
+
+	// Without the rebind, session-start staging reintroduces the unbound entry —
+	// the exact downgrade ga-jm0 is about. This asserts the guard actually bites.
+	if err := runtime.StageSessionWorkDir(stageCfg); err != nil {
+		t.Fatalf("StageSessionWorkDir (no rebind): %v", err)
+	}
+	if data, err := os.ReadFile(codexHooks); err != nil {
+		t.Fatalf("reading codex hooks after unguarded staging: %v", err)
+	} else if !hooks.CodexHooksNeedManagedUpgrade(data, cityPath) {
+		t.Fatalf("expected session-start staging to downgrade managed codex hooks without a rebind, but they stayed current:\n%s", data)
+	}
+
+	// With the injected rebind, staging converges the managed hooks back to
+	// current form (city-bound, deduped) before the session reads them.
+	stageCfg.RebindManagedHooks = managedHookRebindForLaunch(cityPath, cityCfg)
+	if err := runtime.StageSessionWorkDir(stageCfg); err != nil {
+		t.Fatalf("StageSessionWorkDir (with rebind): %v", err)
+	}
+	assertCodexHooksCurrent(t, codexHooks, cityPath, "after session-start staging + rebind")
+}
+
+// TestManagedHookRebindForLaunch_GatesOnCityAndCodexOverlay locks the closure's
+// gating: no city context yields no callback, and a non-codex overlay is left
+// untouched (the rebind must never fabricate a .codex/hooks.json for a provider
+// that did not stage the codex overlay).
+func TestManagedHookRebindForLaunch_GatesOnCityAndCodexOverlay(t *testing.T) {
+	base := "builtin:codex"
+	cityCfg := &config.City{Providers: map[string]config.ProviderSpec{"codex": {Base: &base}}}
+
+	if fn := managedHookRebindForLaunch("", cityCfg); fn != nil {
+		t.Fatal("managedHookRebindForLaunch with empty cityPath = non-nil, want nil (no city context)")
+	}
+	if fn := managedHookRebindForLaunch(t.TempDir(), nil); fn != nil {
+		t.Fatal("managedHookRebindForLaunch with nil city = non-nil, want nil")
+	}
+
+	cityPath := t.TempDir()
+	workDir := filepath.Join(cityPath, "worker")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workDir): %v", err)
+	}
+	rebind := managedHookRebindForLaunch(cityPath, cityCfg)
+	if rebind == nil {
+		t.Fatal("managedHookRebindForLaunch returned nil for a valid city context")
+	}
+	// A non-codex overlay set must not create a codex hooks file.
+	if err := rebind(workDir, []string{"claude"}); err != nil {
+		t.Fatalf("rebind(non-codex): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Fatalf("rebind fabricated .codex/hooks.json for a non-codex overlay (stat err = %v)", err)
+	}
+}

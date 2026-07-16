@@ -79,6 +79,101 @@ func newNudgeKeyRetryTimer(delay time.Duration) nudgeKeyRetryTimer {
 
 var orderRescanInterval = time.Minute
 
+type sessionShutdownMode uint8
+
+const (
+	sessionShutdownUndecided sessionShutdownMode = iota
+	sessionShutdownPreserve
+	sessionShutdownPreserveUnlessCanceled
+	sessionShutdownDestructive
+)
+
+// sessionShutdownDecision linearizes the one shutdown disposition consumed by
+// both runtime and provider cleanup. A readiness refusal may request
+// preservation conditionally; shutdown resolves that request against the same
+// startup context exactly once. Supervisor preserve mode becomes unconditional
+// when it is selected before cancellation.
+type sessionShutdownDecision struct {
+	mu         sync.Mutex
+	mode       sessionShutdownMode
+	cancel     context.Context
+	cancelStop func() bool
+	cancelDone chan struct{}
+}
+
+func (d *sessionShutdownDecision) preserve() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.mode == sessionShutdownDestructive {
+		return
+	}
+	if d.mode == sessionShutdownPreserveUnlessCanceled && d.cancellationObservedLocked() {
+		d.mode = sessionShutdownDestructive
+		return
+	}
+	d.mode = sessionShutdownPreserve
+}
+
+func (d *sessionShutdownDecision) preserveUnlessCanceled(ctx context.Context) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.mode != sessionShutdownUndecided {
+		return
+	}
+	if ctx == nil {
+		d.mode = sessionShutdownDestructive
+		return
+	}
+	done := make(chan struct{})
+	d.mode = sessionShutdownPreserveUnlessCanceled
+	d.cancel = ctx
+	d.cancelDone = done
+	d.cancelStop = context.AfterFunc(ctx, func() { close(done) })
+}
+
+func (d *sessionShutdownDecision) cancellationObservedLocked() bool {
+	canceled := d.cancel == nil || d.cancel.Err() != nil
+	if d.cancelStop != nil {
+		if !d.cancelStop() {
+			<-d.cancelDone
+			canceled = true
+		} else if d.cancel != nil && d.cancel.Err() != nil {
+			// Cancellation may close Done after the first Err call but before
+			// AfterFunc is stopped. Recheck after winning Stop so cancellation
+			// cannot lose in that interval.
+			canceled = true
+		}
+	}
+	d.cancel = nil
+	d.cancelStop = nil
+	d.cancelDone = nil
+	return canceled
+}
+
+func (d *sessionShutdownDecision) resolve() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch d.mode {
+	case sessionShutdownPreserveUnlessCanceled:
+		if d.cancellationObservedLocked() {
+			d.mode = sessionShutdownDestructive
+		} else {
+			d.mode = sessionShutdownPreserve
+		}
+	case sessionShutdownUndecided:
+		d.mode = sessionShutdownDestructive
+	}
+	return d.mode == sessionShutdownPreserve
+}
+
+// Load reports whether shutdown currently prefers preserving live sessions.
+// A conditional preference may still resolve destructively if cancellation won.
+func (d *sessionShutdownDecision) Load() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.mode == sessionShutdownPreserve || d.mode == sessionShutdownPreserveUnlessCanceled
+}
+
 // CityRuntime holds all running state for a single city's reconciliation
 // loop. It encapsulates the per-city lifecycle that was previously spread
 // across runController and controllerLoop. A machine-wide supervisor can
@@ -178,7 +273,7 @@ type CityRuntime struct {
 	managedDoltPort     func(string) string
 
 	shutdownOnce             sync.Once
-	preserveSessionsShutdown atomic.Bool
+	preserveSessionsShutdown sessionShutdownDecision
 	forceStopShutdown        *atomic.Bool
 	logPrefix                string // "gc start" or "gc supervisor"
 	stdout, stderr           io.Writer
@@ -427,8 +522,10 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // run executes the reconciliation loop until ctx is canceled. This is
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
-func (cr *CityRuntime) run(ctx context.Context) {
+func (cr *CityRuntime) run(parentCtx context.Context) {
+	ctx, cancelRuntime := context.WithCancel(parentCtx)
 	defer cr.shutdown()
+	defer cancelRuntime()
 
 	dirty := cr.configDirty
 	if dirty == nil {
@@ -704,11 +801,22 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// complete effect-capable source and stays effect-free on any install failure.
 	// The defer is registered after run's shutdown defer, so LIFO ordering stops
 	// queue admission and workers before shutdown inspects live sessions.
-	if err := cr.installNudgeKeyShadow(ctx); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: nudge keyed controller unavailable at startup: %v\n", cr.logPrefix, err) //nolint:errcheck // transient failures retain periodic retry; cold ownership never changes in-process
+	nudgeKeyInstallErr := cr.installNudgeKeyShadow(ctx)
+	stopNudgeKeyController, nudgeKeyChild, nudgeKeyReady := cr.startNudgeKeyBeforeReadinessObserved(ctx, nudgeKeyInstallErr)
+	if !nudgeKeyReady {
+		// An authority refusal is not a request to stop the city. Preserve live
+		// sessions for supervisor re-adoption, while an explicit cancellation
+		// retains the normal destructive shutdown contract.
+		if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+			cr.preserveSessionsOnShutdownUnlessCanceled(parentCtx)
+		}
+		return
 	}
-	stopNudgeKeyController := cr.startNudgeKeyController(ctx)
 	defer stopNudgeKeyController()
+	var nudgeKeyChildFailure <-chan error
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed && nudgeKeyChild != nil {
+		nudgeKeyChildFailure = nudgeKeyChild.failure
+	}
 	if ctx.Err() != nil {
 		return
 	}
@@ -736,8 +844,20 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if cr.onStatus != nil {
 		cr.onStatus("starting_agents")
 	}
-	if cr.onStarted != nil {
-		cr.onStarted()
+	publishStarted := func() {
+		if cr.onStarted != nil {
+			cr.onStarted()
+		}
+	}
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed {
+		if nudgeKeyChild == nil || !nudgeKeyChild.publishReady(cr.nudgeKeyEffectPublicationReady, publishStarted) {
+			cr.logNudgeKeyLifecycleError(errors.New("keyed effect owner exited before city readiness publication"))
+			cr.preserveSessionsOnShutdownUnlessCanceled(parentCtx)
+			cancelRuntime()
+			return
+		}
+	} else {
+		publishStarted()
 	}
 	markReady()
 	fmt.Fprintf(cr.stderr, "%s: startup ready elapsed=%s\n", //nolint:errcheck // best-effort stderr
@@ -847,6 +967,15 @@ func (cr *CityRuntime) run(ctx context.Context) {
 				reply := cr.safeHandleConvergenceRequest(ctx, req)
 				req.replyCh <- reply
 			}, "convergence-request")
+		case failure := <-nudgeKeyChildFailure:
+			if parentCtx.Err() != nil {
+				cancelRuntime()
+				return
+			}
+			cr.logNudgeKeyLifecycleError(fmt.Errorf("keyed effect owner exited after city readiness: %w", failure))
+			cr.preserveSessionsOnShutdownUnlessCanceled(parentCtx)
+			cancelRuntime()
+			return
 		case <-ctx.Done():
 			return
 		}
@@ -1110,28 +1239,92 @@ func (cr *CityRuntime) warnNudgeKeyHintDiagnostic(err error) {
 	})
 }
 
+// startNudgeKeyBeforeReadiness completes the optional keyed child startup after
+// the caller's single install attempt and before the city-readiness fence.
+// Explicit keyed ownership cannot publish readiness until a complete
+// effect-capable source has recovered and its controller is accepting work. A
+// positively transient opener failure waits behind bounded retry; invariant
+// failures return unpublished. Legacy ownership may retain its existing
+// degraded read-shadow behavior because the legacy dispatcher remains the
+// effect owner.
+func (cr *CityRuntime) startNudgeKeyBeforeReadiness(ctx context.Context, installErr error) (func(), bool) {
+	stop, _, ready := cr.startNudgeKeyBeforeReadinessObserved(ctx, installErr)
+	return stop, ready
+}
+
+func (cr *CityRuntime) startNudgeKeyBeforeReadinessObserved(ctx context.Context, installErr error) (func(), *nudgeKeyChildLiveness, bool) {
+	noStop := func() {}
+	if cr == nil || ctx == nil {
+		return noStop, nil, false
+	}
+	if cr.nudgeEffectOwnership != nudgeEffectOwnershipLegacy && cr.nudgeEffectOwnership != nudgeEffectOwnershipKeyed {
+		return noStop, nil, false
+	}
+	if installErr != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge keyed controller unavailable at startup: %v\n", cr.logPrefix, installErr) //nolint:errcheck // the returned readiness decision is authoritative
+		if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed && !nudgeCommandSourceFailureIsTransient(installErr) {
+			return noStop, nil, false
+		}
+	}
+	stop, child := cr.startNudgeKeyControllerObserved(ctx)
+	if err := ctx.Err(); err != nil {
+		stop()
+		return noStop, nil, false
+	}
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed && !cr.nudgeKeyEffectPublicationReady() {
+		stop()
+		return noStop, nil, false
+	}
+	if cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed && child == nil {
+		stop()
+		return noStop, nil, false
+	}
+	return stop, child, true
+}
+
+func (cr *CityRuntime) nudgeKeyEffectPublicationReady() bool {
+	controller, reader, scope, retry := cr.nudgeKeyShadowState()
+	if controller == nil || reader == nil || scope == "" || retry {
+		return false
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.started && controller.accepting && !controller.stopped
+}
+
 // startNudgeKeyController starts the optional keyed nudge child and its single
 // global anti-entropy loop, and returns an idempotent stop function.
 // A transient startup failure retains this lifecycle so a later bounded tick
 // can install the child; an invariant or unsupported source stays inert.
 func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
+	stop, _ := cr.startNudgeKeyControllerObserved(parent)
+	return stop
+}
+
+func (cr *CityRuntime) startNudgeKeyControllerObserved(parent context.Context) (func(), *nudgeKeyChildLiveness) {
 	if cr == nil || parent == nil {
-		return func() {}
+		return func() {}, nil
 	}
 	controller, _, _, retryInstall := cr.nudgeKeyShadowState()
 	if controller == nil && !retryInstall {
-		return func() {}
+		return func() {}, nil
 	}
 	ctx, cancel := context.WithCancel(parent)
 	booted := make(chan struct{})
-	done := make(chan struct{})
+	child := newNudgeKeyChildLiveness()
 	go func() {
-		defer close(done)
+		var failure error
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				failure = fmt.Errorf("nudge keyed reconciler child panicked: %v\n%s", recovered, debug.Stack())
+			}
+			child.finish(failure)
+		}()
 		cr.runNudgeKeyShadowLifecycle(ctx, booted)
 	}()
 	select {
 	case <-booted:
-	case <-done:
+	case <-child.done:
 	}
 	var once sync.Once
 	return func() {
@@ -1144,20 +1337,27 @@ func (cr *CityRuntime) startNudgeKeyController(parent context.Context) func() {
 				controller.closeAdmission()
 			}
 			cancel()
-			<-done
+			<-child.done
 		})
-	}
+	}, child
 }
 
 func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted chan<- struct{}) {
 	ctx, cancelLifecycle := context.WithCancel(ctx)
-	defer cancelLifecycle()
+	var controllerDone <-chan error
+	defer func() {
+		cancelLifecycle()
+		if controllerDone != nil {
+			<-controllerDone
+		}
+	}()
 	backlogWarnings := newNudgeKeyBacklogWarnings(cr.stderr)
 	stopBacklogObservation := func() {}
 	defer func() { stopBacklogObservation() }()
 	var bootOnce sync.Once
 	markBooted := func() { bootOnce.Do(func() { close(booted) }) }
 	defer markBooted()
+	requireEffectPublication := cr.nudgeEffectOwnership == nudgeEffectOwnershipKeyed
 
 	factory := cr.nudgeKeyTickerFactory
 	if factory == nil {
@@ -1211,7 +1411,6 @@ func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted ch
 	}
 
 	controller, _, _, _ := cr.nudgeKeyShadowState()
-	var controllerDone <-chan error
 	if controller != nil {
 		stopBacklogObservation = startNudgeKeyBacklogObservation(controller, backlogWarnings)
 		var started bool
@@ -1223,7 +1422,9 @@ func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted ch
 		cr.logNudgeKeyLifecycleError(err)
 		return
 	}
-	markBooted()
+	if controller != nil || !requireEffectPublication {
+		markBooted()
+	}
 
 	for {
 		retryWake := false
@@ -1275,6 +1476,9 @@ func (cr *CityRuntime) runNudgeKeyShadowLifecycle(ctx context.Context, booted ch
 			controllerDone, started = cr.launchNudgeKeyController(ctx, cancelLifecycle, controller)
 			if !started {
 				return
+			}
+			if requireEffectPublication {
+				markBooted()
 			}
 			resetRetry()
 			continue
@@ -4028,7 +4232,7 @@ func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
-		preserveSessions := cr.preserveSessionsShutdown.Load()
+		preserveSessions := cr.preserveSessionsShutdown.resolve()
 		if preserveSessions {
 			cr.recordPreservedShutdownTrace()
 		}
@@ -4096,7 +4300,11 @@ func (cr *CityRuntime) shutdown() {
 }
 
 func (cr *CityRuntime) preserveSessionsOnShutdown() {
-	cr.preserveSessionsShutdown.Store(true)
+	cr.preserveSessionsShutdown.preserve()
+}
+
+func (cr *CityRuntime) preserveSessionsOnShutdownUnlessCanceled(ctx context.Context) {
+	cr.preserveSessionsShutdown.preserveUnlessCanceled(ctx)
 }
 
 func (cr *CityRuntime) forceStopRequested() bool {

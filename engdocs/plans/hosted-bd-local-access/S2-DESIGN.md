@@ -317,9 +317,17 @@ a small, helper-agnostic contract; each helper implements it:
    `spec.dialPort`, `spec.database`, `origin`.
 2. **Resolve trust** for `dialHost` against the helper's own allowlist
    (gasworks: `~/.config/gasworks/trusted-gateways.json` + compiled default;
-   eia-helper: a compiled/config allowlist of the fleet's gateway names — note
-   the fleet dials the split-DNS short name `beads`→tailnet-IP, NOT the FQDN, so
-   its allowlist entries differ from the human default; §11).
+   eia-helper: see below). **[CORRECTED 2026-07-16 during WP-E scoping:** the
+   red-team's "fleet dials the split-DNS short name `beads`" premise is stale —
+   the LIVE city-provisioner (identity-ha, ns `accounts`) pins
+   `BEADS_DOLT_HOST=gw.beads.gascity.com:3306` (the FQDN) into `GC_DOLT_HOST`
+   at spawn. eia-helper's allowlist is therefore: the union of (a) an explicit
+   `EIA_TRUSTED_GATEWAYS` env (comma-separated, canonicalized) and (b) the host
+   part of its OWN inherited `GC_DOLT_HOST`/`BEADS_DOLT_SERVER_HOST` env —
+   which is spawn-time-pinned by the provisioner and unreachable by a hostile
+   repo (a committed `.beads/config.yaml` changes what bd DIALS and REPORTS,
+   never the pod env), so "exec-info host == spawn-pinned host" is exactly the
+   fleet gate with zero new deploy config.**]
 3. **Byte-exact match** on the shared canonical form (§2.2) — never
    suffix/substring/port-insensitive.
 4. **Fail-closed for bd-originated mints on absent/untrusted destination:** if
@@ -603,8 +611,11 @@ requires Decision 2.
 The fleet mints via `eia-helper`, not gasworks; without WP-E the fleet (which
 processes untrusted repos in adopt-pr/PR-review) has NO destination gate under
 the pivot. Options: **(a)** in scope — add the §5.0 contract to `eia-helper`
-(crucible/gc change, needs a fleet-gateway allowlist keyed on the split-DNS
-short name `beads`, not the FQDN); **(b)** deferred, and the fleet gap is
+(crucible/gc change; allowlist = explicit `EIA_TRUSTED_GATEWAYS` env ∪ the
+host from eia-helper's own spawn-pinned `GC_DOLT_HOST`/`BEADS_DOLT_SERVER_HOST`
+env — see the §5.0.2 correction: the live fleet dials the FQDN, and the
+spawn-pinned env is repo-unreachable, so no new deploy config is needed);
+**(b)** deferred, and the fleet gap is
 accepted meanwhile with a compensating control (e.g. the fleet keeps env-pinning
 `GC_DOLT_HOST` so a repo-supplied host never reaches a mint — verify
 `mirrorBeadsDoltEnv` actually enforces this, today it only *projects* the host

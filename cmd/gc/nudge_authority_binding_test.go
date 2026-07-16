@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -17,7 +16,7 @@ import (
 )
 
 func TestBindProductionNudgeAuthorityKeepsCityIdentitySeparateFromStoreLineage(t *testing.T) {
-	store := beads.NewMemStore()
+	store := newNudgeCommandSourceAtomicStore()
 	repository, err := nudgequeue.NewCommandRepository(
 		store,
 		nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()),
@@ -85,7 +84,7 @@ func TestBindProductionNudgeAuthorityKeepsCityIdentitySeparateFromStoreLineage(t
 }
 
 func TestProductionNudgeAuthorityBindingCloseOwnsResourcesAndFailsClosed(t *testing.T) {
-	store := &bindingCountingStore{MemStore: beads.NewMemStore()}
+	store := &bindingCountingStore{nudgeCommandSourceAtomicStore: newNudgeCommandSourceAtomicStore()}
 	repository, err := nudgequeue.NewCommandRepository(
 		store,
 		nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()),
@@ -118,11 +117,11 @@ func TestProductionNudgeAuthorityBindingCloseOwnsResourcesAndFailsClosed(t *test
 }
 
 func TestOpenProductionNudgeAuthorityBindingClosesStoreOnPartialFailure(t *testing.T) {
-	store := &bindingCountingStore{MemStore: beads.NewMemStore()}
+	store := &bindingCountingStore{nudgeCommandSourceAtomicStore: newNudgeCommandSourceAtomicStore()}
 	binding, err := openProductionNudgeAuthorityBindingFromStore(
 		t.Context(),
 		t.TempDir(),
-		"invalid city identity",
+		" invalid-city",
 		store,
 	)
 	if binding != nil || err == nil {
@@ -134,9 +133,9 @@ func TestOpenProductionNudgeAuthorityBindingClosesStoreOnPartialFailure(t *testi
 }
 
 func TestOpenProductionNudgeAuthorityBindingSharedStoreWithoutSecondAnchorFailsClosed(t *testing.T) {
-	backing := beads.NewMemStore()
-	storeA := &bindingCountingStore{MemStore: backing}
-	storeB := &bindingCountingStore{MemStore: backing}
+	backing := newNudgeCommandSourceAtomicStore()
+	storeA := &bindingCountingStore{nudgeCommandSourceAtomicStore: backing}
+	storeB := &bindingCountingStore{nudgeCommandSourceAtomicStore: backing}
 	cityA, err := openProductionNudgeAuthorityBindingFromStore(t.Context(), t.TempDir(), "city-a", storeA)
 	if err != nil {
 		t.Fatalf("open city-a: %v", err)
@@ -159,7 +158,7 @@ func TestOpenProductionNudgeAuthorityBindingSharedStoreWithoutSecondAnchorFailsC
 }
 
 func TestProductionNudgeAuthorityBindingAdmitCloseRaceFailsClosed(t *testing.T) {
-	store := beads.NewMemStore()
+	store := newNudgeCommandSourceAtomicStore()
 	repository, err := nudgequeue.NewCommandRepository(store, nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewCommandRepository: %v", err)
@@ -241,7 +240,7 @@ func TestResolveNudgeEffectStartupForCityRetainsOnlyCompleteLiveBinding(t *testi
 			NudgeEffectOwner: "auto",
 		},
 	}
-	store := beads.NewMemStore()
+	store := newNudgeCommandSourceAtomicStore()
 	repository, err := nudgequeue.NewCommandRepository(store, nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewCommandRepository: %v", err)
@@ -281,7 +280,7 @@ func TestResolveNudgeEffectStartupForCityRetainsOnlyCompleteLiveBinding(t *testi
 
 func TestProductionNudgeAuthorityBindingDoesNotClaimUnwiredCommandProducers(t *testing.T) {
 	cfg := &config.City{Daemon: config.DaemonConfig{NudgeDispatcher: "supervisor"}}
-	store := beads.NewMemStore()
+	store := newNudgeCommandSourceAtomicStore()
 	repository, err := nudgequeue.NewCommandRepository(store, nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewCommandRepository: %v", err)
@@ -307,7 +306,7 @@ func TestProductionNudgeAuthorityBindingDoesNotClaimUnwiredCommandProducers(t *t
 func TestResolveNudgeEffectStartupForCityUnwiredProducersKeepLegacyOrRefuse(t *testing.T) {
 	newBinding := func(t *testing.T) *productionNudgeAuthorityBinding {
 		t.Helper()
-		store := beads.NewMemStore()
+		store := newNudgeCommandSourceAtomicStore()
 		repository, err := nudgequeue.NewCommandRepository(store, nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()))
 		if err != nil {
 			t.Fatalf("NewCommandRepository: %v", err)
@@ -403,7 +402,7 @@ func TestResolveNudgeEffectStartupForCityFailureHonorsOffAutoAndRequire(t *testi
 }
 
 func TestCityRuntimeRetainsAndClosesProductionNudgeAuthorityBinding(t *testing.T) {
-	store := &bindingCountingStore{MemStore: beads.NewMemStore()}
+	store := &bindingCountingStore{nudgeCommandSourceAtomicStore: newNudgeCommandSourceAtomicStore()}
 	repository, err := nudgequeue.NewCommandRepository(store, nudgequeue.NewRestoreAnchorRepositoryVerifier(t.TempDir()))
 	if err != nil {
 		t.Fatalf("NewCommandRepository: %v", err)
@@ -434,11 +433,12 @@ func TestCityRuntimeRetainsAndClosesProductionNudgeAuthorityBinding(t *testing.T
 }
 
 type bindingCountingStore struct {
-	*beads.MemStore
-	closes atomic.Int32
+	*nudgeCommandSourceAtomicStore
+	closes   atomic.Int32
+	closeErr error
 }
 
 func (s *bindingCountingStore) CloseStore() error {
 	s.closes.Add(1)
-	return nil
+	return s.closeErr
 }

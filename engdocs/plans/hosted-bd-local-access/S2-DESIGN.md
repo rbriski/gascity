@@ -5,7 +5,8 @@
 > over the gc credential-provider pattern, bd's delegation surface, and gasworks
 > as trust authority) and a 3-lens v2 red-team. Grounding dumps (session-local):
 > `/data/tmp/s2-grounding/*.md`. Implements the SPEC's Rollout item **S2**
-> (SPEC needs the companion edits in §10). Status: DESIGN — Opus impl, Fable
+> (SPEC needs the companion edits in §10). Status: **APPROVED FOR
+> IMPLEMENTATION** (both §11 decisions ruled 2026-07-16) — Opus impl, Fable
 > red-team before each commit.
 
 > **v3 changelog — the pivot.** Owner direction: *"the gasworks CLI should own
@@ -574,7 +575,17 @@ where marked):
 - S1, S3–S9 unaffected (S3 pinned scopes and S4 custody were already
   gasworks-side; the pivot only reinforces them).
 
-## 11. Owner flags — two are genuine DECISIONS (please rule before implementation)
+## 11. Owner decisions — RULED 2026-07-16 (implementation unblocked)
+
+> **RULINGS (owner, 2026-07-16): Decision 1 = (a)** — single helper-contract
+> layer (§5.0), every helper enforces. **Decision 2 = (a)** — `eia-helper`
+> enforcement (WP-E) is IN SCOPE now. The internally consistent pair the
+> design recommended. Consequences: SPEC CRITICAL #2 mitigation flips from
+> PROPOSED to ACCEPTED (single-layer, contract-as-merge-gate with adversarial
+> tests); WP-E joins the program (A ∥ B(warn) → flip B → E → D); no
+> compensating env-pin control is needed as the long-term posture, but the
+> warn→enforce flip for the FLEET is additionally gated on WP-E being deployed
+> (an enforcing gasworks alone does not cover the fleet population).
 
 **DECISION 1 — collapse v2's two destination layers into the helper contract?**
 SPEC CRITICAL #2 mandates two independent layers (bd allowlist AND gasworks).

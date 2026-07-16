@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
@@ -16,6 +17,21 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 )
+
+type verifiedCityWriteGrantContextKey struct{}
+
+// VerifiedCityWriteGrantFromContext returns the authenticated write grant
+// attached by the city write-auth middleware. The unexported context key keeps
+// callers from manufacturing evidence; downstream composition may only read a
+// value that this package installed after signature, scope, request-binding,
+// freshness, and replay verification succeeded.
+func VerifiedCityWriteGrantFromContext(ctx context.Context) (citywriteauth.Grant, bool) {
+	if ctx == nil {
+		return citywriteauth.Grant{}, false
+	}
+	grant, ok := ctx.Value(verifiedCityWriteGrantContextKey{}).(citywriteauth.Grant)
+	return grant, ok
+}
 
 // Write-auth gates per-city write mutations on a signed, single-use,
 // request-bound grant when a verifying key is configured. It covers every
@@ -251,13 +267,15 @@ func writeAuthMiddleware(v *citywriteauth.Verifier, readOnly bool, next http.Han
 			City:      city,
 			ReqDigest: citywriteauth.ReqDigest(r.Method, r.URL.Path, r.URL.RawQuery, body),
 		}
-		if _, err := v.Verify(token, expect); err != nil {
+		grant, err := v.Verify(token, expect)
+		if err != nil {
 			// Deliberately generic to the client (no verification oracle); the
 			// specific reason is for server-side audit, not the response.
 			problemWriteAuthRejected.writeTo(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), verifiedCityWriteGrantContextKey{}, *grant)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

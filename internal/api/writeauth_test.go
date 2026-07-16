@@ -129,6 +129,49 @@ func TestWriteAuthMiddleware_AcceptsValidGrantAndResetsBody(t *testing.T) {
 	}
 }
 
+func TestWriteAuthMiddleware_AttachesVerifiedGrantEvidenceToContext(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	pub, priv := mustKeypair(t)
+	body := []byte(`{"message":"hello"}`)
+	path := "/v0/city/acme/session/gc-1/nudges"
+	grant := grantFor(now, "acme", http.MethodPost, path, body, "nudge-grant-1")
+	token := mintToken(t, priv, grant)
+
+	var (
+		seen bool
+		got  citywriteauth.Grant
+		ok   bool
+	)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = true
+		got, ok = VerifiedCityWriteGrantFromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := writeAuthMiddleware(newTestWriteVerifier(t, pub, now), false, next)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set(writeAuthHeader, token)
+	req.Header.Set(csrfHeaderName, "1")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if !seen || rec.Code != http.StatusNoContent {
+		t.Fatalf("verified request did not reach handler: seen=%v code=%d", seen, rec.Code)
+	}
+	if !ok {
+		t.Fatal("verified write grant evidence is absent from request context")
+	}
+	if got != grant {
+		t.Fatalf("verified grant = %#v, want %#v", got, grant)
+	}
+}
+
+func TestVerifiedCityWriteGrantFromContextRejectsMissingEvidence(t *testing.T) {
+	if grant, ok := VerifiedCityWriteGrantFromContext(t.Context()); ok || grant != (citywriteauth.Grant{}) {
+		t.Fatalf("missing grant = %#v, ok=%v; want zero, false", grant, ok)
+	}
+}
+
 func TestWriteAuthMiddleware_GatesOtherMutationMethods(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	pub, priv := mustKeypair(t)

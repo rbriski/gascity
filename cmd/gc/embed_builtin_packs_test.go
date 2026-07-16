@@ -1070,6 +1070,55 @@ func TestEnsureBuiltinRuntimeAssetsRehydratesEvictedOptionalLockedBundledCache(t
 	}
 }
 
+// TestEnsureBuiltinRuntimeAssetsRegeneratesShimWhenTargetDisappears pins the
+// gc-beads-bd projection self-heal (ga-a76). The stable shim embeds an
+// absolute content-addressed cache target. A foreign write — a test running
+// with a temp GC_HOME that resolves to this city, or an older binary whose
+// cache slot was later evicted — can leave the shim execing a target that no
+// longer exists, breaking scheduled beads health and recovery which exec the
+// shim directly. Because those failures observed the shim pointing at a
+// deleted cache path, the ready fast path (state.ready + usable required and
+// locked bundled caches) must also revalidate the on-disk shim itself:
+// requiredBuiltinSourcesUsable only validates the current bd cache slot, so a
+// shim pointing at a *different*, vanished target slips past it. The fast path
+// must fall through and regenerate the shim to the live target.
+func TestEnsureBuiltinRuntimeAssetsRegeneratesShimWhenTargetDisappears(t *testing.T) {
+	clearGCEnv(t) // isolated GC_HOME so the shim rewrite never touches the shared test cache
+	city := t.TempDir()
+
+	// Ready the city: hydrate required core/bd, write the shim at the live
+	// target, and mark the per-city runtime state ready.
+	materializeBuiltinPacksForTest(t, city)
+
+	shimPath := gcBeadsBdScriptPath(city)
+	liveTarget := bundledGcBeadsBdScriptForTest(t)
+
+	// Simulate the incident: overwrite the shim so it execs a cache target
+	// that does not exist (the temp GC_HOME leak, once the temp dir is gone).
+	// The required bd cache slot the fast path validates is untouched, so only
+	// a shim-level revalidation can catch this.
+	vanishedTarget := filepath.Join(t.TempDir(), "evicted", "gc-beads-bd.sh")
+	bogusShim := "#!/bin/sh\nexec \"" + vanishedTarget + "\" \"$@\"\n"
+	if err := os.WriteFile(shimPath, []byte(bogusShim), 0o755); err != nil {
+		t.Fatalf("planting stale shim: %v", err)
+	}
+
+	if err := EnsureBuiltinRuntimeAssets(city, io.Discard); err != nil {
+		t.Fatalf("EnsureBuiltinRuntimeAssets after shim target vanished: %v", err)
+	}
+
+	got, err := os.ReadFile(shimPath)
+	if err != nil {
+		t.Fatalf("ReadFile(shim): %v", err)
+	}
+	if strings.Contains(string(got), vanishedTarget) {
+		t.Fatalf("shim still execs the vanished target %s; projection retained an invalid cache target:\n%s", vanishedTarget, got)
+	}
+	if !strings.Contains(string(got), liveTarget) {
+		t.Fatalf("shim was not regenerated to the live target %s:\n%s", liveTarget, got)
+	}
+}
+
 func TestConfigLoadBoundarySkipsWithoutGCHome(t *testing.T) {
 	// Under `go test` ImplicitGCHome returns "" when GC_HOME is unset
 	// (hermetic-test guard on os.Args[0] suffix ".test"), so

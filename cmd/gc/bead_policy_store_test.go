@@ -43,6 +43,54 @@ func underlyingPolicyStoreForTest(store beads.Store) beads.Store {
 	return base
 }
 
+func TestBeadPolicyStoreForwardsAtomicCommandRepositoryCapabilities(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		backing beads.Store
+	}{
+		{name: "ordinary policy wrapper", backing: newNudgeCommandSourceAtomicStore()},
+		{name: "graph policy wrapper", backing: &policyAtomicGraphStore{nudgeCommandSourceAtomicStore: newNudgeCommandSourceAtomicStore()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wrapped := wrapStoreWithBeadPolicies(test.backing, &config.City{})
+			wantWriter, ok := beads.AtomicReadWriteFor(test.backing)
+			if !ok {
+				t.Fatal("test backing lacks AtomicReadWrite")
+			}
+			gotWriter, ok := beads.AtomicReadWriteFor(wrapped)
+			if !ok || gotWriter != wantWriter {
+				t.Fatalf("AtomicReadWriteFor(policy wrapper) = (%T, %t), want exact backing handle %T", gotWriter, ok, wantWriter)
+			}
+			wantSnapshot, ok := beads.AtomicReadSnapshotFor(test.backing)
+			if !ok {
+				t.Fatal("test backing lacks AtomicReadSnapshot")
+			}
+			gotSnapshot, ok := beads.AtomicReadSnapshotFor(wrapped)
+			if !ok || gotSnapshot != wantSnapshot {
+				t.Fatalf("AtomicReadSnapshotFor(policy wrapper) = (%T, %t), want exact backing handle %T", gotSnapshot, ok, wantSnapshot)
+			}
+		})
+	}
+}
+
+func TestBeadPolicyStoreDoesNotFabricateAtomicCommandRepositoryCapabilities(t *testing.T) {
+	wrapped := wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})
+	if handle, ok := beads.AtomicReadWriteFor(wrapped); ok || handle != nil {
+		t.Fatalf("AtomicReadWriteFor(non-atomic policy wrapper) = (%T, %t), want unavailable", handle, ok)
+	}
+	if handle, ok := beads.AtomicReadSnapshotFor(wrapped); ok || handle != nil {
+		t.Fatalf("AtomicReadSnapshotFor(non-atomic policy wrapper) = (%T, %t), want unavailable", handle, ok)
+	}
+}
+
+type policyAtomicGraphStore struct {
+	*nudgeCommandSourceAtomicStore
+}
+
+func (s *policyAtomicGraphStore) ApplyGraphPlan(context.Context, *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	return &beads.GraphApplyResult{}, nil
+}
+
 func TestBeadPolicyStorePreservesConditionalAssignmentReleaser(t *testing.T) {
 	backing := beads.NewMemStore()
 	wrapped := wrapStoreWithBeadPolicies(backing, nil)

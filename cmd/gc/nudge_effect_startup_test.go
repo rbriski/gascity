@@ -139,7 +139,7 @@ func TestSelectNudgeEffectOwnershipMissingDependencyHonorsAutoAndRequire(t *test
 			if auto.Ownership != nudgeEffectOwnershipLegacy {
 				t.Fatalf("auto ownership = %d, want retained legacy", auto.Ownership)
 			}
-			if notice := strings.ToLower(auto.Notice); !strings.Contains(notice, "retaining legacy") || !strings.Contains(notice, test.wantReason) {
+			if notice := strings.ToLower(auto.Notice); !strings.Contains(notice, "retaining legacy") || !strings.Contains(notice, strings.ToLower(test.wantReason)) {
 				t.Fatalf("auto notice = %q, want retained-legacy reason %q", auto.Notice, test.wantReason)
 			}
 

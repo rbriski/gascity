@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/token"
 	"net/http"
 	"runtime"
 	"sync"
@@ -12,7 +14,51 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestRunSupervisorInstallsProductionNudgeAdmissionBeforeServingMux(t *testing.T) {
+	files := parseControllerStopProductionFiles(t)
+	fn := findProductionFunc(t, files["cmd_supervisor.go"], "runSupervisor")
+	var constructorPos, installPos, servePos token.Pos
+	constructorCalls := 0
+	installCalls := 0
+	serveCalls := 0
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch controllerStopCalledIdent(call.Fun) {
+		case "NewSupervisorMux":
+			constructorCalls++
+			constructorPos = call.Pos()
+		case "installSupervisorProductionNudgeAdmission":
+			installCalls++
+			installPos = call.Pos()
+			if len(call.Args) != 2 || controllerStopCalledIdent(call.Args[0]) != "apiMux" || controllerStopCalledIdent(call.Args[1]) != "registry" {
+				t.Fatalf("production nudge admission installer args = %#v, want (apiMux, registry)", call.Args)
+			}
+		case "Serve":
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			owner, ownerOK := selector.X.(*ast.Ident)
+			if ownerOK && owner.Name == "apiMux" {
+				serveCalls++
+				servePos = call.Pos()
+			}
+		}
+		return true
+	})
+	if constructorCalls != 1 || installCalls != 1 || serveCalls != 1 {
+		t.Fatalf("production supervisor mux calls = constructor:%d installer:%d serve:%d, want 1/1/1", constructorCalls, installCalls, serveCalls)
+	}
+	if constructorPos == token.NoPos || installPos == token.NoPos || servePos == token.NoPos || constructorPos >= installPos || installPos >= servePos {
+		t.Fatalf("production supervisor mux order = constructor:%d installer:%d serve:%d, want constructor < installer < serve", constructorPos, installPos, servePos)
+	}
+}
 
 func TestCityRegistryProductionNudgeAuthorityPublishesOnlyStartedRuntime(t *testing.T) {
 	binding, _ := newRegistryProductionNudgeBinding(t)
@@ -139,6 +185,77 @@ func TestCityRegistryProductionNudgeAuthorityReplacementPublishesOnlyNewRuntime(
 	current, live = registry.resolveProductionNudgeAuthority("city-a")
 	if !live || current != newBinding {
 		t.Fatalf("authority after old shutdown = (%#v, %t), want new binding", current, live)
+	}
+}
+
+func TestCityRegistryProductionNudgeAuthorityReplacementFencesRetainedAdmissions(t *testing.T) {
+	oldStore := newBlockingProductionNudgeAtomicStore()
+	oldBinding, oldRepository := newRegistryProductionNudgeBindingFromStore(t, oldStore)
+	newBinding, newRepository := newRegistryProductionNudgeBinding(t)
+	registry := newCityRegistry()
+	registry.Add("/city/a", &managedCity{
+		name:    "city-a",
+		started: true,
+		cr:      &CityRuntime{cityName: "city-a", nudgeAuthorityBinding: oldBinding},
+	})
+
+	retained, live := registry.resolveProductionNudgeAuthority("city-a")
+	if !live || retained != oldBinding {
+		t.Fatalf("old authority = (%#v, %t), want exact old binding", retained, live)
+	}
+	entered, release := oldStore.blockNextAtomicWrite()
+	firstRequest := validProductionNudgeRequest(time.Now().UTC())
+	firstRequest.RequestID = "replacement-in-flight-old"
+	firstContext := productionNudgeBindingRequestContext(t, oldBinding, "replacement-in-flight-old-grant")
+	lateContext := productionNudgeBindingRequestContext(t, oldBinding, "replacement-retained-late-grant")
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := retained.Admit(firstContext, firstRequest)
+		firstDone <- err
+	}()
+	waitForProductionNudgeAdmissionBlock(t, entered)
+
+	registry.Add("/city/a", &managedCity{
+		name:    "city-a",
+		started: true,
+		cr:      &CityRuntime{cityName: "city-a", nudgeAuthorityBinding: newBinding},
+	})
+	current, live := registry.resolveProductionNudgeAuthority("city-a")
+	if !live || current != newBinding {
+		t.Fatalf("replacement authority = (%#v, %t), want exact new binding", current, live)
+	}
+	newRequest := validProductionNudgeRequest(time.Now().UTC())
+	newRequest.RequestID = "replacement-current-new"
+	if _, err := current.Admit(productionNudgeBindingRequestContext(t, newBinding, "replacement-current-new-grant"), newRequest); err != nil {
+		t.Fatalf("new authority admission: %v", err)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- oldBinding.Close() }()
+	waitForProductionNudgeCloseWriter(t, oldBinding)
+	lateRequest := validProductionNudgeRequest(time.Now().UTC())
+	lateRequest.RequestID = "replacement-retained-late"
+	lateDone := make(chan error, 1)
+	go func() {
+		_, err := retained.Admit(lateContext, lateRequest)
+		lateDone <- err
+	}()
+
+	close(release)
+	if err := waitForProductionNudgeOperation(t, "in-flight old admission", firstDone); err != nil {
+		t.Fatalf("in-flight old admission: %v", err)
+	}
+	if err := waitForProductionNudgeOperation(t, "old binding close", closeDone); err != nil {
+		t.Fatalf("old binding close: %v", err)
+	}
+	if err := waitForProductionNudgeOperation(t, "late retained admission", lateDone); !errors.Is(err, nudgequeue.ErrLocalNudgeAuthorityUnavailable) {
+		t.Fatalf("late retained admission error = %v, want unavailable", err)
+	}
+	assertProductionNudgeRepositoryEntries(t, oldRepository, 1)
+	assertProductionNudgeRepositoryEntries(t, newRepository, 1)
+	current, live = registry.resolveProductionNudgeAuthority("city-a")
+	if !live || current != newBinding {
+		t.Fatalf("post-race authority = (%#v, %t), want exact new binding", current, live)
 	}
 }
 
@@ -339,14 +456,14 @@ func waitForProductionNudgeAdmissionBlock(t *testing.T, entered <-chan struct{})
 	t.Helper()
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.GoroutineRaceTimeout):
 		t.Fatal("timed out waiting for admission to enter the durable store")
 	}
 }
 
 func waitForProductionNudgeCloseWriter(t *testing.T, binding *productionNudgeAuthorityBinding) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testutil.GoroutineRaceTimeout)
 	for {
 		if binding.mu.TryRLock() {
 			binding.mu.RUnlock()
@@ -357,6 +474,17 @@ func waitForProductionNudgeCloseWriter(t *testing.T, binding *productionNudgeAut
 			continue
 		}
 		return
+	}
+}
+
+func waitForProductionNudgeOperation(t *testing.T, operation string, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatalf("timed out waiting for %s", operation)
+		return nil
 	}
 }
 

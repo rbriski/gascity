@@ -38,6 +38,10 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.AtomicReadWriteHandleProvider    = (*beadPolicyStore)(nil)
+	_ beads.AtomicReadSnapshotHandleProvider = (*beadPolicyStore)(nil)
+	_ beads.AtomicReadWriteHandleProvider    = (*beadPolicyGraphStore)(nil)
+	_ beads.AtomicReadSnapshotHandleProvider = (*beadPolicyGraphStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -49,6 +53,20 @@ var (
 // wrapper. beadPolicyGraphStore inherits this via its embedded
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// AtomicReadWriteHandle preserves the backing store's real transactional
+// capability without fabricating one for unsupported stores. Command rows and
+// repository metadata already carry their explicit history storage contract,
+// so this path intentionally bypasses creation policy rewriting.
+func (s *beadPolicyStore) AtomicReadWriteHandle() (beads.AtomicReadWriteStore, bool) {
+	return beads.AtomicReadWriteFor(s.Store)
+}
+
+// AtomicReadSnapshotHandle preserves the matching stable-snapshot capability
+// from the same backing store selected by AtomicReadWriteHandle.
+func (s *beadPolicyStore) AtomicReadSnapshotHandle() (beads.AtomicReadSnapshotStore, bool) {
+	return beads.AtomicReadSnapshotFor(s.Store)
+}
 
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)

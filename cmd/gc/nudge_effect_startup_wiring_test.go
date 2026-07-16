@@ -58,7 +58,7 @@ func TestRunControllerWithLeaseRequireRefusesBeforeStarted(t *testing.T) {
 	if stdout.String() != "" {
 		t.Fatalf("stdout = %q, want no premature startup success", stdout.String())
 	}
-	for _, want := range []string{errNudgeEffectStartupRefused.Error(), "atomic command repository"} {
+	for _, want := range []string{errNudgeEffectStartupRefused.Error(), nudgequeue.ErrCommandRepositoryUnsupported.Error()} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}
@@ -103,7 +103,7 @@ func TestNudgeEffectStartupGateWiredIntoEveryProductionRoot(t *testing.T) {
 				switch n := node.(type) {
 				case *ast.CallExpr:
 					switch controllerStopCalledIdent(n.Fun) {
-					case "resolveNudgeEffectStartup":
+					case "resolveNudgeEffectStartupForCity":
 						gateCalls++
 						gatePos = n.Pos()
 					case "newCityRuntime":

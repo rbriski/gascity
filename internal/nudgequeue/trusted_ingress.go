@@ -644,9 +644,13 @@ func validateNudgeAuthorizationSchema(authorization NudgeAuthorization) error {
 }
 
 func trustedCityPartitionFromAuthority(reference TrustedIngressReference) TrustedCityPartition {
+	return trustedCityPartitionFromIdentity(reference.Issuer, reference.TenantScope, reference.CityScope)
+}
+
+func trustedCityPartitionFromIdentity(issuer, tenantScope, cityScope string) TrustedCityPartition {
 	digest := sha256.New()
 	_, _ = io.WriteString(digest, trustedCityPartitionDomainV1)
-	for _, field := range []string{reference.Issuer, reference.TenantScope, reference.CityScope} {
+	for _, field := range []string{issuer, tenantScope, cityScope} {
 		_, _ = digest.Write([]byte{0})
 		_, _ = io.WriteString(digest, field)
 	}

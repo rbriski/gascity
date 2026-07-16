@@ -609,6 +609,54 @@ func (a *LocalNudgeAuthority) validateLivePath() error {
 	return nil
 }
 
+// TrustedCityPartition returns this open journal's opaque city partition.
+// The partition is derived only from immutable identity read back from the
+// exact authority journal; caller configuration cannot mint one by itself.
+func (a *LocalNudgeAuthority) TrustedCityPartition(ctx context.Context) (TrustedCityPartition, error) {
+	release, err := a.begin(ctx)
+	if err != nil {
+		return TrustedCityPartition{}, err
+	}
+	defer release()
+
+	empty, err := validateLocalAuthoritySchema(ctx, a.db)
+	if err != nil {
+		return TrustedCityPartition{}, err
+	}
+	if empty {
+		return TrustedCityPartition{}, fmt.Errorf("%w: authority journal has no validated schema", ErrLocalNudgeAuthorityConflict)
+	}
+	var (
+		schema                                                                                          int
+		profile, storeUUID, authorityID, issuer, tenantScope, cityScope, credentialClass, policyVersion string
+		restoreEpochWire                                                                                []byte
+	)
+	if err := a.db.QueryRowContext(ctx, `SELECT schema_version, profile, store_uuid, restore_epoch,
+		authority_id, issuer, tenant_scope, city_scope, credential_class, policy_version
+		FROM authority_meta WHERE singleton = 1`).Scan(
+		&schema, &profile, &storeUUID, &restoreEpochWire, &authorityID, &issuer,
+		&tenantScope, &cityScope, &credentialClass, &policyVersion,
+	); err != nil {
+		return TrustedCityPartition{}, fmt.Errorf("%w: reading authority partition identity: %w", ErrLocalNudgeAuthorityConflict, err)
+	}
+	restoreEpoch, err := decodeLocalAuthorityUint64(restoreEpochWire)
+	if err != nil {
+		return TrustedCityPartition{}, err
+	}
+	if schema != localNudgeAuthoritySchema || profile != a.opts.Profile ||
+		storeUUID != a.store.StoreUUID || restoreEpoch != a.store.RestoreEpoch ||
+		authorityID != a.opts.AuthorityID || issuer != a.opts.Issuer ||
+		tenantScope != a.opts.TenantScope || cityScope != a.opts.CityScope ||
+		credentialClass != a.opts.CredentialClass || policyVersion != a.opts.PolicyVersion {
+		return TrustedCityPartition{}, fmt.Errorf("%w: authority partition identity differs from the validated journal", ErrLocalNudgeAuthorityConflict)
+	}
+	partition := trustedCityPartitionFromIdentity(issuer, tenantScope, cityScope)
+	if err := a.validateLivePath(); err != nil {
+		return TrustedCityPartition{}, err
+	}
+	return partition, nil
+}
+
 // Close releases the SQLite connection and exclusive lifetime lock.
 func (a *LocalNudgeAuthority) Close() error {
 	if a == nil {

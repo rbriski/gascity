@@ -1,576 +1,615 @@
-# S2 Design — bd attach, per-dial minting, destination trust
+# S2 Design — thin-bd credential delegation; gasworks owns auth + destination trust
 
-> Fable design, 2026-07-15, **v2 (post red-team)**. Grounded by a 4-reader
-> workflow over: bd origin/main (`3fea70523`) + PR #4823 branch (`7075e2738`),
-> the per-dial connector branch (`feat/dolt-credential-command` @ `1f0ebe068`),
-> and the gasworks CLI (origin/main `4394951`). Full grounding dumps:
-> `/data/tmp/s2-grounding/*.md` (session-local; load-bearing anchors inlined).
-> Implements the SPEC's Rollout item **S2**. Status: DESIGN — implementation
-> follows the Fable-design → Opus-impl → Fable-red-team cycle per work package.
+> Fable design, **v3 (thin-bd pivot)**, 2026-07-16. Supersedes v2. Grounded by
+> two Fable workflows (a 4-reader current-state pass + a 3-reader pivot pass
+> over the gc credential-provider pattern, bd's delegation surface, and gasworks
+> as trust authority) and a 3-lens v2 red-team. Grounding dumps (session-local):
+> `/data/tmp/s2-grounding/*.md`. Implements the SPEC's Rollout item **S2**
+> (SPEC needs the companion edits in §10). Status: DESIGN — Opus impl, Fable
+> red-team before each commit.
 
-> **v2 changelog (a 3-lens Fable red-team broke v1; all three lenses converged
-> on the same CRITICAL, which is why it is fixed at the root here):**
-> - **The v1 "env credential command bypasses the destination gate" carve-out
->   reopened the SPEC's CRITICAL exfil vector for the whole fleet/S1 cohort.**
->   Fixed by splitting two concepts v1 conflated (§2.2): who may set the
->   credential *command string* (env: always; repo: only an allowlisted helper
->   via TOFU) vs. the *destination gate* (UNCONDITIONAL — every
->   credential-command dial to a non-loopback host requires host ∈ allowlist,
->   whatever the source of command or host).
-> - **Hosted resolution is now TERMINAL/exclusive** (§4.4), not "before existing
->   logic" — it owns host/port/tls/cred and the sites never fall through to
->   `GetDoltServerHost`/`.beads/config.yaml` (which is repo-committed, highest
->   config priority, and NOT in the TOFU hash — v1's second exfil hole).
-> - `Config.CredentialSource` retyped to the `creds.Source` interface; the
->   persisted path does its OWN eager fail-closed mint (v1's "ApplyGatewayCredential
->   still gates open" was false for a clean-env attached workspace) (§3.1, §4.2).
-> - attach verification connect skips the store-level `verifyProjectIdentity`
->   and does its own cross-check (v1 would self-conflict at open) (§4.2).
-> - STS resilience gets a per-attempt HTTP timeout + total budget (v1's backoff
->   math ignored httpc's 30s per-call timeout → serve-last-good unreachable on a
->   hang) (§5.4).
-> - gasworks version-skew (old CLI dies on `--gateway`) gets capability
->   detection + a named remedy (§4.2, §5.1).
-> - Host canonicalization threaded to check+dial+hash; 1045-retry gated + ONE
->   attempt (not a 30s loop — matters for the bounded-exec mc controller);
->   doctor renders hosted.Resolve failures as a layer, not a crash. (§ throughout.)
+> **v3 changelog — the pivot.** Owner direction: *"the gasworks CLI should own
+> the authentication to gasworks and beads; bd should just have support to
+> delegate to a command line to fulfill the credential requirements."* This
+> mirrors the parallel gc change (worktree `.../frm`, branch
+> `feat/unified-city-resolver`) that reverts gc-native auth to a **credential
+> command** delegating to `gasworks getToken` — the kubectl
+> ExecCredential / git-credential-helper shape (`internal/clientauth`:
+> versioned protocol, request passed to the helper via an **env var not argv**,
+> `{token, expiration}` back, the client owns no key and makes **no
+> destination-trust decision**).
+>
+> v2 built a large **bd-native** trust apparatus (a user-level trusted-gateway
+> allowlist *in bd*, a `bd attach` trust ceremony, TOFU attachment records,
+> `hosted.GuardDestination` inside bd, a terminal `hosted.Resolve`). This design
+> **deletes all of it** and moves the trust decision into the **credential
+> helper**. bd reverts to a pure delegator that **reports its true dial host to
+> the helper** (`report == dial`); the helper makes the allowlist call.
 
-## 0. Grounding corrections to the SPEC (must-know before implementing)
+> **v4 changelog (Fable red-team of v3 — 3 lenses, 7 blockers; the pivot
+> direction survives but its "closes the CRITICAL at the root" claim did not,
+> and one design premise was factually wrong).** Fixes folded in:
+> - **The fleet helper is `eia-helper`, NOT `gasworks`.** v3 §4 wrongly said
+>   `mirrorBeadsDoltEnv` produces a `gasworks getToken` command; it produces an
+>   `eia-helper` command (an STS machine minter reading only
+>   `ORCHESTRATOR_KEY_FILE`/`EIA_AUDIENCE`/…, no destination input). A
+>   gasworks-only gate would leave the **fleet — the population that processes
+>   untrusted repos in adopt-pr/PR-review — with zero destination gate.** v4
+>   reframes destination enforcement as a **credential-helper CONTRACT that
+>   EVERY helper implements** (gasworks AND eia-helper), not a bd-side allowlist.
+>   Keeps bd thin (owner's intent) *and* covers the fleet.
+> - **Drop the loopback exemption** — a prefix/CIDR-string loopback check lets
+>   `127.0.0.1.attacker.example` suppress exec-info; bd now **always injects**
+>   exec-info on hosted (credential-command) server-mode dials, and helpers
+>   **fail closed** when a bd-originated mint carries no destination (a marker
+>   distinguishes bd-originated from a direct human `gasworks getToken`, which
+>   keeps minting).
+> - **The dial host is a MANDATORY, security-load-bearing cache-key component**
+>   in *both* bd's `internal/creds` cache and the gasworks EIA cache (v3's
+>   "optimization" was the linchpin — a warm trusted token must never be served
+>   for an untrusted dial). On the per-dial path bd derives the reported host
+>   from the driver's `*mysql.Config.Addr` so report==dial is *structural*.
+> - **Refresh-token serialization** must be the double-checked pattern (fast
+>   unlocked freshness check → flock → re-check under lock → refresh only if
+>   still stale, bounded); a naive lock-across-refresh serializes N Keycloak
+>   RTTs and in-process single-flight is cross-process-useless.
+> - **Warn-then-enforce rollout** + explicit neither-destination policy: ship
+>   the helper gate warn-only until the exec-info-injecting bd tag is the
+>   default, then flip to enforce (WP-A lands before the gate enforces).
+> - **Two decisions are the owner's, not mine** (§11): collapsing v2's two
+>   mandated destination layers into the helper contract (a SPEC CRITICAL #2
+>   change), and whether `eia-helper` enforcement is in scope now or the fleet
+>   gap is accepted meanwhile. I reverted my premature SPEC CRITICAL #2 edit to
+>   a *proposed* framing pending that sign-off.
+>
+> Removed: v2 §2 (whole destination-trust model), §2.3 metadata helper fields,
+> §4 (`bd attach`), `hosted.GuardDestination`/`hosted.Resolve`, attachment TOFU,
+> `creds.ArgvSource`, `BD_TRUST_WORKSPACE`, second-user detection. Kept: the
+> per-dial connector / 1045-invalidate / timeouts (v2 §3), #4823 gateway-init
+> adoption, the doctor sweep (v2 §6). New: the **helper destination-enforcement
+> contract** (§5.0) that gasworks and eia-helper both implement; bd's exec-info
+> injection (§2.2). Grown: gasworks (v2 §5) implements the contract + gains two
+> reliability fixes.
 
-1. **The gasworks CLI has NO machine leg.** `GASWORKS_API_KEY` appears nowhere
-   in `gascity/gasworks` on any branch; only the server endpoint
-   (`/sts/v0/machine`, gasworks-platform) exists. The SPEC's CI golden path
-   ("identical command exchanges via /sts/v0/machine") is unbuilt client code.
-   **Decision: machine leg is OUT of S2** (flagged to owner). S2's
-   `BD_TRUST_WORKSPACE=1` gate therefore cannot require `GASWORKS_API_KEY`
-   presence yet; see §4.5.
-2. **S1 workspaces already carry the host in repo metadata.** #4823's init
-   persists `dolt_server_host/port/user` from flags (init.go:1451-1464) and
-   never persists `dolt_server_tls`. S2's resolver must (a) never dial a
-   metadata host for hosted workspaces, (b) tolerate S1-created metadata that
-   has one.
-3. **gasworks serves cached EIAs BEFORE any mint step** (gettoken.go:81-86) and
-   the cache key (`org|product|scope`) has no gateway dimension — the
-   destination gate must run before the cache read (§5.2).
-4. **bd main's write path fresh-dials with the stale token-baked DSN**
-   (transaction.go:147) — the connector port MUST convert it, or every write
-   1045s after the first token rotation (§3.2).
-5. **Three parallel config-resolution sites exist in bd** (cmd/bd/main.go
-   hand-mirror :1122-1196, open.go `applyResolvedConfig` :202-280, init.go)
-   plus ~8 gateway-blind doctor/fix DSN builders. Hosted resolution must be ONE
-   shared function or the guard is bypassable via whichever site forgot it
-   (§4.4, §6).
+## 0. The model in one picture
+
+```
+  bd (thin delegator)                         gasworks getToken (sole auth owner)
+  ─────────────────────                       ──────────────────────────────────
+  resolve dial host H (once)  ── exec, with ──▶ read BEADS_EXEC_INFO {dialHost:H}
+  present token as wire user      env  ────────  H ∈ trusted-gateway allowlist?
+       ▲                          BEADS_EXEC_INFO      │no → refuse (exit 1, stderr)
+       │  {token, expiration}     (not argv)           │yes
+       └──────────────────────────────────────────────┴─ mint EIA (refresh→session→
+  dial H, present token                                   exchange, all noninteractive)
+```
+
+bd's entire security contribution is the invariant **"the destination I report
+to the helper is the destination I dial"** — compute the host once, pass it,
+dial it. Every trust judgment ("is `H` trusted?"), every credential
+(refresh-token, DPoP key, EIA), and every mint lives in gasworks. bd holds no
+key and no allowlist. This is the kubectl exec-credential-plugin idiom bd's own
+`internal/creds` doc comments already claim (command.go:15-21) — v3 finishes it
+by threading the one missing input (the dial host) into the helper.
 
 ## 1. Scope
 
-**In:** bd (OSS `gastownhall/beads`): user-level trusted-gateway allowlist +
-per-workspace attachment (TOFU) records + `bd attach` + hosted-workspace
-ambient resolution + per-dial credential connector + 1045-invalidate-retry +
-doctor threading/diagnostic contract + env-tunable wire timeouts.
-gasworks CLI (public `gascity/gasworks`): `--gateway`/`--project` on getToken +
-destination allowlist + `trust-gateway` + jittered refresh / bounded backoff /
-serve-last-good + `expires_in` envelope fix.
+**In — bd (OSS `gastownhall/beads`):** per-dial credential connector +
+1045-invalidate-retry (port of `1f0ebe068`); **exec-info host threading** (the
+one net-new security piece); env-tunable wire timeouts; doctor
+gateway-blindness sweep + diagnostic contract. Plus the already-open #4823
+gateway-init identity adoption (unchanged).
 
-**Out (unchanged from SPEC):** pinned scopes (S3), keyring custody (S4), panel
-(S5), pg mode (S6), public exposure (S7), splice tuning (S8). Plus, per §0.1:
-the CLI machine leg (new owner decision needed on which slice carries it).
+**In — gasworks CLI (public `gascity/gasworks`):** `--gateway`/`--project`
+flags; **the** trusted-gateway allowlist (sibling file) + `trust-gateway`;
+destination gate (reads the flag or bd's exec-info env) before the mint/cache;
+gateway dimension in the cache key; mint resilience (jitter/backoff/per-attempt
+timeout/serve-last-good); `expires_in` envelope fix; and two reliability
+fixes forced by sole-owner status: refresh-token rotation serialization and
+Keycloak offline-session pinning.
 
-## 2. The destination-trust model (bd side)
+**Out (unchanged from SPEC):** pinned scopes (S3 — already gasworks-side),
+keyring custody (S4 — already gasworks-side), panel (S5), pg mode (S6), public
+exposure (S7), splice tuning (S8). **Out (newly, by the pivot):** `bd attach`,
+any bd-side allowlist/TOFU, persisted-helper metadata. **Out (gap, owner
+flag):** the gasworks machine/CI leg (`GASWORKS_API_KEY` → `/sts/v0/machine`)
+does not exist in the CLI yet; "gasworks owns ALL auth" is only true for the
+human leg today.
 
-### 2.1 Files (both under the existing `~/.config/beads/` precedent)
+## 2. The delegation contract (bd → credential command)
 
-- **`~/.config/beads/trusted-gateways.json`** — the user-level allowlist.
-  `{ "version": 1, "gateways": [ { "host": "gw.example.com", "added_at": …,
-  "source": "attach|manual" } ] }`. A **compiled-in default list**
-  (`gw.beads.gascity.com`) ships in the release binary and is merged at read
-  time — the golden path needs no file at all. Env override for tests:
-  `BEADS_TRUSTED_GATEWAYS_FILE`. Atomic temp+rename 0600 (same pattern as
-  configfile.Save).
-- **`~/.config/beads/attachments.json`** — per-workspace attachment records
-  (the TOFU store + the host's actual home). Keyed by canonical absolute
-  workspace path:
-  `{ "<path>": { "hash": "<sha256 of helper|argv|host:port|database>",
-  "host": …, "port": 3306, "engine": "dolt", "database": "bd_prj_…",
-  "helper": "gasworks", "org": …, "project": "prj_…",
-  "trusted_at": …, "accepted": "interactive|accept-flag|env" } }`.
-  Env override: `BEADS_ATTACHMENTS_FILE`.
+### 2.1 What exists today (already ~80% of thin-bd)
 
-### 2.2 Invariants
+`BEADS_DOLT_CREDENTIAL_COMMAND` (env-only, configfile.go:485-495) →
+`creds.CommandSource{Kind:KindIdentity}` → `creds.ResolveLadder` (fail-closed)
+→ `ApplyGatewayCredential` (gateway_credential.go:30-62) stamps
+`ServerUser=token`, `Gateway=true`, `DisableAutoStart`. The command runs `sh -c`
+(command.go:82-102), output parsed as a bare token or `{token|access_token,
+expirationTimestamp|expires_in}` (command.go:144-178), cached by command string
+until `expiry−10s`. **The env-only getter is the current trust boundary** —
+there is no metadata-persisted command to remove (that is precisely what
+configfile.go:490-492 refuses, and v3 keeps that refusal). bd already knows
+nothing of the issuer.
 
-The v1 design conflated two independent decisions. v2 separates them:
+### 2.2 The one net-new piece — exec-info host threading
 
-**Decision 1 — who may set the credential COMMAND (the string that gets
-exec'd).** Env (`BEADS_DOLT_CREDENTIAL_COMMAND`) may always set it: it comes
-from the user's shell/agent, not a cloned repo — it is the fleet/controller
-path and the power-user escape hatch, and it stays freeform (`sh -c`). Repo
-metadata may set it ONLY as an allowlisted helper (compiled-in binary names,
-initially `["gasworks"]`), exact-argv, no shell, gated by the TOFU attachment
-record. This preserves the configfile.go:490-492 security intent.
+**Problem (verbatim SPEC CRITICAL, confirmed by the v2 red-team):** bd passes
+ZERO destination context to the command. `credRunner` runs `sh -c <command>`
+and never sets `cmd.Env`, so the helper cannot know where bd is about to send
+the token. A hostile repo commits `.beads/config.yaml dolt.host: evil.example`
+(+ `dolt_mode=server`, `backend=dolt`); a victim with an ambient
+`BEADS_DOLT_CREDENTIAL_COMMAND` (the fleet/S1 shape) runs any `bd` command,
+mints a real token, and dials `evil.example` over verified TLS → token
+harvested. gasworks never sees the destination, so it cannot refuse.
 
-**Decision 2 — the DESTINATION GATE (the host a minted token is transmitted
-to). This is UNCONDITIONAL and is the real exfil control.** Before ANY
-credential command runs to mint a token for a non-loopback dial — env command
-OR persisted helper, host from env OR metadata OR config.yaml — bd requires the
-resolved dial host ∈ the user-level trusted-gateway allowlist, and hard-fails
-otherwise. There is no carve-out: the env exemption in Decision 1 is about the
-COMMAND string's provenance, never about skipping the destination check. (v1's
-fatal bug was gating the destination check on `credential_helper` presence and
-on env-var absence, so a hostile repo with committed `.beads/config.yaml
-dolt.host: evil.example` + `dolt_mode=server` + no `credential_helper` made any
-victim with an ambient credential command mint and exfil — verbatim SPEC
-CRITICAL #2.)
+**Fix — bd injects its true dial host into the helper's environment**, the
+kubectl `KUBERNETES_EXEC_INFO` / gc `GC_EXEC_INFO` pattern (env, never argv, so
+it is not visible in `ps` and cannot be spoofed through the freeform command
+string):
 
-Enforcement point: `hosted.GuardDestination(host, credentialPresent)` is called
-inside `ApplyGatewayCredential` (and the persisted-helper resolve) at the single
-choke every mint passes through — `internal/storage/dolt/gateway_credential.go`,
-right before `creds.ResolveLadder` fires the command. Loopback hosts
-(127.0.0.0/8, ::1, localhost) are exempt (local dolt is not a gateway). A
-non-loopback host with a credential command and no allowlist entry → the named
-error, no token minted.
+- New env var **`BEADS_EXEC_INFO`**, a versioned JSON payload:
+  `{"apiVersion":"beads.dev/credential-exec/v1","spec":{"dialHost":"<canon
+  host>","dialPort":3306,"database":"bd_prj_…"}}`. Minimal viable field is
+  `dialHost`; `dialPort`/`database` are forward-compat (let a helper mint a
+  project-pinned token without re-parsing the command).
+- **Source of `dialHost` = the exact value bd dials.** At both resolution sites
+  `cfg.ServerHost` is assigned from `GetDoltServerHost()` *before*
+  `ApplyGatewayCredential` runs (open.go:222-245; main.go:1169→1186), and that
+  same `cfg.ServerHost` is what `buildServerDSN` bakes and dials
+  (store.go:1349-1357). bd reads `cfg.ServerHost` **at the mint choke** (not a
+  re-resolution) so report-and-dial are provably the same string. Canonicalize
+  once (lowercase, strip trailing dot, IDNA) and use that one form for the
+  env, the DSN, and the cache key.
+- **Threading:** add a `DialHost`/`DialPort`/`Database` field to
+  `creds.CommandSource`; thread through `resolveCredentialToken` → `credRunner`,
+  which sets `cmd.Env = append(strippedEnv(), "BEADS_EXEC_INFO="+json)`. On the
+  **per-dial connector path**, derive `dialHost` from the driver's
+  `*mysql.Config.Addr` INSIDE the `BeforeConnect` hook (the literal dial
+  target) rather than a parallel captured field — so report==dial is
+  *structural* on that path, not two callers feeding one runner (red-team).
+- **ALWAYS inject on hosted server-mode dials — no loopback exemption.** v3's
+  "omit for loopback" is deleted: a prefix/CIDR-string loopback classifier lets
+  `127.0.0.1.attacker.example` (attacker-owned, real A-record + WebPKI leaf)
+  masquerade as loopback, suppress the env, and — because the helper then sees
+  no destination — mint and exfil. Whenever a credential command is in play in
+  server mode, bd injects `BEADS_EXEC_INFO` for EVERY host. (There is no
+  legitimate `gasworks getToken`/`eia-helper` dial to loopback — hosted access
+  is always the gateway.) If any loopback shortcut is ever wanted, it MUST use
+  `net.ParseIP(host).IsLoopback() || host=="localhost"` EXACTLY — never
+  `HasPrefix`/substring/CIDR-string (bd already ships that bug class at
+  gitlab.go:315) — and it may only affect whether the helper *requires* a
+  match, never whether bd *reports* the host.
+- **Bd-originated marker → helpers fail closed on absent destination.** The
+  exec-info payload carries `"origin":"bd"` (and the versioned apiVersion). A
+  helper that receives `BEADS_EXEC_INFO` with `origin:bd` but cannot resolve a
+  trusted destination MUST refuse (fail closed). A direct human
+  `gasworks getToken beads --org X` (no exec-info, no marker) keeps minting
+  (fail open) — the two paths diverge cleanly, closing the "gasworks can't tell
+  a bd call from a human call, so it can't fail-closed on absence" hole.
+- **Cache key gains the host dimension — this is a SECURITY control, not an
+  optimization.** bd's process-global `internal/creds` cache is keyed by command
+  string only today (command.go:79,112) and is consulted BEFORE the helper
+  runs, so a warm token minted for the trusted gateway is a cache HIT for a
+  later dial to an attacker host with the same command → the gasworks gate never
+  executes and bd hands the trusted EIA to the attacker. The (canonical) dial
+  host MUST be part of the cache key in bd AND in the gasworks EIA cache
+  (§5.3), with an adversarial test that a warm trusted token is never served
+  for a different-host dial.
+- **Env hygiene (from gc's `strippedEnv`):** strip ONLY an inherited
+  `BEADS_EXEC_INFO` (narrow, exact var) before setting bd's own — never a broad
+  `BEADS_*`/"sensitive-key" filter, which would drop the eia-helper's own inputs
+  (`ORCHESTRATOR_KEY_FILE`, `EIA_AUDIENCE`, `BEADS_DOLT_SERVER_TLS`) and break
+  fleet mint. Everything else is inherited as today (bd sets no `cmd.Env` now,
+  so the child inherits the full parent env).
+- **Canonicalization is shared + byte-exact.** One canonical form (lowercase,
+  strip trailing dot, IDNA-to-ASCII, reject un-IDNA-able) used for the exec-info
+  host, the dialed DSN host, bd's cache key, and the helper's allowlist match —
+  which MUST be byte-exact equality, never suffix/substring/port-insensitive. A
+  shared golden-vector suite runs in both repos.
 
-Other invariants:
+**bd's residual guarantee, with no allowlist of its own:** report == dial for
+every host on every path. A repo-controlled host is injected faithfully into
+exec-info; the *helper* makes the allowlist call. bd cannot cause a
+mint-for-A/dial-to-B split because one canonical host feeds the env, the DSN,
+and the cache key. The freeform command stays env-set (never repo-set), so the
+*command* is not an attack surface; only the *host* was, and it is now surfaced
+to the authority that judges it.
 
-- **Repo-local metadata never selects a mint destination for the HOSTED
-  (persisted-helper) path.** The gateway host lives ONLY in the attachment
-  record. For a workspace with `credential_helper` metadata the resolver is
-  terminal (§4.4) and never reads `dolt_server_host`/config.yaml. S1-compat: a
-  workspace WITHOUT `credential_helper` (env-driven) that carries a metadata
-  host still goes through Decision 2's unconditional gate, so a stale/hostile
-  host is caught at the mint boundary regardless.
-- **Ambient commands hard-fail (no prompt)** when a workspace has
-  `credential_helper` metadata but no attachment record, a hash mismatch, or a
-  record host missing from the allowlist. Error names the host and prints one
-  remedy: `gasworks login && bd attach --accept` (second-user; the compiled
-  default host makes this sufficient for the default gateway — for a
-  non-default gateway the message includes the full `bd attach <uri>` form so
-  the host is explicit), or the `bd attach <uri>` form on hash mismatch.
-- **Host canonicalization is single-form:** one function lowercases, strips a
-  trailing dot, IDNA/punycode-normalizes, and normalizes the port; the SAME
-  canonical string is used for the allowlist check, the dial, and the TOFU
-  hash. Check-vs-use divergence is a merge-gate test.
-- **Trust is only ever established by `bd attach`** (§4.5).
+### 2.3 What bd does NOT do (deleted from v2)
 
-### 2.3 Metadata additions (internal/configfile Metadata struct)
+No bd-side trusted-gateway allowlist. No `attachments.json` TOFU. No
+`bd attach`. No `hosted.GuardDestination`/`hosted.Resolve`. No
+`credential_helper`/`helper_org`/`helper_project` metadata fields. No
+`creds.ArgvSource`. No `BD_TRUST_WORKSPACE`. No second-user detection. bd never
+decides whether a host is trusted.
 
-New optional fields, written only by attach:
-`credential_helper` (string; validated against the compiled-in helper
-allowlist, initially `["gasworks"]`), `helper_org` (string, strict charset
-`[a-zA-Z0-9._-]{1,64}` — matches what getToken --org accepts),
-`helper_project` (string, `^prj_[a-f0-9]{16}$`). Existing fields reused:
-`backend=dolt`, `dolt_mode=server`, `dolt_database`, `project_id`.
-NOT written: `dolt_server_host/port/user/tls` (hosted mode implies TLS=true
-structurally; host/port live in the attachment record).
-`GetDoltCredentialCommand` stays env-only — the persisted-helper path is a NEW
-resolution branch (§4.4), not a widening of the freeform getter. This honors
-the security intent documented at configfile.go:490-492.
+## 3. bd per-dial connector + 1045 + timeouts (survives v2 §3, + host threading)
 
-## 3. Per-dial credential connector (bd, port of `1f0ebe068`)
+Long-lived clients (gc-controller-class, >1h) need per-dial re-mint regardless
+of who owns trust: the EIA is 90s, `ConnMaxLifetime` is 1h, and every
+idle-churned (`ConnMaxIdleTime=20s`) or fresh dial after a 90s rotation would
+1045 against the baked static-DSN token. Port `1f0ebe068`:
 
-### 3.1 Cache/creds seams (all net-new on main; internal/creds)
+- **Connector:** `openSQLDB(dsn, src creds.Source)`: `src==nil` → `sql.Open`
+  verbatim (static/local path untouched); else `ParseDSN` →
+  `cfg.Apply(mysql.BeforeConnect(hook))` → `NewConnector` → `sql.OpenDB`. Driver
+  v1.10.0 clones Config per Connect (verified), so per-dial `User` mutation is
+  isolated. The hook re-runs the credential resolve (re-runs the command,
+  honoring the cache), re-checks KindIdentity + `:@/`, sets `c.User`.
+- **Config retention:** `dolt.Config` gains `CredentialSource creds.Source`
+  (today `ApplyGatewayCredential` discards the command after the eager mint).
+  `internal/creds` gains an exported per-dial `ResolveForDial` and `Invalidate`
+  (neither exists today).
+- **Host threading (pivot refinement):** the per-dial resolve carries the same
+  `dialHost` (§2.2) so every re-mint injects `BEADS_EXEC_INFO` and the cache is
+  keyed by (command, host). Structurally identical to v2 §3; the source just
+  gains the host field.
+- **Convert every raw open site** to the connector: store.go 1382/1409/1462/
+  1499/1744/2770 and **transaction.go:147** (the ignored-tx fresh dial —
+  mandatory; it dials the stale baked DSN, so post-rotation every write 1045s
+  without it). Pool-borrow optimization NOT ported.
+- **1045-invalidate:** port `isAuthError`; add invalidate+retry to `withRetry`
+  AND `withRetryTx`. **Gated + bounded:** only when `CredentialSource != nil`
+  (static-password users keep fail-fast), exactly ONE invalidate+re-mint+retry
+  then `backoff.Permanent` (SPEC error table; the live mc controller runs bd
+  under a bounded exec timeout, so a 30s retry loop would convert clean 1045s
+  into timeout kills). Circuit breaker verified safe — `isConnectionError`
+  (circuit.go:383-419) never matches 1045.
+- **Token redaction:** bake a sentinel user (`token-per-dial`) into the
+  retained `store.connStr` when a `CredentialSource` is present (the connector
+  overwrites `User` every dial); kills the token-in-connStr leak on the
+  re-parsed push/pull paths. Grep test: no token in bd log/error output.
 
-- Introduce a `creds.Source` INTERFACE (`Resolve(ctx) (Credential, error)`,
-  `CacheKey() string`, `Kind() creds.Kind`) with two implementations:
-  `creds.CommandSource` (existing freeform `sh -c` env command) and NEW
-  `creds.ArgvSource{Argv []string, Kind, Label}` executing WITHOUT a shell
-  (`exec.CommandContext(argv[0], argv[1:]…)`; SPEC: "allowlisted binary, no
-  shell, exact argv"). CacheKey = label + argv joined with `\x00`.
-- Export a per-dial resolve entry point and an invalidator on the EXISTING
-  cache (internal/creds/command.go:71-137; the branch's dolt-local `credcmd.go`
-  is NOT ported): `creds.ResolveForDial(ctx, src creds.Source) (Credential,
-  error)` and `creds.Invalidate(src creds.Source)`, keyed by `src.CacheKey()`.
-  Keep the 30s/60s/10s constants.
-- `dolt.Config` gains `CredentialSource creds.Source` (INTERFACE type, so it
-  carries either a CommandSource or an ArgvSource — v1's `*creds.CommandSource`
-  could not hold the persisted-helper argv). Retention is required because
-  today `ApplyGatewayCredential` discards the command after the eager mint
-  (gateway_credential.go:58-60), leaving the connector nothing to re-run.
-- **Two mint entry points, one gate.** (1) Env path:
-  `ApplyGatewayCredential` continues to build a `CommandSource` from
-  `GetDoltCredentialCommand()`, calls `hosted.GuardDestination` (§2.2), resolves
-  fail-closed, stamps `ServerUser`/`Gateway`/`DisableAutoStart` AND
-  `CredentialSource`. (2) Persisted path: `hosted.Resolve` (§4.4) builds the
-  `ArgvSource`, calls the SAME `hosted.GuardDestination`, does its OWN eager
-  fail-closed resolve (mirroring ApplyGatewayCredential's KindIdentity + `:@/`
-  checks), and stamps the same fields. This fixes v1's false claim that "the
-  eager ApplyGatewayCredential mint still gates open" on the persisted path —
-  ApplyGatewayCredential reads env-only `GetDoltCredentialCommand`, which is
-  empty for a clean-env attached workspace, so it no-ops; the persisted path
-  must run its own eager mint or the first helper failure (expired session)
-  surfaces as an unnamed dial error instead of the SPEC's mint-layer
-  `gasworks login` remedy.
+### 3.1 Env-tunable timeouts
 
-### 3.2 Connector wiring (internal/storage/dolt)
+`BEADS_DOLT_SERVER_{CONNECT,READ,WRITE}_TIMEOUT` (positive int seconds, parsed
+like `BEADS_DOLT_READY_TIMEOUT`); defaults unchanged. Note the read/write
+override must also reach the long-timeout re-parse paths (execWithLongTimeout
+hard-sets ReadTimeout=5m at store.go:1381,1408 after DSN build) or be documented
+as exempt there.
 
-- `openSQLDB(dsn string, src creds.Source) (*sql.DB, error)`: src==nil →
-  `sql.Open("mysql", dsn)` byte-identical (local/static path untouched).
-  Else `mysql.ParseDSN` → `cfg.Apply(mysql.BeforeConnect(hook))` →
-  `mysql.NewConnector` → `sql.OpenDB`. Driver v1.10.0 clones Config per
-  Connect() (verified: connector.go:67-78 in the pinned driver), so per-dial
-  User mutation is isolated.
-- Hook: `creds.ResolveForDial` then re-run the KindIdentity + `:@/` charset
-  checks per dial (closes the branch's unenforced-invariant gap — checks are
-  cheap and the failure mode is a corrupted DSN slot) and set `c.User`.
-  Resolve failure fails the dial closed (no stale fallback — serve-last-good
-  lives in the HELPER, §5.4, where the true expiry is known).
-- **Token redaction:** when a CredentialSource is present, `buildServerDSN`
-  bakes the sentinel user `token-per-dial` into the stored DSN instead of the
-  real token — the connector overwrites User on every dial anyway. This kills
-  the token-in-`store.connStr` leak class (connStr is retained at store.go:1197
-  and re-parsed by push/pull paths) and implements the SPEC's redaction
-  CONSIDER for bd. The eager mint at open (env path: `ApplyGatewayCredential`;
-  persisted path: `hosted.Resolve`, §3.1) still runs as the fail-fast
-  "helper-works / session-live" gate; the sentinel is only what gets baked into
-  the retained DSN string, not a skip of the mint.
-- **Convert every raw open site** to `openSQLDB(…, s.credSource)`: store.go
-  1382 (execWithLongTimeout, 5m), 1409, 1462, 1499, 1744, 2770, and
-  **transaction.go:147** (the ignored-tx fresh dial — mandatory, §0.4). The
-  pool-borrow optimization from the branch (transaction.go:163-230) is NOT
-  ported (separable perf; keep the port minimal).
-- **1045-invalidate:** port `isAuthError` (mysql 1045 / "access denied") and
-  add invalidate+retry to `withRetry` (store.go:497-534) AND — closing the
-  branch's known gap — to `withRetryTx`. **Gated and bounded:** only when
-  `CredentialSource != nil` (static-password/self-hosted users keep fail-fast
-  1045, not a 30s loop), and exactly ONE invalidate+re-mint+retry then
-  `backoff.Permanent` (SPEC error table: "after ONE silent cache-invalidate +
-  re-mint retry"). This also matters for the live mc controller, whose bd execs
-  are timeout-bounded (a 30s in-bd retry loop would convert clean 1045s into
-  timeout kills and change failure telemetry) and for S3/S4 fleet-wide revoke
-  events (a full backoff window would re-mint per retry and trip S4's
-  anomalous-mint alerting). Circuit breaker is safe as-is — verified:
-  `isConnectionError` (circuit.go:383-419) matches only TCP/protocol-disconnect
-  strings, never 1045/"access denied", so a shared /tmp breaker file is never
-  tripped by an expired token.
+## 4. Configuring a workspace to point at a hosted project (no `bd attach`)
 
-### 3.3 Env-tunable timeouts
+- **Pure env — the human laptop recipe (works today, zero bd code):**
+  `BEADS_DOLT_SERVER_HOST/PORT/DATABASE`, `BEADS_DOLT_SERVER_TLS=true`,
+  `BEADS_DOLT_CREDENTIAL_COMMAND='gasworks getToken beads --org … --project …'`.
+  Complete second-terminal story when the env family is exported.
+- **The FLEET path is NOT gasworks (correction from v3).** `mirrorBeadsDoltEnv`
+  (bd_env.go:1497-1515) mirrors `GC_DOLT_CRED_CMD` → `BEADS_DOLT_CREDENTIAL_COMMAND`,
+  and the controller image sets `GC_DOLT_CRED_CMD=/usr/local/bin/eia-helper`
+  (an STS machine minter reading `ORCHESTRATOR_KEY_FILE`/`EIA_AUDIENCE`/…). So
+  the fleet's helper is `eia-helper`, and gasworks has no machine leg
+  (`GASWORKS_API_KEY`/`/sts/v0/machine` absent from the CLI). The destination
+  gate therefore only exists on the fleet if `eia-helper` implements the helper
+  contract (§5.0) — see the owner decision in §11. Until it does, the fleet
+  mints with no destination gate, which is exactly the population that processes
+  untrusted repos (adopt-pr, PR-review).
+- **`bd init --server` (#4823) as the pointer + identity anchor:** writes
+  metadata (`DoltMode=server`, host/port/user from flags, `Backend=dolt`,
+  `DoltDatabase`) and adopts `_project_id`/`issue_prefix` from the hosted DB,
+  never minting. Two gaps for a clean-env second terminal: it never persists
+  `dolt_server_tls` (TLS survives only via env) and the credential command is
+  env-only by design. Persisting `dolt_server_port` in metadata trips a
+  per-resolution deprecation warning (doltserver.go:558-571) — prefer
+  env/port-file/config.yaml for the port.
+- **Optional thin `bd setup-hosted` (NOT a trust ceremony):** if a one-command
+  UX is wanted later, its only justified additions over `init --server` are
+  persisting `dolt_server_tls=true` and printing the credential-command recipe.
+  No prompt, no allowlist, no attachment record. Deferred unless the panel (S5)
+  demands it; the recipe/env family is the honest S1(e)/S5 shape.
 
-`BEADS_DOLT_SERVER_CONNECT_TIMEOUT`, `BEADS_DOLT_SERVER_READ_TIMEOUT`,
-`BEADS_DOLT_SERVER_WRITE_TIMEOUT` — positive integer seconds, parsed like
-`BEADS_DOLT_READY_TIMEOUT` (doltserver.go:188-194); defaults unchanged
-(5s connect at dsn.go:26-29; 10s read/write at store.go:1363-1364). Read at
-DSN build time; invalid values are a hard config error (fail closed, not
-silent default). Note the read/write override must also be threaded into the
-long-timeout re-parse paths (execWithLongTimeout/NoTx hard-set ReadTimeout=5m
-at store.go:1381,1408 AFTER DSN build); otherwise the env var is silently dead
-on the WAN push/pull paths that most need it (v1 said "defaults unchanged"
-without noting this) — either the override wins there too or the doc states
-the long-timeout paths are exempt.
+**Recipe = targeting data, not a secret.** The `gasworks getToken … --gateway
+<host>` recipe (or the env family) carries no credential material; safety comes
+from gasworks refusing to mint for an untrusted `--gateway`/exec-info host — not
+from recipe secrecy. (Unchanged SPEC framing; the enforcing party moves to
+gasworks.)
 
-## 4. `bd attach` (bd)
+## 5. The credential helpers — auth + the destination-enforcement contract
 
-### 4.1 URI contract
+### 5.0 The helper destination-enforcement contract (gasworks AND eia-helper)
 
-`beads+dolt://<host>[:<port>]/<database>?org=<org>&project=<prj_id>`
-(pg variant `beads+pg://…?schema=…` is parsed-and-rejected with the SPEC's
-"rolling out" message until S6 — the parser is engine-aware from day one so
-S6 only flips a switch). Validation: host RFC-1123; port default 3306;
-database `^bd_[a-z0-9_]+$` + `ValidateDatabaseName`; org/project charsets per
-§2.3. Unknown query params are an error (no silent forward-compat holes).
+Because bd is a pure delegator, the destination gate must live in **every**
+helper bd can invoke, or the fleet (`eia-helper`) has no gate at all. v4 defines
+a small, helper-agnostic contract; each helper implements it:
 
-### 4.2 Command flow
+1. **Read `BEADS_EXEC_INFO`** (versioned JSON, §2.2): `spec.dialHost`,
+   `spec.dialPort`, `spec.database`, `origin`.
+2. **Resolve trust** for `dialHost` against the helper's own allowlist
+   (gasworks: `~/.config/gasworks/trusted-gateways.json` + compiled default;
+   eia-helper: a compiled/config allowlist of the fleet's gateway names — note
+   the fleet dials the split-DNS short name `beads`→tailnet-IP, NOT the FQDN, so
+   its allowlist entries differ from the human default; §11).
+3. **Byte-exact match** on the shared canonical form (§2.2) — never
+   suffix/substring/port-insensitive.
+4. **Fail-closed for bd-originated mints on absent/untrusted destination:** if
+   `origin==bd` and `dialHost` is missing or not in the allowlist → refuse
+   (exit 1, scrubbed stderr bd surfaces verbatim), mint nothing. A direct human
+   invocation with no exec-info keeps minting (fail-open) — the marker is what
+   lets the two diverge.
+5. **Host in the mint/cache key:** a token minted for host A is never returned
+   for a dial to host B (gasworks EIA cache key gains the gateway dimension,
+   §5.3; bd's own cache too, §2.2).
+6. **Warn-then-enforce:** ship the check warn-only (log the would-refuse, still
+   mint) until the exec-info-injecting bd tag is the default install, then flip
+   to enforce — so a new-bd/old-helper or old-bd/new-helper skew never silently
+   fails open OR breaks a working setup (§8 sequencing).
 
-Register `attach` in `noDbCommands` (main.go:856-885). Flow:
-1. Parse+validate URI.
-2. **Trust ceremony:** host ∈ allowlist (compiled default ∪ user file) → no
-   prompt (golden path). Unknown host → interactive: display host, org,
-   project, database prominently; explicit `yes` adds the host to the user
-   allowlist (`source:"attach"`). Non-interactive rules in §4.5.
-3. **Preflight:** helper binary in compiled helper-allowlist and on PATH;
-   **capability check** — probe that the helper accepts `--gateway` (run
-   `gasworks getToken --help` or a version gate; a stdlib `flag.ContinueOnError`
-   CLI dies "flag provided but not defined: -gateway" on an old binary, which is
-   a version-skew failure, not a mint failure). Then run the helper once through
-   the creds ladder (ArgvSource); map failures: missing binary → install
-   remedy; `--gateway` unsupported → "upgrade the gasworks CLI (>= <B version>)";
-   expired/absent session (helper stderr pattern) → `gasworks login`; STS 403 →
-   entitlement message with helper stderr verbatim (SPEC error table). Guard
-   against a hostile helper echoing secrets: surface helper stderr only for the
-   403 entitlement case, and scrub anything matching a token shape.
-4. **Verification connect** with Gateway semantics (`Gateway=true`,
-   `DisableAutoStart`, TLS=true, `CreateIfMissing=false`) but opened with
-   **`BeadsDir` unset** so the store-level `verifyProjectIdentity`
-   (store.go:1271-1273 skips when beadsDir=="") does NOT run — otherwise it
-   would fire against a workspace that has no local `project_id` yet (or a
-   different one on re-attach) and refuse the open before attach can adopt.
-   attach performs the identity work itself: read `_project_id` +
-   `issue_prefix` post-connect and apply the #4823 adopt-never-mint semantics
-   (fail-closed provisioning-contract error when absent; transient read errors
-   distinguished from absent; on a project mismatch vs the URI's `project`
-   param apply §4.3's confirm / `--force-reattach`). Factor the #4823 init
-   helpers (init.go:97-167) into a shared home (e.g. `internal/hostedadopt`) so
-   init and attach share one implementation — the helpers are unexported and
-   may be renamed under review, so reuse SEMANTICS and land the factor-out in
-   the attach PR after #4823 merges (see §7 WP split).
-5. **Write metadata.json** (§2.3 fields; atomic Save; preserves unrelated
-   existing fields) + **write the attachment record** (§2.1) + create
-   `.beads/` scaffolding (MkdirAll+guards reused from init; bypass init's
-   dbName derivation, remote-bootstrap, port files, CreateIfMissing).
-6. Print `Attached to <org>/<project> (read-write). Try: bd list`.
+gasworks implements this in §5.1-5.4 below. `eia-helper` implementing it is the
+open owner decision (§11) — the alternative is retaining a bd-side/gc-side gate
+for the fleet, which reintroduces the machinery the pivot removed.
 
-### 4.3 Idempotency
+### 5.1 gasworks — already owns auth (keep as-is)
 
-Re-run with an identical tuple → refresh the attachment record timestamp,
-print "already attached", exit 0. Tuple differs from the existing record →
-show old vs new (host/org/project/database) and require interactive confirm
-(or `--force-reattach`); never silently rewrite. A workspace with existing
-NON-hosted beads data → refuse with the existing-workspace guard (same
-protection as init).
+`getToken` already runs the full noninteractive mint chain: `ensureIDToken`
+(Keycloak `refresh_token` grant, no browser) → `sts.Context` → `pickOrg` →
+entitlement gate → EIA cache → `ensureSession` (8h DPoP session) →
+`sts.Exchange` (RFC 8693, 90s EIA). All three token layers auto-refresh with no
+interaction until the Keycloak offline session expires. **No new
+token-ownership code is needed** — the pivot's "gasworks owns all auth" is
+already true for the human leg.
 
-### 4.4 Ambient hosted resolution — TERMINAL, called from all resolution sites
+### 5.2 Flags + the destination gate
 
-One new function, called from BOTH config-resolution sites (open.go
-`applyResolvedConfig` :202-280 and cmd/bd/main.go's hand-built path :1122-1196):
+- `--gateway <host>` and `--project <prj_id>` added to `getToken` and to
+  `hoistPositional`'s `valueFlags` map (gettoken.go:257) or a flag-before-product
+  argv mis-parses. `--project` is validated + recorded now; scope-pinning is S3.
+- **Destination source, in order:** `BEADS_EXEC_INFO.spec.dialHost` (bd-injected,
+  authoritative — the value bd actually dials) > `--gateway` (manual, for direct
+  human use or an older bd). If both present and disagree → error (never
+  silently pick). **Neither present (§5.0 rule 4):** if `origin==bd` → refuse
+  (a bd invocation with no destination is a bug or an attack, never legitimate);
+  if no `origin` marker (direct human `gasworks getToken beads --org X`) → mint,
+  unchanged. Recipes SHOULD omit `--gateway` when bd drives exec-info, so the
+  disagree/stale-`--gateway` branch is only ever hit by direct/older use — a
+  hardcoded `--gateway gw.old` in a re-pointed workspace must not hard-fail the
+  golden path.
+- **Gate BEFORE the EIA cache read** (gettoken.go:80-86): the cache is served
+  before any mint, so a mint-time-only check would still hand a cached token to
+  an untrusted destination. Host ∉ allowlist → `die` → stderr `gasworks:
+  refusing to mint a beads credential for unknown gateway '<host>' — trusted
+  gateways: <list>. Add one with 'gasworks trust-gateway <host>' only if you
+  operate it.` (exit 1; bd surfaces it verbatim).
+- **Cache key gains the gateway dimension** (`org|product|scope|gateway`) so a
+  token minted for host A is never served for host B (security control, §5.0.5).
+- **Version-compat:** gasworks reads `dialHost`, IGNORES unknown exec-info
+  fields, and tolerates a newer minor `apiVersion` (does not hard-fail) so a
+  future bd exec-info bump never breaks the two-repo release coupling.
 
-```
-hosted.Resolve(ctx, beadsDir, fileCfg) → (resolved, applied bool, err)
-```
+### 5.3 The allowlist + `trust-gateway`
 
-**When metadata has `credential_helper`, hosted.Resolve is TERMINAL/exclusive
-for the connection identity.** It (a) requires+validates the attachment record
-(hash over `canon(helper)|argv|canon(host):port|database`), (b) requires the
-record host ∈ allowlist, (c) builds the `ArgvSource`
-`[helper, getToken, beads, --org, org, --project, project, --gateway,
-canon(host)]`, calls `hosted.GuardDestination`, does the eager fail-closed
-mint, and returns a fully-resolved set: `ServerHost`/`ServerPort` from the
-RECORD, `ServerTLS=true`, `CredentialSource`, Gateway semantics. **When
-`applied==true` the calling site MUST NOT consult `GetDoltServerHost` /
-`GetDoltServerPort` / `doltserver.DefaultConfig` / `.beads/config.yaml` at
-all** — those values are ignored. This closes v1's second exfil hole: project
-`.beads/config.yaml` is repo-committed and highest-priority in the host chain
-(configfile.go:426-437) and was NOT in the TOFU hash, so a "resolve before
-existing logic" ordering let a committed `dolt.host: evil.example` overwrite
-the record host AFTER the trust check passed. Terminal resolution + the
-committed-`config.yaml`-host-absent assertion in attach validation both close
-it; a merge-gate test asserts a committed `.beads/config.yaml dolt.host` never
-changes an attached workspace's dialed host.
+- Sibling file `~/.config/gasworks/trusted-gateways.json` in `store.ConfigDir()`
+  (NOT `credentials.json` — avoids entangling the S4 keyring migration), with a
+  compiled-in default entry `gw.beads.gascity.com` merged at read time (golden
+  path needs no file). Same canonical host form as bd (§2.2).
+- **Concurrency:** reuse the store `flock` pattern (lock_unix.go:14-31) for the
+  writer — this org runs many concurrent agents per machine, so a
+  `trust-gateway` write racing an attach/other write must not drop an entry.
+- New command `trust-gateway <host>` (`--yes`, `--list`, `--remove`; compiled
+  defaults not removable), registered in the main.go:42-61 switch.
 
-**Env interaction (corrected from v1 — no destination carve-out):**
-- If metadata has `credential_helper` (attached workspace) and the env sets a
-  *coherent* override, env wins per Decision 1 — but the destination gate
-  (§2.2 Decision 2) still fires on the resulting host. "Coherent" =
-  `BEADS_DOLT_SERVER_HOST` present (a deliberate full redirect). A
-  credential-command-only or host-only partial env on an ATTACHED workspace is
-  a hard config error naming the offending variable ("unset
-  BEADS_DOLT_CREDENTIAL_COMMAND or also set BEADS_DOLT_SERVER_HOST — this
-  workspace is attached"), because v1's "skip on either var" rule sent minted
-  tokens to `127.0.0.1` (metadata carries no host) — a live fleet state
-  (`mirrorBeadsDoltEnv` deletes `BEADS_DOLT_SERVER_HOST` when `GC_DOLT_HOST` is
-  empty while keeping the ambient cred command, bd_env.go:1456-1460,1508-1515).
-- If metadata has NO `credential_helper` (env-driven / S1 / fleet): hosted.Resolve
-  returns `applied=false` and the existing path runs — BUT the destination gate
-  in `ApplyGatewayCredential` (§2.2) still fires unconditionally on whatever
-  host that path resolves (env, metadata, or config.yaml). So even the
-  no-`credential_helper` hostile-repo shape is caught at the mint boundary.
+### 5.4 Mint resilience (greenfield; `httpc` has zero retry machinery)
 
-The "no beads database found" hint (main.go:1046-1051, errors.go:36-55) gains
-the attach remediation line. **init.go is a third resolution site:** `bd init`
-in a `credential_helper`-bearing workspace must refuse ("already attached; use
-`bd attach` to re-attach") rather than hand-build a CreateIfMissing=true config
-that dials the wrong host and rewrites metadata (breaking the attachment hash).
+- **Per-attempt STS timeout (5s), total budget ≤ ~15s** — httpc's default 30s
+  per call means one hang consumes bd's whole 30s helper-exec cap and
+  serve-last-good never runs. Budget the full ladder + serve-last-good inside
+  the exec cap.
+- **Jittered early refresh** (`15s + rand(0..15s)` instead of the fixed 15s
+  skew) so a fleet does not re-mint on one boundary.
+- **Bounded backoff** on STS 5xx/429/network (3 attempts, 250ms·2ⁿ + jitter);
+  403 and the existing one-shot 401-relogin are not retried.
+- **Serve-last-good** above a 15s floor (so bd's 10s expiry skew does not
+  instantly re-stale it into a helper-exec storm): on exchange failure with a
+  still-valid cached token, emit it with a stderr warning instead of dying.
+- **`--json` emits real `res.ExpiresIn`** (gettoken.go:296 hardcodes 90) — a
+  thin bd trusting the envelope for its cache TTL must get the truth.
 
-### 4.5 Non-interactive trust
+### 5.5 Reliability fixes forced by sole-owner status (now load-bearing)
 
-- `--accept`: succeeds only when the URI host is ALREADY in the allowlist
-  (compiled default or user-added). It never adds a new host. This keeps the
-  second-user flow one-command (`gasworks login && bd attach --accept` — the
-  default gateway is compiled in) while a phishing URI to an unknown host
-  still hard-fails.
-- `BD_TRUST_WORKSPACE=1`: equivalent to `--accept` for ambient re-trust
-  (hash-mismatch re-acceptance in CI). Per §0.1 the SPEC's "only honored with
-  GASWORKS_API_KEY" cannot ship until the machine leg exists; until then it is
-  honored unconditionally but — like `--accept` — can never trust a host
-  outside the allowlist. **Owner flag:** revisit when the machine leg lands.
-- Neither flag ever bypasses the allowlist. Adding a NEW host is always
-  interactive (or a deliberate manual edit of the user file).
+Concurrent delegation is the norm under the pivot (every bd/gc command spawns a
+FRESH `gasworks getToken` OS process — cross-process, not goroutines), so two
+edge cases become first-class:
 
-### 4.6 Second-user detection
+- **Refresh-token rotation serialization — the DOUBLE-CHECKED pattern (not a
+  naive lock, not in-process single-flight).** Today `ensureIDToken`
+  (gettoken.go:136-174) does an UNLOCKED `store.Load` + UNLOCKED `oidc.Refresh`,
+  locking only the final write. Keycloak rotates the refresh token on use; N
+  racing callers present the same token, the 2nd..Nth are reuse-detected, and
+  Keycloak can **revoke the whole family → the durable offline session is
+  stranded** (forces interactive login fleet-wide). Fix: **(1) fast path** —
+  unlocked Load; if the id-token has > skew remaining, return it (no lock, no
+  refresh). **(2) slow path** — acquire the store flock (lock_unix.go), **RE-Load
+  under the lock, RE-CHECK freshness** (a peer may have refreshed while we
+  blocked), and refresh+persist only if still stale, with the `oidc.Refresh`
+  bounded by a timeout well under bd's 30s exec cap. The first waiter refreshes
+  once; all others re-read the fresh token and skip. (In-process single-flight
+  is useless here — each getToken is a separate process — and a naive
+  lock-across-refresh without the re-check serializes N Keycloak RTTs under one
+  lock and can exceed the 30s cap → the 1045 storm §3 exists to avoid.) This is
+  a gasworks-reliability fix, in WP-B because the pivot makes concurrent
+  cross-process delegation the steady state.
+- **Pin the Keycloak offline-session lifetime** server-side (auth-owner infra
+  deliverable, not CLI code): it is the outer bound on the noninteractive chain;
+  its expiry forces every delegating caller back to interactive login at once.
 
-In the workspace-discovery failure path AND on ambient commands that find
-hosted metadata without a valid attachment record: print exactly the SPEC's
-remediation (`gasworks login && bd attach --accept`). Detection keys on
-metadata `credential_helper` presence — NOT on env — so a fresh clone of a
-committed metadata.json is detected even with a clean environment. (S1-created
-workspaces lack `credential_helper`; they keep working via env exactly as
-today — no forced migration in S2, attach upgrades them opportunistically.)
+## 6. Doctor + diagnostic contract (bd; survives v2 §6, reframed)
 
-## 5. gasworks CLI changes (public repo `gascity/gasworks`)
-
-### 5.1 Flags
-
-`getToken` gains `--gateway <host>` and `--project <prj_id>` (both added to
-`hoistPositional`'s valueFlags map — gettoken.go:257 — or flag-before-product
-silently mis-parses). `--project` in S2: validated (`^prj_[a-f0-9]{16}$`) and
-recorded in the audit/cache key, NOT yet minted into scopes (that is S3's
-pin-aware STS intersection; the flag ships now so recipes/attach are stable).
-
-### 5.2 Destination gate (before the cache read)
-
-Immediately after flag/product parsing — BEFORE the EIA cache check at
-gettoken.go:80-86 — when `--gateway` is present: host must be in
-(compiled-in default `gw.beads.gascity.com`) ∪ (user file
-`~/.config/gasworks/trusted-gateways.json`). Refusal via `die` → stderr
-`gasworks: refusing to mint a beads credential for unknown gateway '<host>' —
-trusted gateways: <list>. Add a gateway explicitly with 'gasworks
-trust-gateway <host>' only if you operate it.` (exit 1; bd surfaces it
-verbatim). The EIA cache key gains the gateway dimension
-(`org|product|scope|gateway`) so a cached token minted for one destination is
-never served for another. `--gateway` absent → behavior unchanged (back-compat
-for existing users; bd's persisted-helper path ALWAYS passes it).
-
-### 5.3 Allowlist storage + trust-gateway
-
-Sibling file in `store.ConfigDir()` (NOT inside credentials.json — avoids
-entangling the S4 custody migration), own atomic-write helper (mirror
-store.go's temp+rename+0600) **with the existing store lock pattern reused** —
-this org runs many concurrent agents per machine, so a concurrent
-`trust-gateway` write and an attach-triggered write must not drop an entry
-(last-writer-wins loses data here). New command `trust-gateway` (+ alias
-`trustGateway`) registered in the main.go:42-61 switch: `gasworks trust-gateway
-<host>` prompts with the host and consequence, `--yes` for scripting; `--list`
-prints compiled + user entries; `--remove <host>` edits the user file only
-(compiled defaults are not removable). All host strings pass the same canonical
-form as bd (§2.2) so the two allowlists agree byte-for-byte.
-
-### 5.4 Mint resilience (all greenfield — httpc has zero retry machinery)
-
-- **Jittered early refresh:** replace the fixed 15s EIA skew with
-  `15s + rand(0..15s)` computed per invocation — fleet re-mints spread across
-  the last 30s of the 90s TTL instead of synchronizing on one boundary.
-- **Bounded backoff on STS 5xx/429/network:** 3 attempts, 250ms·2ⁿ + jitter
-  (total budget ≤ ~2s — must fit inside bd's 30s helper exec timeout with wide
-  margin). 4xx (401 handled by the existing one-shot re-login; 403) never
-  retried.
-- **Per-attempt HTTP timeout + total budget (v1 bug):** each STS exchange must
-  use a SHORT per-attempt timeout (5s), not httpc's default 30s (httpc.go:27) —
-  otherwise one hanging attempt (the classic STS brownout: LB dropping
-  SYN-ACKs) consumes bd's entire 30s helper-exec cap and the ladder never
-  reaches serve-last-good. Total getToken wall-clock (all attempts + sleeps) is
-  budgeted ≤ ~15s so the full ladder AND serve-last-good complete inside bd's
-  30s `credCommandTimeout`. Exit test: STS blackholed (iptables DROP), warm
-  cache → getToken emits last-good in <15s.
-- **Serve-last-good:** if the exchange still fails AND the cache holds a token
-  with true remaining validity above a floor (`ExpiresAt-now > 15s`, so bd's
-  10s expiry skew does not instantly re-stale it into a helper-exec storm),
-  emit it with a stderr warning instead of dying — the SPEC's
-  degrade-to-stale-within-TTL behavior.
-- **Envelope honesty:** `--json` emits the server's `res.ExpiresIn`
-  (gettoken.go:296 currently hardcodes 90) — bd's cache honors real expiry.
-
-## 6. Doctor + diagnostic contract (bd; separate PR after #4823)
-
-- Replace the internals of the two gateway-blind builders with resolution
-  through the canonical path (`NewFromConfigWithCLIOptions` /
-  `applyResolvedConfig`): `doltServerConfig` (doctor/federation.go:31-44 — ~10
-  consumers incl. Sync Staleness :438, Federation Conflicts :531, Dolt Mode
-  :637, maintenance.go:139, migration_validation.go:206, validation.go:25) and
-  `openDoltDB` (doctor/dolt.go:21-78 — CheckDoltConnection/CheckDoltSchema =
-  the init post-check noise). **Exhaustive sweep** (grep-verified — the v1 list
-  was incomplete and exit test 8 would still fail through the misses): also
+- **Exhaustive gateway-blindness sweep** (grep-gated): route every hand-built
+  server `dolt.Config`/`doltutil.ServerDSN` through the canonical
+  `applyResolvedConfig` path so `BEADS_DOLT_SERVER_TLS` + the credential command
+  are honored. Sites: doctor/federation.go:31-44 (`doltServerConfig`, ~10
+  consumers), doctor/dolt.go:21-78 (`openDoltDB` — the init post-check noise),
   server.go:290, perf_dolt.go:122, fresh_clone_server.go:28, fix/metadata.go:500,
   fix/remotes.go:18, fix/validation.go:307, doctor_health.go:57, init_guard.go:40,
-  cmd/bd/dolt.go:841 and :1902 (the `bd dolt *` subcommand family — otherwise
-  `bd dolt` stays broken for hosted users), bootstrap.go:62 and :872. The sweep
-  is a grep gate: any hand-built `dolt.Config{...ServerHost...}` or
-  `doltutil.ServerDSN{...}` outside the canonical path fails CI.
-- **hosted.Resolve error rendering:** once hosted.Resolve lives in
-  `applyResolvedConfig` (WP-C), every doctor store-open (SharedStore
-  doctor.go:509-510 and each `NewFromConfigWithCLIOptions` check) will ABORT
-  with the §2.2 trust error on a mismatched/unattached hosted workspace — a
-  crash before the gateway-trust layer can report a clean FAIL. Doctor must
-  catch hosted.Resolve errors and render them AS the gateway-trust layer result
-  (per-layer PASS/FAIL), not let them crash the store open.
-- New doctor layers for hosted workspaces, in pipeline order with one remedy
-  each (SPEC error table verbatim): workspace → helper (binary present,
-  allowlisted) → session (helper dry-run; 403 stderr surfaced verbatim) →
-  gateway-trust (allowlist + attachment hash) → DNS/TCP → TLS (map the
-  distinguishable pre-auth 1045 "TLS required" to the TLS remedy) → auth →
-  database (project-identity cross-check).
-- Tighten `verifyProjectIdentity`'s swallowed read-error (store.go:1286-1289)
-  for Gateway configs only: a read ERROR is a transient failure (retryable
-  message), distinct from ABSENT (provisioning-contract error) — mirroring the
-  #4823 init semantics on the open path.
+  cmd/bd/dolt.go:841/1902, bootstrap.go:62/872. Fixes bead `mc-b3clt.4` (the
+  false "Failed to connect" on a working hosted workspace). Independent of trust
+  — stands on its own as the #4823 field-report follow-up.
+- **Diagnostic contract** — per-layer PASS/FAIL, one remedy each: workspace →
+  helper present → **helper dry-run** (surfaces gasworks' own errors: destination
+  refusal, expired session `gasworks login`, STS 403 entitlement stderr
+  verbatim) → DNS/TCP → TLS (map the gateway's pre-auth "TLS required" to the
+  TLS remedy) → auth → database. Note the trust decision now shows up as a
+  **helper (gasworks) error**, not a bd-layer check — doctor surfaces it, it
+  does not re-implement it.
 
-## 7. Work packages, PRs, sequencing
+## 7. Security model under the pivot (honest — not "closed at the root")
+
+- **[CRITICAL] Recipe-directed exfiltration** — closed **when, and only when,
+  the invoked helper implements the §5.0 contract.** bd's part (always inject
+  the true dial host; report==dial; host in the cache key; fail-closed marker)
+  is necessary but NOT sufficient — the *judgment* is the helper's. So the
+  guarantee holds for: the human path with an S2 gasworks (enforces); and the
+  fleet path IFF `eia-helper` gains the contract (§11 decision). It does NOT
+  hold for: a fleet with an unpatched `eia-helper`; a wrapper/PATH-shadowed
+  helper that ignores exec-info; a new-bd/old-helper version skew before the
+  warn→enforce flip. Each of those is a full replayable-token exfil, because the
+  EIA has no host binding (below). This is why v4 makes the contract a merge-gate
+  with adversarial tests, and why deleting v2's independent bd-side layer is an
+  **owner sign-off item, not a settled simplification** (§11). **Invariants to
+  test:** report==dial for env/metadata/committed-config.yaml host shapes; the
+  loopback-lookalike vectors (`127.0.0.1.evil.com`, `0.0.0.0`,
+  `::ffff:127.0.0.1`); warm-trusted-token never served for an untrusted dial.
+- **[HIGH → residual, honest] Token replay if leaked.** The allowlist is a
+  **mint-time** gate. The minted EIA is `aud=beads` with **no host binding**
+  (sts.go:121-126), so a token captured on any unverified path (or leaked cached
+  EIA) still replays against the *real* gateway for its TTL. The pivot does not
+  change this — bounded only by the 90s TTL + the 15m server ceiling. Every
+  gate-miss above yields a *full replayable* token, not a scoped leak, which is
+  why gate coverage must be exhaustive+tested rather than best-effort. **EIA
+  channel/destination binding** is the real fix and is **deferred future
+  hardening** (SPEC:231).
+- **[Trade, owner-visible] Single enforcement layer replaces v2's two.** SPEC
+  CRITICAL #2 mandates two INDEPENDENT destination layers ("so neither a
+  compromised bd config nor a spoofed helper invocation can exfiltrate"). v4
+  collapses to one (the helper contract). The eia-helper finding proves the two
+  layers are NOT redundant — each covers a gap the other cannot. Within the
+  threat model (untrusted repo, trusted user+tools) the surviving single layer
+  is sufficient *when every helper enforces*; it is strictly weaker when a helper
+  does not. Owner must accept the collapse or keep a second layer (§11).
+- **Preserved invariants:** TLS terminates on the gateway; clients never learn
+  backend coordinates; the credential command stays env-only (no repo-persisted
+  helper — configfile.go:490-492 intent kept); `:@/` charset + KindIdentity
+  checks stay; recipes carry no secrets. Threat model unchanged from v2: a
+  hostile *user* who controls the machine defeats any client-side gate in either
+  design; both defend only the hostile-*repo* case.
+
+## 8. Work packages + sequencing
 
 | WP | Repo | Contents | Depends on |
 |----|------|----------|-----------|
-| **A** | bd (OSS) | §3: `creds.Source` interface + ArgvSource + ResolveForDial/Invalidate, connector, site conversions incl. transaction.go, gated ONE-shot 1045-invalidate in withRetry/withRetryTx, DSN sentinel redaction, timeout envs | none (independent of #4823) |
-| **B** | gasworks | §5: flags + hoistPositional, destination gate + cache-key gateway dim (before cache read), trust-gateway (locked store), resilience (per-attempt timeout + budget + jitter + serve-last-good floor), expires_in | none |
-| **C1** | bd (OSS) | §2+§4 core: trust/attachment stores, `hosted.GuardDestination` (unconditional, in ApplyGatewayCredential), terminal `hosted.Resolve` at all three sites, second-user detection, canonicalization | A (ArgvSource/creds.Source); B shipped for e2e |
-| **C2** | bd (OSS) | `bd attach` command + verification connect + factored adoption helpers | C1; #4823 merged (adoption helpers) |
-| **D** | bd (OSS) | §6 doctor exhaustive sweep + diagnostic contract + hosted.Resolve-error rendering | #4823 (field-report follow-up); C1/C2 for hosted layers |
+| **A** | bd (OSS) | §2.2 exec-info host threading (`BEADS_EXEC_INFO` always-inject, `origin:bd` marker, no loopback exemption, structural report==dial from `mysql.Config.Addr`, host in bd cache key, narrow strippedEnv, shared canon); §3 connector + gated one-shot 1045 + transaction.go:147 + timeouts + sentinel redaction | none (independent of #4823) |
+| **B** | gasworks | §5.0 contract impl + §5.1-5.4: `--gateway`/`--project` + hoistPositional; read exec-info-or-flag + neither-present policy + version-tolerance; destination gate before cache; gateway cache-key dim; `trust-gateway` (locked store); resilience; `expires_in`; §5.5 double-checked refresh serialization. **Ships warn-only, flips to enforce after WP-A is the default bd tag.** | WP-A tag exists before enforce-flip |
+| **E** | crucible/gc (`eia-helper`) | §5.0 contract impl in `eia-helper`: read `BEADS_EXEC_INFO`, fleet-gateway allowlist (split-DNS short-name entries, §11), byte-exact match, fail-closed for `origin:bd`, warn-then-enforce | **owner decision (§11)**; WP-A |
+| **D** | bd (OSS) | §6 doctor exhaustive sweep + diagnostic contract (fixes `mc-b3clt.4`; doctor injects a representative `BEADS_EXEC_INFO` so the helper dry-run reflects the real dial) | #4823 (field-report follow-up) |
 
-**Split rationale (red-team):** v1's single WP-C hostaged the entire
-destination-trust core to #4823's idle review. Only the adoption-helper
-factor-out (C2) needs #4823; the trust stores, unconditional
-`GuardDestination`, and terminal resolver (C1) touch none of #4823's diff and
-can land first. **The security-critical enforcement (GuardDestination) is in
-C1, which does NOT wait on #4823.**
+**Deleted vs v2:** WP-C1/C2 (trust stores, `GuardDestination`, `hosted.Resolve`,
+`bd attach`) are gone. The program is A ∥ B → (E, pending owner) → D, with the
+**warn→enforce flip gated on WP-A being the default bd install**. #4823 is now only a
+dependency of the doctor follow-up, not of the security core.
 
-Ship order: A ∥ B → C1 → C2 → D. Each lands as a real OSS PR
-(contributors.md + template, `status/needs-review-auto`, no commercial
-language — "an authenticating SQL gateway" phrasing, never product names) for
-bd; B follows gasworks repo conventions. Every PR gets a Fable red-team pass
-before commit (model policy).
+Ship order **A ∥ B(warn-only) → flip B to enforce once WP-A is the default bd
+install → E (if owner approves) → D**. bd PRs: contributors.md + template,
+`status/needs-review-auto`, no commercial language ("an authenticating SQL
+gateway", never product names). gasworks follows its repo conventions (public).
+Each PR gets a Fable red-team before commit.
 
-## 8. Exit tests (SPEC S2 + grounding-derived)
+## 9. Exit tests
 
-1. **Long-lived client:** gc-controller-class process >1h continuous ops, zero
-   1045s (per-dial re-mint across ≥40 token rotations) — run against
-   `prj_848513b16e7b5c43` (the live S1 test project on cherry).
-2. **Writes after rotation:** a writer idling >90s between writes succeeds
-   (proves the transaction.go conversion; this is the case main fails today).
-3. **Zero exports:** new terminal, attached workspace, `bd list` works with an
-   empty environment (metadata + attachment record only).
-4. **Exfil test (automated, CI) — ALL THREE shapes the red-team found (v1's
-   single-shape test would have passed while the hole was open):**
-   (a) `credential_helper` metadata → unlisted record host;
-   (b) NO `credential_helper`, committed `.beads/config.yaml dolt.host` or
-   metadata `dolt_server_host` = unlisted host, with an ambient
-   `BEADS_DOLT_CREDENTIAL_COMMAND` set (the fleet/S1 shape);
-   (c) attached workspace + committed `.beads/config.yaml dolt.host` = unlisted
-   host (terminal-resolution test — dialed host must be the RECORD host, never
-   config.yaml). In all three, a canary helper records invocation and MUST NOT
-   fire — the destination gate refuses BEFORE any mint. Plus
-   `gasworks getToken --gateway evil.example` refused pre-cache, pre-exchange.
-5. **Attach idempotency:** re-run attach → no-op; tuple change → refused
-   without confirm; `--accept` on unknown host → hard-fail.
-6. **Second-user:** fresh clone with committed metadata → first bd command
-   prints exactly the remediation; after `bd attach --accept` everything works.
-7. **Cache-destination isolation:** getToken for gateway A then `--gateway B`
-   (both trusted) → second call does NOT serve A's cached token.
-8. **Doctor truth:** on a healthy hosted workspace, `bd doctor` and the init
-   post-check report zero connection failures (regression test for the S1
-   finding).
-9. **Redaction:** grep test that no bd log/error output contains the token
-   (DSN sentinel + never-log-ServerUser invariant).
+1. **Exfil closed (all three host-source shapes):** env-host, metadata-host,
+   and committed-`.beads/config.yaml`-host all set to an unlisted gateway with an
+   ambient credential command → a canary helper records invocation and MUST see
+   `BEADS_EXEC_INFO.dialHost == the unlisted host` (report==dial), and a real
+   enforcing helper refuses before minting. No mint-for-A/dial-to-B split.
+1b. **Loopback-lookalike vectors:** `dolt.host` set to `127.0.0.1.evil.com`,
+   `0.0.0.0`, `::ffff:127.0.0.1`, `localhost.evil.com` → bd STILL injects
+   exec-info with the real host (no exemption suppresses it) and the enforcing
+   helper refuses.
+1c. **Fail-closed on absent destination:** `origin:bd` exec-info with no
+   `dialHost` → enforcing helper refuses; a direct human `gasworks getToken
+   beads --org X` (no exec-info) still mints.
+2. **Report == dial:** for each shape, assert the host in `BEADS_EXEC_INFO`
+   equals the host in the dialed DSN — including the per-dial connector path
+   (derived from `mysql.Config.Addr`).
+2b. **Warm-cache cross-serve:** in one long-lived process, dial trusted host A
+   (populates the cache), then dial untrusted host B with the same command →
+   bd's cache MISSES on the host dimension and the helper refuses B (no warm
+   trusted token served for B).
+3. **Long-lived client:** gc-controller-class process >1h, zero 1045s across
+   ≥40 rotations (per-dial re-mint) — against `prj_848513b16e7b5c43` on cherry.
+4. **Write after rotation:** a writer idling >90s between writes succeeds
+   (transaction.go:147 conversion).
+5. **Cache-destination isolation:** getToken for gateway A then `--gateway`/
+   exec-info B (both trusted) does not serve A's cached token; and bd's own
+   per-dial cache keyed by (command, host) does the same.
+6. **gasworks refusal e2e:** `gasworks getToken --gateway evil.example` (and
+   via `BEADS_EXEC_INFO`) refused pre-cache, pre-exchange; bd surfaces the
+   stderr verbatim.
+7. **Concurrency:** N concurrent `gasworks getToken` processes sharing one
+   credentials file do not strand the durable session (refresh serialization).
+8. **Doctor truth:** healthy hosted workspace → `bd doctor` and the init
+   post-check report zero connection failures (regression for `mc-b3clt.4`).
+9. **Redaction:** grep test — no token in bd log/error output; `BEADS_EXEC_INFO`
+   carries a host, never a token.
 
-## 9. Owner flags / open items
+## 10. SPEC deltas (companion edits so SPEC and design agree)
 
-- **Machine leg absent from the gasworks CLI** (§0.1): which slice builds
-  `GASWORKS_API_KEY` + `/sts/v0/machine` client support? Until it exists,
-  `BD_TRUST_WORKSPACE=1` is honored unconditionally (§4.5) — a documented
-  weakening of SPEC "honored only when GASWORKS_API_KEY is present" (it can
-  still never trust a host outside the allowlist, and each argv-hash re-accept
-  is logged loudly). Revisit when the machine leg lands.
-- **gasworks repo is PUBLIC**: the S2 gasworks changes ship hosted defaults in
-  an OSS repo (already the repo's practice — works.gascity.com is hardcoded
-  today). Confirm this remains acceptable vs the "commercial code private"
-  directive.
-- **#4823 review risk**: only WP-C2 factors and reuses its adoption helpers;
-  C1 (the security-critical core) does not depend on it (§7 split).
-- **Worktree/container attach cost**: attachment records are per-canonical-path,
-  so every git worktree, moved checkout, bind-mount alias, or ephemeral-HOME CI
-  rebuild needs its own `bd attach --accept` (one command, but real for this
-  org's worktree-heavy fleets). Canonicalization rule (filepath.Abs +
-  EvalSymlinks, case-fold on macOS/Windows) is a §2.1 implementation detail;
-  document the per-path cost in the attach docs and error text, not as a
-  surprise. Fleet/k8s hosted rigs use the ENV path (both vars set by
-  `mirrorBeadsDoltEnv`) and never require an attachment record.
-- **Forward-compat of attach-written metadata**: an OLD bd binary cloning an
-  attached repo sees `dolt_mode=server` + no host + unknown `credential_helper`
-  field (ignored) → dials config.yaml/127.0.0.1 as root, may auto-start a local
-  dolt, fails confusingly (the second-user remediation exists only in new
-  binaries). Document a minimum-bd-version for hosted workspaces; consider a
-  metadata `hosted_min_bd_version` marker an old binary can at least name.
-- **bd release vehicle** (SPEC open question) still undecided — WP A-D target
-  a tagged release; the panel installer story is S5.
+The pivot changes load-bearing SPEC text. Apply these (done in this session
+where marked):
+- **S2 rollout item (SPEC line ~209):** retitle to thin-bd delegation +
+  gasworks-owned trust; drop "`bd attach` + the user-level trusted-gateway
+  allowlist + TOFU"; keep per-dial connector; add "bd exec-info host threading;
+  gasworks owns the allowlist + `--gateway` refusal." **[patched this session]**
+- **CRITICAL #2 mitigation (SPEC ~130-131):** reworded to the helper-contract
+  model, but explicitly marked **PROPOSED, pending owner sign-off** on the
+  two-layers→one-layer collapse (the red-team flagged that I must not
+  unilaterally downgrade a CRITICAL mitigation). Keeps the 90s-TTL replay bound
+  and the "destination binding is future hardening" note, and now records the
+  fleet-helper-must-enforce dependency. **[patched this session, as PROPOSED]**
+- **Connection model / Credential flow (SPEC ~89-93) & bd client changes
+  (~113-124):** remove the bd-side allowlist, `bd attach`, ArgvSource, TOFU;
+  replace with exec-info delegation + gasworks trust. **[flagged; larger edit,
+  left for a focused SPEC pass with owner review]**
+- **Goal (SPEC line 17)** "repo-local configuration can never select the mint
+  destination" stays TRUE (the repo host is reported to and refused by gasworks)
+  — no edit, but the mechanism note changes.
+- S1, S3–S9 unaffected (S3 pinned scopes and S4 custody were already
+  gasworks-side; the pivot only reinforces them).
+
+## 11. Owner flags — two are genuine DECISIONS (please rule before implementation)
+
+**DECISION 1 — collapse v2's two destination layers into the helper contract?**
+SPEC CRITICAL #2 mandates two independent layers (bd allowlist AND gasworks).
+The pivot deletes the bd layer. The red-team proved the layers are NOT redundant
+(the fleet `eia-helper` case). Options: **(a)** accept single-layer = the §5.0
+helper contract, on the condition that EVERY helper (gasworks + eia-helper)
+enforces it (Decision 2 must then be "yes"); **(b)** keep a thin bd-side or
+gc-side destination allowlist as the independent second layer (reintroduces some
+of the machinery the pivot removed, but is version-skew-proof and covers a
+non-enforcing helper). My recommendation: **(a)**, because it matches the owner's
+"gasworks/helper owns auth" intent AND is uniform — but it is your call, and it
+requires Decision 2.
+
+**DECISION 2 — is `eia-helper` destination-enforcement (WP-E) in scope now?**
+The fleet mints via `eia-helper`, not gasworks; without WP-E the fleet (which
+processes untrusted repos in adopt-pr/PR-review) has NO destination gate under
+the pivot. Options: **(a)** in scope — add the §5.0 contract to `eia-helper`
+(crucible/gc change, needs a fleet-gateway allowlist keyed on the split-DNS
+short name `beads`, not the FQDN); **(b)** deferred, and the fleet gap is
+accepted meanwhile with a compensating control (e.g. the fleet keeps env-pinning
+`GC_DOLT_HOST` so a repo-supplied host never reaches a mint — verify
+`mirrorBeadsDoltEnv` actually enforces this, today it only *projects* the host
+when `GC_DOLT_HOST` is set and DELETES it otherwise). My recommendation: **(a)**
+if Decision 1 is (a); at minimum a compensating control before any fleet exposure.
+
+Other flags (not decisions):
+- **gasworks machine/CI leg is unbuilt** (`GASWORKS_API_KEY` → `/sts/v0/machine`
+  absent from the CLI). "gasworks owns ALL auth" is only true for the human leg;
+  the fleet uses `eia-helper`. Which slice builds the CLI machine leg, if ever?
+- **Refresh-token serialization (§5.5, double-checked) + offline-session
+  pinning** — now load-bearing under concurrent cross-process delegation; the
+  pinning is a server-side Keycloak change.
+- **gasworks repo is PUBLIC** — the allowlist + hosted defaults ship in OSS
+  (already the repo's practice). Confirm vs "commercial code private."
+- **bd release vehicle** (SPEC open question) undecided; the warn→enforce flip is
+  gated on WP-A being the default install.
+- **EIA channel binding** (the real replay fix) remains deferred future
+  hardening — confirm it stays out of S2.

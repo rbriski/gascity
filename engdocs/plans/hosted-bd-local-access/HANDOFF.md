@@ -12,7 +12,9 @@ Handoff for the next session continuing the 9-slice program in
 
 ## TL;DR — where things stand
 
-**S1 is COMPLETE and FULLY VERIFIED end-to-end (2026-07-15, session 2). S2 is in design.**
+**S1 is COMPLETE and FULLY VERIFIED end-to-end (2026-07-15). S2 was REDESIGNED
+around a thin-bd pivot (2026-07-16) — design `S2-DESIGN.md` v4, grounded +
+red-teamed; blocked on TWO OWNER DECISIONS before implementation (see below).**
 
 Session-2 completion evidence:
 - Cherry's `beads-provisioner` deployed to `d090d99` (gasworks-internal PR #125,
@@ -53,39 +55,86 @@ WebPKI TLS → EIA auth → gateway routing all work.
 
 ---
 
-## ▶ IMMEDIATE NEXT ACTION — S2 IMPLEMENTATION (design + red-team DONE)
+## ▶ IMMEDIATE NEXT ACTION — S2 needs TWO OWNER DECISIONS, then implement
 
-**S2 design is complete and red-teamed** — `S2-DESIGN.md` v2 in this dir
-(bead `mc-b3clt.6`). A 3-lens Fable red-team broke v1 (all three lenses hit the
-same CRITICAL: the env-credential carve-out reopened the SPEC exfil vector);
-v2 fixed it at the root (unconditional destination gate at the mint boundary +
-terminal hosted resolution). **Next is implementation** (Opus impl, Fable
-red-team before each commit):
+**S2 was REDESIGNED (2026-07-16) around a thin-bd pivot** and is at
+`S2-DESIGN.md` **v4** in this dir (bead `mc-b3clt.6`). Do NOT implement from the
+old v2 plan (`bd attach` + bd-side allowlist) — it was superseded.
 
-- **WP-A (bd, OSS, no deps):** `creds.Source` interface + `ArgvSource` +
-  `ResolveForDial`/`Invalidate`, per-dial `openSQLDB` connector (port from
-  `1f0ebe068` incl. the mandatory transaction.go:147 conversion), gated
-  one-shot 1045-invalidate, sentinel-DSN token redaction, env-tunable timeouts.
-- **WP-B (gasworks, PUBLIC repo, no deps):** `--gateway`/`--project` flags
-  (+ hoistPositional), UNCONDITIONAL destination gate before the cache read,
-  `trust-gateway` (locked store), mint resilience (per-attempt STS timeout +
-  budget + jitter + serve-last-good floor), `expires_in` envelope fix.
-- Then **C1** (trust stores + `hosted.GuardDestination` + terminal
-  `hosted.Resolve` + second-user detection; dep A+B, NOT #4823) → **C2**
-  (`bd attach` + factored #4823 adoption helpers; dep C1+#4823-merge) → **D**
-  (doctor exhaustive sweep = fixes `mc-b3clt.4`; dep #4823+C).
+**The pivot (owner direction):** *"the gasworks CLI owns authentication; bd only
+delegates to a credential command."* This mirrors the parallel gc change
+(worktree `.../frm`, branch `feat/unified-city-resolver`) that reverts gc-native
+auth to a **credential command** (`internal/clientauth`, kubectl-exec-plugin
+shape: versioned request passed to the helper via an **env var not argv**,
+`{token, expiration}` back, the client makes **no** trust decision). bd already
+has ~80% of this via `BEADS_DOLT_CREDENTIAL_COMMAND`; v4 adds the one missing
+input — bd injects its **true dial host** into the helper env (`BEADS_EXEC_INFO`)
+so the helper owns the destination decision. Deleted from bd: the whole v2/v3
+trust apparatus (`bd attach`, bd-side allowlist, TOFU, `hosted.GuardDestination`,
+`hosted.Resolve`).
 
-Ship order **A ∥ B → C1 → C2 → D**. Grounding dumps (session-local):
-`/data/tmp/s2-grounding/{bd-main,credcmd,gasworks,pr4823}.md`. Gasworks
-origin/main ground worktree: `/tmp/gasworks-main-ground` (canonical checkout
-`/data/projects/gasworks-go-build` was 7 commits stale). Verified
-provisioner-path fact: `provisionerLoop → resumeProvisioning → driveProvision →
-runProvision → provision.ProvisionProject`.
+**Design → grounded (2 Fable workflows) → red-teamed (v3 → 3 lenses, 7
+blockers) → v4.** The v3 red-team was decisive and its fixes are in v4:
+- The **fleet helper is `eia-helper`, NOT `gasworks`** (my v3 premise was
+  factually wrong). A gasworks-only gate leaves the fleet — which processes
+  untrusted repos in adopt-pr/PR-review — with **zero** destination gate. v4
+  reframes enforcement as a **helper CONTRACT (§5.0) that EVERY helper
+  implements** (gasworks + eia-helper).
+- Dropped the **loopback exemption** (`127.0.0.1.attacker.example` dodged it) —
+  bd ALWAYS injects; helpers **fail closed** on an `origin:bd` mint with no
+  destination.
+- **Dial host is a security-load-bearing cache key** in both bd and gasworks (a
+  warm trusted token must never be served for an untrusted dial); per-dial host
+  derived from `mysql.Config.Addr` so report==dial is structural.
+- **Double-checked** refresh-token serialization; **warn-then-enforce** rollout.
 
-**Open owner flags from the red-team (in S2-DESIGN §9):** gasworks CLI has NO
-machine leg (`GASWORKS_API_KEY` unbuilt) so `BD_TRUST_WORKSPACE=1` ships
-degraded; gasworks repo is PUBLIC (hosted defaults in OSS); bd release vehicle
-undecided.
+### ⚠ TWO OWNER DECISIONS gate implementation (S2-DESIGN §11):
+1. **Collapse v2's two mandated destination layers into the single helper
+   contract?** SPEC CRITICAL #2 mandates two independent layers; the pivot
+   deletes the bd one. Recommendation: (a) single helper-contract layer,
+   *conditional on Decision 2 = yes*. Alt: (b) keep a thin bd/gc second layer
+   (version-skew-proof, covers a non-enforcing helper).
+2. **Is `eia-helper` destination-enforcement (WP-E) in scope now?** Without it
+   the fleet has no gate. Recommendation: (a) in scope (crucible/gc change,
+   fleet allowlist keyed on the split-DNS short name `beads`, not the FQDN); or
+   at minimum (b) a compensating env-pin control before any fleet exposure.
+
+**Do not implement until these are ruled.** I reverted my premature SPEC
+CRITICAL #2 edit to a **PROPOSED** framing pending sign-off.
+
+### Work packages once decided (Opus impl, Fable red-team before each commit):
+- **WP-A (bd, OSS, no deps):** `BEADS_EXEC_INFO` always-inject + `origin:bd`
+  marker + no-loopback-exemption + structural report==dial (`mysql.Config.Addr`)
+  + host in bd's `internal/creds` cache key + narrow `strippedEnv` + shared
+  canon; per-dial `openSQLDB` connector (port `1f0ebe068`, incl. mandatory
+  `transaction.go:147`), gated ONE-shot 1045-invalidate, sentinel-DSN redaction,
+  env timeouts.
+- **WP-B (gasworks, PUBLIC repo, no deps):** §5.0 contract impl;
+  `--gateway`/`--project` (+ hoistPositional); read exec-info-or-flag +
+  neither-present fail-closed-for-bd + version-tolerance; gate before the cache
+  read; gateway cache-key dim; `trust-gateway` (locked store); resilience
+  (per-attempt STS timeout + budget + jitter + serve-last-good floor);
+  `expires_in` fix; **§5.5 double-checked refresh serialization**. Ships
+  **warn-only**, flips to enforce once WP-A is the default bd install.
+- **WP-E (crucible/gc `eia-helper`) — pending Decision 2:** the §5.0 contract in
+  `eia-helper`.
+- **WP-D (bd, OSS):** doctor exhaustive gateway-blindness sweep + diagnostic
+  contract (fixes `mc-b3clt.4`); doctor injects a representative
+  `BEADS_EXEC_INFO` for its helper dry-run. Dep #4823.
+
+Ship order **A ∥ B(warn-only) → flip B to enforce (once WP-A is default) →
+E (if approved) → D**. Grounding dumps (session-local):
+`/data/tmp/s2-grounding/{bd-main,credcmd,gasworks,pr4823}.md` +
+`v3-redteam-{0,1,2}.json`. Gasworks origin/main ground worktree
+`/tmp/gasworks-main-ground` (canonical `/data/projects/gasworks-go-build` was 7
+commits stale). gc credential-provider pattern: worktree
+`/data/projects/gascity/.claude/worktrees/frm`, branch
+`feat/unified-city-resolver`, `internal/clientauth/clientauth.go`.
+
+**Other owner flags (not decisions):** gasworks CLI has NO machine leg
+(`GASWORKS_API_KEY`/`/sts/v0/machine` absent — "gasworks owns all auth" is
+human-leg-only today, fleet uses `eia-helper`); Keycloak offline-session pinning
+is a server-side change; gasworks repo is PUBLIC; bd release vehicle undecided.
 
 **Golden-thread test recipe (S1-proven; reuse project `prj_848513b16e7b5c43`):**
 ```bash
@@ -134,8 +183,9 @@ Initialized workspace on cherry: `/data/tmp/s1gt3-goldenthread` (adopted identit
 - **`mc-b3clt.3`** — CLOSED 2026-07-15 (deployed + golden thread verified).
 - **`mc-b3clt.1`** — golden thread PROVEN; stays open only until bd PR #4823 merges.
 - **`mc-b3clt.2`** — backfill `_project_id`/`issue_prefix` over the existing Dolt projects (incl. LIVE mc `prj_36e911632d13aae6`). Compare-then-write dry-run tool; NEVER a ProvisionProject re-drive. Not on S1's path.
-- bd doctor/init-postcheck Gateway/TLS threading bug (bead filed; fix rides S2's doctor work).
-- beads-team-server create-request `issue_prefix` not persisted — slug-derived on provisioner re-drive (bead filed).
+- **`mc-b3clt.4`** — bd doctor/init-postcheck Gateway/TLS threading bug; fix = S2 v4 WP-D (exhaustive doctor sweep). Field report on PR #4823.
+- **`mc-b3clt.5`** — beads-team-server create-request `issue_prefix` not persisted (slug-derived on re-drive).
+- **`mc-b3clt.6`** — S2 (thin-bd pivot). Design v4 DONE + red-teamed; **blocked on the two owner decisions** above.
 - Durable cert auto-renewal (CronJob + dedicated CF token; needs bao-write/SOPS) — see runbook §9. Bootstrap cert valid to 2026-10-13.
 - beads-web connection recipe emits stale `gateway_host=100.119.244.94` (set `-gateway-endpoint` on the beads-web Deployment) — folds into S5's panel work.
 
@@ -144,7 +194,7 @@ Initialized workspace on cherry: `/data/tmp/s1gt3-goldenthread` (adopted identit
 ## Remaining slices S2–S9 (from `SPEC.md` Rollout)
 Each is its own **Fable design → Opus impl → Fable red-team → deploy/PR** cycle. Model policy stands: Fable arch/design, Opus impl, Fable red-team before commit; backend private repos push+deploy; bd = OSS PR (contributors.md + template, `status/needs-review-auto`, no commercial language).
 
-- **S2** — `bd attach` + per-dial minting + the destination-trust allowlist (+ gasworks `--gateway`). The next real client slice after S1.
+- **S2** — thin-bd credential delegation; the credential helper owns auth + destination trust (v4 pivot). Design done + red-teamed; blocked on two owner decisions. Superseded the old `bd attach` + bd-side-allowlist scoping.
 - **S3** — least-privilege pinned scopes (`beads:read#prj_<id>`) + membership severance (GA gate).
 - **S4** — credential custody: DPoP key → OS keyring, no plaintext EIA at rest, server-side EIA exp-iat ceiling (GA gate).
 - **S5** — connection API + Connection panel + docs (retire the fictional panel; fix the stale `gateway_host`).
@@ -163,34 +213,47 @@ openssl s_client -starttls mysql -connect gw.beads.gascity.com:3306 -servername 
 ```
 
 ## Related memories
-`s1-hosted-bd-webpki-gateway-live`, `hosted-bd-local-access-spec`,
-`beads-awsusw2-backend-unroutable-fix`, `beads-1045-hosted-controller-rca`,
-`gascity-scope-taxonomy`, `mc-exports-rehomed-gascityinc`.
+`s1-hosted-bd-webpki-gateway-live`, `hosted-bd-s2-design-redteamed`,
+`hosted-bd-local-access-spec`, `beads-awsusw2-backend-unroutable-fix`,
+`beads-1045-hosted-controller-rca`, `gascity-scope-taxonomy`,
+`mc-exports-rehomed-gascityinc`.
 
 ---
 
 ## NEXT-SESSION PROMPT (copy-paste)
 
 > Continue the hosted-local-bd program (epic `mc-b3clt`, SPEC at
-> `engdocs/plans/hosted-bd-local-access/SPEC.md`). Read `HANDOFF.md` and
-> `S1-DEPLOY-RUNBOOK.md` in that dir first, plus memory
-> `s1-hosted-bd-webpki-gateway-live`. Model policy: Fable arch/design, Opus
-> implementation, Fable red-team before every commit; backend private repos
-> push+deploy; bd = OSS PR (contributors.md + template, `status/needs-review-auto`,
-> NO commercial language). Constraints: no bao-write, no SOPS key; corp-public-ha
-> deploys via OCI release-bundle digest bump (not Flux image-automation); cherry
-> runs its own k3s for Dolt backends.
+> `engdocs/plans/hosted-bd-local-access/SPEC.md`). Read `HANDOFF.md`,
+> `S2-DESIGN.md` (**v4**), and `S1-DEPLOY-RUNBOOK.md` in that dir first, plus
+> memories `s1-hosted-bd-webpki-gateway-live` and `hosted-bd-s2-design-redteamed`.
+> Model policy: Fable arch/design, Opus implementation, Fable red-team before
+> every commit; backend private repos push+deploy; bd = OSS PR (contributors.md +
+> template, `status/needs-review-auto`, NO commercial language). Constraints: no
+> bao-write, no SOPS key; corp-public-ha deploys via OCI release-bundle digest
+> bump; cherry runs its own k3s (Flux-GitOps from gasworks-internal main) for
+> Dolt backends.
 >
-> **Step 1 — finish S1 (`mc-b3clt.3`):** deploy the provision-contract image
-> (`d090d99`/`17ca015`) to cherry's `beads-provisioner` so hosted Dolt projects are
-> born with `_project_id`, then re-run the golden thread (recipe in HANDOFF.md) and
-> confirm `bd init --server` adopts identity + `bd list` works against a fresh Dolt
-> project. Verify the live WebPKI gateway is still healthy first.
+> **S1 is COMPLETE + verified** (WebPKI gateway live; cherry provisioner on
+> `d090d99` so fresh Dolt projects are born with `_project_id`; `bd init --server`
+> adopts + `bd list`/`create` work over WebPKI TLS + a getToken EIA on test
+> project `prj_848513b16e7b5c43`). Verify the gateway is still healthy first
+> (commands under "Re-establish state").
 >
-> **Step 2 — S2:** design (Fable) → implement (Opus) → red-team (Fable) → ship
-> `bd attach` + per-dial credential minting + the destination-trust allowlist
-> (+ gasworks `--gateway`), per the SPEC's S2 slice.
+> **S2 is the thin-bd pivot (bead `mc-b3clt.6`, design v4).** bd becomes a pure
+> credential-delegator that injects its true dial host into the helper env
+> (`BEADS_EXEC_INFO`); the credential helper (gasworks AND fleet `eia-helper`)
+> owns the destination-trust decision via the §5.0 contract. The old `bd attach`
+> + bd-side-allowlist plan is DELETED. Design is done + red-teamed.
 >
-> Also open: bd PR #4823 review status; backfill `mc-b3clt.2` (do NOT run against
-> the live mc ledger without the dry-run tool); durable cert renewal (needs a
-> credential I lack — flag to the owner).
+> **BEFORE implementing, get the owner to rule on the two decisions in
+> `S2-DESIGN.md §11`:** (1) collapse v2's two mandated destination layers into the
+> single helper contract? (2) is `eia-helper` enforcement (WP-E) in scope now, or
+> is the fleet gap accepted with a compensating env-pin control? These change the
+> work-package set. Then implement WP-A (bd exec-info + connector) ∥ WP-B
+> (gasworks contract + resilience, warn-only) → flip B to enforce once WP-A is the
+> default install → WP-E (if approved) → WP-D (doctor sweep = fixes `mc-b3clt.4`).
+>
+> Also open: bd PR #4823 review status (OPEN, `status/reviewing`, checks green —
+> do NOT merge without review); backfill `mc-b3clt.2` (do NOT run against the live
+> mc ledger without the dry-run tool); durable cert renewal (needs bao-write/SOPS
+> I lack — flag to the owner; bootstrap cert good to 2026-10-13).

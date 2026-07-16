@@ -1175,6 +1175,20 @@ func (cr *CityRuntime) tick(
 	if ctx.Err() != nil {
 		return
 	}
+	// Finalize graph.v2 workflows whose tracked source work is already terminal
+	// before computing demand, so a stale mol-polecat-work molecule (source
+	// merged+closed, submit-and-exit still open) stops re-dispatching polecats
+	// (ga-tum). Runs after the session reaps and before the demand snapshot, so
+	// a finalized root is already closed when demand reads Ready. Scans the
+	// graph store plus every rig work store; reapSourceTerminalWorkflows dedupes
+	// the byte-identical default-backend stores.
+	phaseStart = time.Now()
+	reapStores := []beads.Store{cr.graphBeadStore().Store}
+	for _, ws := range cr.workBeadStores() {
+		reapStores = append(reapStores, ws.Store)
+	}
+	staleWorkflowsReaped := reapSourceTerminalWorkflows(reapStores, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_source_terminal_workflows", phaseStart, map[string]any{"reaped": staleWorkflowsReaped})
 	phaseStart = time.Now()
 	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
 	recordPhase(TraceSiteDemandSnapshot, "load_demand_snapshot", phaseStart, map[string]any{

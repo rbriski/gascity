@@ -468,6 +468,8 @@ type testNudgeAuthority struct {
 	finalized         map[string]CommandPartitionTerminalResolution
 	claimPreparations map[string]CommandClaimTransitionIntent
 	claimReceipts     map[string]CommandClaimTransitionReceipt
+	retryPreparations map[string]CommandRetryTransitionIntent
+	retryReceipts     map[string]CommandRetryTransitionReceipt
 	recoveryCalls     int
 }
 
@@ -483,6 +485,8 @@ func newTestNudgeAuthority() *testNudgeAuthority {
 		finalized:         make(map[string]CommandPartitionTerminalResolution),
 		claimPreparations: make(map[string]CommandClaimTransitionIntent),
 		claimReceipts:     make(map[string]CommandClaimTransitionReceipt),
+		retryPreparations: make(map[string]CommandRetryTransitionIntent),
+		retryReceipts:     make(map[string]CommandRetryTransitionReceipt),
 	}
 }
 
@@ -614,6 +618,97 @@ func (a *testNudgeAuthority) claimTransitionCounts() (int, int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.claimPreparations), len(a.claimReceipts)
+}
+
+func (a *testNudgeAuthority) PrepareCommandRetryTransition(ctx context.Context, intent CommandRetryTransitionIntent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateCommandRetryTransitionIntent(intent); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, found := a.retryReceipts[testRetryReceiptKey(intent.CommandID, intent.Claim.AttemptID)]; found {
+		return errors.New("test retry transition is already finalized")
+	}
+	claimReceipt, found := a.claimReceipts[intent.CommandID]
+	if !found || !commandClaimsEqual(claimReceipt.Claim, intent.Claim) ||
+		claimReceipt.Partition != intent.Partition || claimReceipt.Store != intent.Store {
+		return errors.New("test retry transition lacks the exact claim receipt")
+	}
+	if existing, found := a.retryPreparations[intent.CommandID]; found && !sameCommandRetryTransitionIntent(existing, intent) {
+		return errors.New("conflicting test retry transition")
+	}
+	a.retryPreparations[intent.CommandID] = intent
+	return nil
+}
+
+func (a *testNudgeAuthority) ReleaseCommandRetryTransitionWriter(context.Context, CommandRetryTransitionIntent) error {
+	return nil
+}
+
+func (a *testNudgeAuthority) AbortCommandRetryTransition(ctx context.Context, intent CommandRetryTransitionIntent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, found := a.retryPreparations[intent.CommandID]; found {
+		if !sameCommandRetryTransitionIntent(existing, intent) {
+			return errors.New("conflicting test retry transition abort")
+		}
+		delete(a.retryPreparations, intent.CommandID)
+		return nil
+	}
+	if _, found := a.retryReceipts[testRetryReceiptKey(intent.CommandID, intent.Claim.AttemptID)]; found {
+		return errors.New("test retry transition is already finalized")
+	}
+	return nil
+}
+
+func (a *testNudgeAuthority) FinalizeCommandRetryTransition(ctx context.Context, commit CommandRetryTransitionCommit) (CommandRetryReceiptDisposition, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := validateCommandRetryTransitionCommit(commit); err != nil {
+		return "", err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := testRetryReceiptKey(commit.CommandID, commit.AttemptID)
+	if existing, found := a.retryReceipts[key]; found {
+		if !retryReceiptMatchesCommit(existing, commit) {
+			return "", errors.New("conflicting test retry receipt")
+		}
+		return CommandRetryReceiptAlreadyFinalized, nil
+	}
+	intent, found := a.retryPreparations[commit.CommandID]
+	if !found || !retryIntentMatchesCommit(intent, commit) {
+		return "", errors.New("test retry receipt has no exact preparation")
+	}
+	claimReceipt, found := a.claimReceipts[commit.CommandID]
+	if !found || !commandClaimsEqual(claimReceipt.Claim, intent.Claim) {
+		return "", errors.New("test retry receipt cannot consume the exact claim receipt")
+	}
+	receipt, err := commandRetryTransitionReceiptFor(intent, commit)
+	if err != nil {
+		return "", err
+	}
+	delete(a.claimReceipts, commit.CommandID)
+	delete(a.retryPreparations, commit.CommandID)
+	a.retryReceipts[key] = receipt
+	return CommandRetryReceiptFinalized, nil
+}
+
+func testRetryReceiptKey(commandID, attemptID string) string {
+	return commandID + "\x00" + attemptID
+}
+
+func (a *testNudgeAuthority) retryTransitionCounts() (int, int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.retryPreparations), len(a.retryReceipts)
 }
 
 func (a *testNudgeAuthority) RecordCommandPartitionTerminal(ctx context.Context, terminal CommandPartitionTerminal) error {

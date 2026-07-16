@@ -475,6 +475,58 @@ func (i *TrustedNudgeIngress) FinalizeCommandClaimTransition(ctx context.Context
 	return i.authority.FinalizeCommandClaimTransition(ctx, receipt)
 }
 
+// PrepareCommandRetryTransition delegates exact definite-non-entry write-ahead
+// persistence to the independently durable authority journal.
+func (i *TrustedNudgeIngress) PrepareCommandRetryTransition(ctx context.Context, intent CommandRetryTransitionIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress retry transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	authority, ok := i.authority.(TrustedCommandRetryTransitionAuthority)
+	if !ok || isNilRepositoryDependency(authority) {
+		return fmt.Errorf("%w: trusted authority does not support retry transitions", ErrNudgeAuthorizationUnknown)
+	}
+	return authority.PrepareCommandRetryTransition(ctx, intent)
+}
+
+// ReleaseCommandRetryTransitionWriter releases only process-local writer
+// ownership while retaining ambiguous durable preparation evidence.
+func (i *TrustedNudgeIngress) ReleaseCommandRetryTransitionWriter(ctx context.Context, intent CommandRetryTransitionIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress retry transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	authority, ok := i.authority.(TrustedCommandRetryTransitionAuthority)
+	if !ok || isNilRepositoryDependency(authority) {
+		return fmt.Errorf("%w: trusted authority does not support retry transitions", ErrNudgeAuthorizationUnknown)
+	}
+	return authority.ReleaseCommandRetryTransitionWriter(ctx, intent)
+}
+
+// AbortCommandRetryTransition delegates exact rolled-back retry preparation
+// removal to the independently durable authority journal.
+func (i *TrustedNudgeIngress) AbortCommandRetryTransition(ctx context.Context, intent CommandRetryTransitionIntent) error {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return fmt.Errorf("%w: trusted ingress retry transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	authority, ok := i.authority.(TrustedCommandRetryTransitionAuthority)
+	if !ok || isNilRepositoryDependency(authority) {
+		return fmt.Errorf("%w: trusted authority does not support retry transitions", ErrNudgeAuthorizationUnknown)
+	}
+	return authority.AbortCommandRetryTransition(ctx, intent)
+}
+
+// FinalizeCommandRetryTransition delegates atomic prior-claim consumption and
+// exact retry-receipt retention to the independent authority journal.
+func (i *TrustedNudgeIngress) FinalizeCommandRetryTransition(ctx context.Context, commit CommandRetryTransitionCommit) (CommandRetryReceiptDisposition, error) {
+	if i == nil || isNilRepositoryDependency(i.authority) {
+		return "", fmt.Errorf("%w: trusted ingress retry transition authority is not fully bound", ErrNudgeAuthorizationUnknown)
+	}
+	authority, ok := i.authority.(TrustedCommandRetryTransitionAuthority)
+	if !ok || isNilRepositoryDependency(authority) {
+		return "", fmt.Errorf("%w: trusted authority does not support retry transitions", ErrNudgeAuthorizationUnknown)
+	}
+	return authority.FinalizeCommandRetryTransition(ctx, commit)
+}
+
 // RecordCommandPartitionAdmission delegates an idempotent admission
 // publication to the independently retained ingress authority.
 func (i *TrustedNudgeIngress) RecordCommandPartitionAdmission(ctx context.Context, admission CommandPartitionAdmission) error {

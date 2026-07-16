@@ -111,6 +111,10 @@ func TestSelectNudgeEffectOwnershipMissingDependencyHonorsAutoAndRequire(t *test
 			wantReason: "claim authorizer",
 			remove:     func(c *nudgeEffectStartupCapabilities) { c.ClaimAuthorizer = false },
 		},
+		"canonical command producers": {
+			wantReason: "canonical CLI/API command ingress",
+			remove:     func(c *nudgeEffectStartupCapabilities) { c.CommandProducersCovered = false },
+		},
 		"provider effect boundary": {
 			wantReason: "runtime nudge effect provider",
 			remove:     func(c *nudgeEffectStartupCapabilities) { c.ProviderEffect = false },
@@ -245,6 +249,9 @@ func TestCurrentProductionNudgeEffectStartupCapabilitiesFailClosed(t *testing.T)
 func TestResolveNudgeEffectStartupUsesOneBootLatchAndCurrentEvidence(t *testing.T) {
 	t.Parallel()
 	localProfile := string(nudgequeue.CommandSecurityProfileStoreWriterIsController)
+	unavailable := func(context.Context, string, string, rollout.Mode) (*productionNudgeAuthorityBinding, error) {
+		return nil, errors.New("authority binding unavailable")
+	}
 
 	autoCfg := &config.City{
 		Beads: config.BeadsConfig{CommandSecurityProfile: localProfile},
@@ -253,7 +260,7 @@ func TestResolveNudgeEffectStartupUsesOneBootLatchAndCurrentEvidence(t *testing.
 			NudgeEffectOwner: "auto",
 		},
 	}
-	flags, selection, err := resolveNudgeEffectStartup(context.Background(), autoCfg, runtime.NewFake())
+	flags, selection, err := resolveNudgeEffectStartupForCityWithOpener(context.Background(), autoCfg, runtime.NewFake(), "/city/a", "city-a", unavailable)
 	if err != nil {
 		t.Fatalf("resolveNudgeEffectStartup auto: %v", err)
 	}
@@ -266,20 +273,23 @@ func TestResolveNudgeEffectStartupUsesOneBootLatchAndCurrentEvidence(t *testing.
 
 	requireCfg := *autoCfg
 	requireCfg.Daemon.NudgeEffectOwner = "require"
-	flags, selection, err = resolveNudgeEffectStartup(context.Background(), &requireCfg, runtime.NewFake())
+	flags, selection, err = resolveNudgeEffectStartupForCityWithOpener(context.Background(), &requireCfg, runtime.NewFake(), "/city/a", "city-a", unavailable)
 	if flags.NudgeEffectOwner() != rollout.Require {
 		t.Fatalf("resolved mode = %q, want require", flags.NudgeEffectOwner())
 	}
 	if selection != (nudgeEffectStartupSelection{}) {
 		t.Fatalf("require selection = %#v, want inert zero value", selection)
 	}
-	assertNudgeEffectStartupRefusal(t, err, rollout.Require, nudgequeue.CommandSecurityProfileStoreWriterIsController, "atomic command repository")
+	assertNudgeEffectStartupRefusal(t, err, rollout.Require, nudgequeue.CommandSecurityProfileStoreWriterIsController, "authority binding unavailable")
 
 	offCfg := &config.City{
 		Beads:  config.BeadsConfig{CommandSecurityProfile: "invalid-but-uninspected"},
 		Daemon: config.DaemonConfig{NudgeEffectOwner: "off"},
 	}
-	flags, selection, err = resolveNudgeEffectStartup(context.Background(), offCfg, nil)
+	flags, selection, err = resolveNudgeEffectStartupForCityWithOpener(context.Background(), offCfg, nil, "/city/a", "city-a", func(context.Context, string, string, rollout.Mode) (*productionNudgeAuthorityBinding, error) {
+		t.Fatal("off invoked authority opener")
+		return nil, nil
+	})
 	if err != nil {
 		t.Fatalf("resolveNudgeEffectStartup off: %v", err)
 	}
@@ -297,6 +307,7 @@ func completeNudgeEffectStartupCapabilities() nudgeEffectStartupCapabilities {
 		TrustedCityPartition:         true,
 		TrustedCityPartitionResolver: true,
 		ClaimAuthorizer:              true,
+		CommandProducersCovered:      true,
 		ProviderEffect:               true,
 		CommandSecurity: nudgequeue.CommandSecurityCapabilities{
 			ProtectedNamespace:              true,

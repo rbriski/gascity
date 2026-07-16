@@ -2288,7 +2288,7 @@ func startManagedCity(
 	var nudgeEffectSelection nudgeEffectStartupSelection
 	if err := runPostPrepareStep("selecting_nudge_effect_owner", func() error {
 		var err error
-		bootRolloutFlags, nudgeEffectSelection, err = resolveNudgeEffectStartup(context.Background(), cfg, sp)
+		bootRolloutFlags, nudgeEffectSelection, err = resolveNudgeEffectStartupForCity(context.Background(), cfg, sp, path, cityName)
 		return err
 	}); err != nil {
 		cr.BatchUpdate(func(
@@ -2306,6 +2306,14 @@ func startManagedCity(
 	if nudgeEffectSelection.Notice != "" {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': nudge effect owner: %s\n", cityName, nudgeEffectSelection.Notice) //nolint:errcheck
 	}
+	nudgeBindingTransferred := false
+	defer func() {
+		if !nudgeBindingTransferred && nudgeEffectSelection.Binding != nil {
+			if err := nudgeEffectSelection.Binding.Close(); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': nudge effect owner cleanup: %v\n", cityName, err) //nolint:errcheck
+			}
+		}
+	}()
 
 	rec := events.Discard
 	var eventProv events.Provider
@@ -2356,6 +2364,7 @@ func startManagedCity(
 			PokeCh:                  pokeCh,
 			ControlDispatcherCh:     controlDispatcherCh,
 			NudgeEffectOwnership:    nudgeEffectSelection.Ownership,
+			NudgeAuthorityBinding:   nudgeEffectSelection.Binding,
 			OnStarted: func() {
 				cr.UpdateCallback(path, func(m *managedCity) {
 					m.started = true
@@ -2537,6 +2546,7 @@ func startManagedCity(
 		return
 	}
 
+	nudgeBindingTransferred = true
 	go func(n, p string, l net.Listener, sock string, origSockInfo os.FileInfo, lk *controllerLockLease) {
 		var result managedCityOwnedPhasesResult
 		runManagedCityWithLease(mc, lk, stderr, func() {

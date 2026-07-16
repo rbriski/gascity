@@ -247,6 +247,7 @@ type CityRuntime struct {
 	nudgeCityPartitionResolver    nudgequeue.TrustedCityPartitionResolver
 	nudgeEffectOwnership          nudgeEffectOwnership
 	nudgeClaimAuthorizer          nudgequeue.NudgeClaimAuthorizer
+	nudgeAuthorityBinding         *productionNudgeAuthorityBinding
 	nudgeKeyInstallRetry          bool
 	nudgeKeyTickerFactory         nudgeKeyPeriodicTickerFactory
 	nudgeKeyRetryTimerFactory     nudgeKeyRetryTimerFactory
@@ -343,6 +344,10 @@ type CityRuntimeParams struct {
 	// NudgeClaimAuthorizer is required only by explicit keyed ownership and is
 	// never synthesized from command data or local store credentials.
 	NudgeClaimAuthorizer nudgequeue.NudgeClaimAuthorizer
+	// NudgeAuthorityBinding retains the exact production repository, authority,
+	// partition, resolver, authorizer, ingress, and command source selected
+	// before readiness. CityRuntime owns and closes it.
+	NudgeAuthorityBinding *productionNudgeAuthorityBinding
 
 	LogPrefix      string // "gc start" or "gc supervisor"; defaults to "gc start"
 	Stdout, Stderr io.Writer
@@ -436,6 +441,15 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
+	nudgePartition := p.NudgeCityPartition
+	nudgeResolver := p.NudgeCityPartitionResolver
+	nudgeAuthorizer := p.NudgeClaimAuthorizer
+	if p.NudgeAuthorityBinding != nil && p.NudgeAuthorityBinding.live() {
+		nudgePartition = p.NudgeAuthorityBinding.partition
+		nudgeResolver = p.NudgeAuthorityBinding.resolver
+		nudgeAuthorizer = p.NudgeAuthorityBinding.claimAuthorizer
+	}
+
 	cr := &CityRuntime{
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
@@ -492,10 +506,11 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		managedDoltOwned:           managedDoltOwned,
 		managedDoltPort:            managedDoltPort,
 		nudgeCommandSourceOpener:   openProductionNudgeCommandSource,
-		nudgeCityPartition:         p.NudgeCityPartition,
-		nudgeCityPartitionResolver: p.NudgeCityPartitionResolver,
+		nudgeCityPartition:         nudgePartition,
+		nudgeCityPartitionResolver: nudgeResolver,
 		nudgeEffectOwnership:       p.NudgeEffectOwnership,
-		nudgeClaimAuthorizer:       p.NudgeClaimAuthorizer,
+		nudgeClaimAuthorizer:       nudgeAuthorizer,
+		nudgeAuthorityBinding:      p.NudgeAuthorityBinding,
 		logPrefix:                  logPrefix,
 		stdout:                     p.Stdout,
 		stderr:                     p.Stderr,
@@ -505,6 +520,16 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
 	return cr
+}
+
+// liveNudgeAuthorityBinding returns the retained production authority only
+// while its complete bundle remains open. Callers must still tolerate Close
+// racing after this accessor; binding operations themselves fail closed.
+func (cr *CityRuntime) liveNudgeAuthorityBinding() *productionNudgeAuthorityBinding {
+	if cr == nil || cr.nudgeAuthorityBinding == nil || !cr.nudgeAuthorityBinding.live() {
+		return nil
+	}
+	return cr.nudgeAuthorityBinding
 }
 
 // setControllerState sets the API state for this city. The controller
@@ -1027,17 +1052,28 @@ func (cr *CityRuntime) installNudgeKeyShadow(ctx context.Context) error {
 			return failure
 		}
 	}
-	opener := cr.nudgeCommandSourceOpener
-	if opener == nil {
-		opener = openProductionNudgeCommandSource
+	var source nudgeCommandSource
+	var err error
+	if cr.nudgeAuthorityBinding != nil {
+		binding := cr.liveNudgeAuthorityBinding()
+		if binding == nil {
+			err = errors.Join(errNudgeCommandSourceUnverified, nudgequeue.ErrLocalNudgeAuthorityUnavailable)
+		} else {
+			source = binding.source
+		}
+	} else {
+		opener := cr.nudgeCommandSourceOpener
+		if opener == nil {
+			opener = openProductionNudgeCommandSource
+		}
+		source, err = opener(
+			ctx,
+			cr.cityPath,
+			cr.nudgesBeadStore().Store,
+			cr.nudgeCityPartition,
+			cr.nudgeCityPartitionResolver,
+		)
 	}
-	source, err := opener(
-		ctx,
-		cr.cityPath,
-		cr.nudgesBeadStore().Store,
-		cr.nudgeCityPartition,
-		cr.nudgeCityPartitionResolver,
-	)
 	if err != nil {
 		if errors.Is(err, errNudgeCommandSourceUnverified) {
 			cr.recordNudgeKeyInstallFailure(nil)
@@ -4230,6 +4266,11 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // normal shutdown) — only the first call takes effect.
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
+		if cr.nudgeAuthorityBinding != nil {
+			if err := cr.nudgeAuthorityBinding.Close(); err != nil && cr.stderr != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge authority shutdown: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+		}
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.resolve()

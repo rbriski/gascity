@@ -45,7 +45,11 @@ func reapSourceTerminalWorkflows(stores []beads.Store, stderr io.Writer) int {
 		memberStores := reapStoresExcept(deduped, i)
 		for _, root := range roots {
 			terminal, err := sourceworkflow.WorkflowSourceTerminal(store, root, memberStores...)
-			if err != nil || !terminal {
+			if err != nil {
+				fmt.Fprintf(stderr, "stale-workflow reaper: probing source terminality for %s: %v\n", root.ID, err) //nolint:errcheck // best-effort infra
+				continue
+			}
+			if !terminal {
 				continue
 			}
 			closed, err := sourceworkflow.CloseWorkflowSubtree(store, root.ID)

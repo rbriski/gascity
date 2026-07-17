@@ -19,15 +19,15 @@ import (
 func setupInputConvoyWorkflowCity(t *testing.T) (cityDir, sourceID, convoyID, rootID, childID string) {
 	t.Helper()
 	cityDir = t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[daemon]\nformula_v2 = true\n"+testControlDispatcherAgentTOML("")), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
-	prevCityFlag := cityFlag
-	cityFlag = ""
-	t.Cleanup(func() { cityFlag = prevCityFlag })
+	// City resolution rides the --city flag global and the beads provider is
+	// pinned in city.toml, not GC_CITY/GC_BEADS: process-environment mutation
+	// in untagged cmd/gc tests is capped by the resourcecensus ratchet.
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = cityDir, ""
+	t.Cleanup(func() { cityFlag, rigFlag = prevCityFlag, prevRigFlag })
 
 	store, err := openStoreAtForCity(cityDir, cityDir)
 	if err != nil {

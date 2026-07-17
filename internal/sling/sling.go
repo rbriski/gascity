@@ -996,17 +996,58 @@ func resolveScopeRoot(cityPath, storePath string) string {
 //  2. DefaultBranch recorded on the bead's rig in city.toml (set by gc rig add)
 //  3. DefaultBranch recorded on the agent's rig in city.toml
 //  4. Live probe via deps.Branches.DefaultBranch (git symbolic-ref origin/HEAD)
+//
+// Step 4 follows the remote's HEAD, which on a local non-bare origin is
+// whatever branch that working copy has checked out — not necessarily the
+// project mainline. base_branch injection therefore goes through
+// buildSlingFormulaVars, which applies the probe only when the formula
+// declares no usable base_branch default of its own (ga-3j9).
 func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) string {
+	if branch := slingConfiguredTargetBranch(beadID, deps, a); branch != "" {
+		return branch
+	}
+	return slingProbedDefaultBranch(beadID, deps, a)
+}
+
+// slingConfiguredTargetBranch resolves the explicitly configured target
+// branch: metadata.target on the work bead (walking its parent/convoy
+// chain), then the DefaultBranch recorded on the bead's or agent's rig in
+// city.toml. Returns "" when nothing is configured.
+func slingConfiguredTargetBranch(beadID string, deps SlingDeps, a config.Agent) string {
 	if target := BeadMetadataTarget(deps.Store, beadID); target != "" {
 		return target
 	}
-	if branch := rigStoredDefaultBranch(deps.Cfg, beadID, a); branch != "" {
-		return branch
+	return rigStoredDefaultBranch(deps.Cfg, beadID, a)
+}
+
+// slingProbedDefaultBranch runs the live origin-HEAD probe against the
+// bead/agent's repo directory. Returns "" when no resolver is wired.
+func slingProbedDefaultBranch(beadID string, deps SlingDeps, a config.Agent) string {
+	if deps.Branches == nil {
+		return ""
 	}
-	if deps.Branches != nil {
-		return deps.Branches.DefaultBranch(SlingFormulaRepoDir(beadID, deps, a))
+	return deps.Branches.DefaultBranch(SlingFormulaRepoDir(beadID, deps, a))
+}
+
+// formulaDeclaresDefault reports whether the named formula — after resolving
+// its extends chain — declares varName with a non-empty default. Load or
+// resolve failures report false so var injection falls back to the legacy
+// probe behavior and the real error surfaces at compile time.
+func formulaDeclaresDefault(formulaName string, searchPaths []string, varName string) bool {
+	if strings.TrimSpace(formulaName) == "" {
+		return false
 	}
-	return ""
+	parser := formula.NewParser(searchPaths...).SetSource(formula.SourceFromEnv())
+	f, err := parser.LoadByName(formulaName)
+	if err != nil {
+		return false
+	}
+	resolved, err := parser.Resolve(f)
+	if err != nil {
+		return false
+	}
+	def, ok := resolved.Vars[varName]
+	return ok && def != nil && def.Default != nil && strings.TrimSpace(*def.Default) != ""
 }
 
 // rigStoredDefaultBranch returns the DefaultBranch recorded on the rig the
@@ -1081,12 +1122,21 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	addRoutingVar("binding_name", a.BindingName)
 	addRoutingVar("binding_prefix", a.BindingPrefix())
 
-	autoBranch := SlingFormulaTargetBranch(beadID, deps, a)
 	if SlingFormulaUsesBaseBranch(formulaName) {
-		addVar("base_branch", autoBranch)
+		// The rendered workflow base_branch is authoritative for workspace
+		// setup: inject the live origin-HEAD probe only when neither the
+		// work bead, the rig config, nor the formula itself configures a
+		// base branch. On rigs cloned from a local non-bare origin the
+		// probe follows that origin's checked-out branch, which silently
+		// overrode a formula-declared default (ga-3j9).
+		branch := slingConfiguredTargetBranch(beadID, deps, a)
+		if branch == "" && !formulaDeclaresDefault(formulaName, SlingFormulaSearchPaths(deps, a), "base_branch") {
+			branch = slingProbedDefaultBranch(beadID, deps, a)
+		}
+		addVar("base_branch", branch)
 	}
 	if SlingFormulaUsesTargetBranch(formulaName) {
-		addVar("target_branch", autoBranch)
+		addVar("target_branch", SlingFormulaTargetBranch(beadID, deps, a))
 	}
 
 	return vars

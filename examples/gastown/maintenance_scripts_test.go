@@ -10354,10 +10354,14 @@ func TestPruneBranchesNoOpWhenNoGcBranches(t *testing.T) {
 const wispTimestampLayout = "2006-01-02T15:04:05"
 
 // wispCompactEnv installs a `bd` stub that returns the supplied beadsJSON on
-// `bd list --json --all -n 0` and logs all other bd subcommands to BD_LOG.
-// BD_LOG is pre-created empty so skip-path tests can still assert on its
-// (empty) contents. TZ=UTC is pinned for cross-platform date parsing — see
-// wispTimestampLayout. jq is whatever is on PATH.
+// `bd query ephemeral=true --json --all -n 0` and logs mutation subcommands to
+// BD_LOG. `bd list` succeeds with an empty array — mirroring the real binary,
+// which never returns ephemeral beads from `list` even with --all (ga-u0o) —
+// so a regression back to list-based wisp discovery sees zero wisps and each
+// test's action assertions fail. BD_LOG is pre-created empty so skip-path
+// tests can still assert on its (empty) contents. TZ=UTC is pinned for
+// cross-platform date parsing — see wispTimestampLayout. jq is whatever is on
+// PATH.
 func wispCompactEnv(t *testing.T, beadsJSON string) (bdLog string, env map[string]string) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -10369,23 +10373,27 @@ func wispCompactEnv(t *testing.T, beadsJSON string) (bdLog string, env map[strin
 	stubPath := filepath.Join(binDir, "bd")
 	// Stub fails fast on any subcommand or flag shape the script doesn't
 	// currently use. This pins the script's bd contract — a regression that
-	// dropped `--json` or `--all` from `bd list` would otherwise silently
-	// pass because cat would still emit valid JSON.
+	// dropped `--json`, `--all`, or the ephemeral filter from `bd query`
+	// would otherwise silently pass because cat would still emit valid JSON.
 	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
 case "$1" in
-  list)
+  query)
     case "$*" in
-      *"--json"*"--all"*"-n 0"*)
+      *"ephemeral=true"*"--json"*"--all"*"-n 0"*)
         cat <<'EOF'
 %s
 EOF
         exit 0
         ;;
       *)
-        echo "bd list called with unexpected args: $*" >&2
+        echo "bd query called with unexpected args: $*" >&2
         exit 2
         ;;
     esac
+    ;;
+  list)
+    echo "[]"
+    exit 0
     ;;
   update|comment|delete)
     printf '%%s\n' "$*" >> "$BD_LOG"
@@ -10565,6 +10573,66 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 	}
 }
 
+// TestWispCompactCompactsWispsInvisibleToBdList pins the ephemeral-discovery
+// regression from ga-u0o: the real `bd list` never returns ephemeral beads —
+// even with --all — so list-based discovery sees an empty array while the
+// wisps it should compact sit unreached in the ephemeral tier (boombox repro
+// bb-wisp-2ii). The stub reproduces that split faithfully: `bd list` succeeds
+// with [] while `bd query` returns an expired closed wisp. The script must
+// act on the query result; a regression back to list-based discovery sees
+// zero wisps and the delete assertion below fails.
+func TestWispCompactCompactsWispsInvisibleToBdList(t *testing.T) {
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.WriteFile(bdLog, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(bd log): %v", err)
+	}
+
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beadsJSON := fmt.Sprintf(`[
+  {"id":"ga-wisp-hidden","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL)
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$BD_LOG"
+case "$1" in
+  list)
+    echo "[]"
+    exit 0
+    ;;
+  query)
+    cat <<'EOF'
+%s
+EOF
+    exit 0
+    ;;
+esac
+exit 0
+`, beadsJSON))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+
+	env := map[string]string{
+		"BD_LOG":       bdLog,
+		"GC_CITY":      t.TempDir(),
+		"GC_CITY_PATH": t.TempDir(),
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"TZ":           "UTC",
+	}
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "query ephemeral=true") {
+		t.Fatalf("wisp discovery must use the ephemeral-aware `bd query`; bd log:\n%s", s)
+	}
+	if !strings.Contains(s, "delete ga-wisp-hidden --force") {
+		t.Fatalf("expired wisp invisible to `bd list` must still be compacted via `bd query`; bd log:\n%s", s)
+	}
+}
+
 // crossRigDepsEnv installs a `bd` stub that handles three subcommand shapes:
 //   - `bd list --status=closed --closed-after=... --json` → returns closedJSON
 //   - `bd dep list <id> --direction=up --type=blocks --json` → returns depsJSON
@@ -10740,7 +10808,7 @@ func TestWispCompactReportsNonZeroCounters(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$BD_LOG"
 case "$1 $2" in
-  "list --json")
+  "query ephemeral=true")
     cat <<'JSON'
 %s
 JSON
@@ -10769,8 +10837,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(logData), "list --json --all -n 0") {
-		t.Fatalf("bd list call not observed:\n%s", logData)
+	if !strings.Contains(string(logData), "query ephemeral=true --json --all -n 0") {
+		t.Fatalf("ephemeral-aware bd query call not observed:\n%s", logData)
 	}
 
 	want := "wisp-compact: promoted=1 deleted=2 skipped=1"
@@ -10793,7 +10861,7 @@ func TestWispCompactBSDDateZFallbackUsesUTC(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$BD_LOG"
 case "$1 $2" in
-  "list --json")
+  "query ephemeral=true")
     cat <<'JSON'
 %s
 JSON

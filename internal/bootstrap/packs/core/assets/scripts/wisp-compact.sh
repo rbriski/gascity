@@ -23,8 +23,13 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CITY="${GC_CITY:-.}"
 
-# Get all ephemeral beads.
-ALL=$(gc bd list --json --all -n 0 2>/dev/null) || exit 0
+# Get all ephemeral beads. `gc bd list` never returns ephemeral rows — they
+# live in the wisps tier, which list excludes even with --all — so discovery
+# MUST go through the ephemeral-aware `gc bd query` (ga-u0o). --all includes
+# closed wisps (the delete arm's candidates); -n 0 lifts query's default
+# 50-row limit. The jq filter is defense-in-depth should query ever return
+# non-ephemeral rows.
+ALL=$(gc bd query "ephemeral=true" --json --all -n 0 2>/dev/null) || exit 0
 EPHEMERALS=$(echo "$ALL" | jq '[.[] | select(.ephemeral == true)]' 2>/dev/null) || exit 0
 
 if [ -z "$EPHEMERALS" ] || [ "$EPHEMERALS" = "[]" ]; then
@@ -40,8 +45,8 @@ SKIPPED=0
 # (instead of piping into the loop) preserves the original pipefail
 # fail-loud on jq error AND keeps PROMOTED/DELETED/SKIPPED in the parent
 # shell so they survive to the summary echo below. EPHEMERALS is
-# pre-validated as a non-empty array on lines 22-27, so BEADS is
-# guaranteed non-empty here.
+# pre-validated above as a non-empty array, so BEADS is guaranteed
+# non-empty here.
 BEADS=$(echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null)
 while IFS= read -r bead; do
     id=$(echo "$bead" | jq -r '.id')

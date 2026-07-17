@@ -8,7 +8,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphv2"
 )
 
@@ -145,7 +144,6 @@ default = ""
 // effective runtime vars — the values {{base_branch}} renders from — must
 // say main.
 func TestGraphV2EffectiveVarsHonorFormulaBaseBranchDefault(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
 	content := `formula = "mol-polecat-work"
 version = 2

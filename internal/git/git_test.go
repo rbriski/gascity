@@ -274,6 +274,34 @@ func TestDefaultBranch_OriginHEADUnsetWithMasterRef(t *testing.T) {
 	}
 }
 
+// TestDefaultBranch_LocalNonBareOriginFollowsCheckedOutBranch pins the
+// remote-HEAD discovery behavior behind ga-3j9: cloning a local NON-BARE
+// origin wires refs/remotes/origin/HEAD to whatever branch the origin
+// working copy happens to have checked out — not to any notion of the
+// project mainline. Downstream branch selection (sling's base_branch
+// injection) must therefore treat this probe as a last-resort fallback:
+// a workflow-declared base_branch outranks it.
+func TestDefaultBranch_LocalNonBareOriginFollowsCheckedOutBranch(t *testing.T) {
+	origin := initTestRepo(t)
+	// Pin the mainline name regardless of the host's init.defaultBranch,
+	// then leave the origin checked out on a scratch branch — the shape of
+	// a disposable local-origin canary rig.
+	runGit(t, origin, "checkout", "-B", "main")
+	runGit(t, origin, "checkout", "-b", "scratch")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", origin, ".")
+
+	g := New(clone)
+	got, err := g.DefaultBranch()
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "scratch" {
+		t.Errorf("DefaultBranch() = %q, want %q (origin/HEAD follows the non-bare origin's checked-out branch)", got, "scratch")
+	}
+}
+
 func TestProbeDefaultBranch_FromOriginHEAD(t *testing.T) {
 	bare := t.TempDir()
 	runGit(t, bare, "init", "--bare")

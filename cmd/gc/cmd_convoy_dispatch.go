@@ -1552,6 +1552,17 @@ func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sour
 			if err != nil {
 				return err
 			}
+			// Pool-routed graph.v2 roots clear gc.source_bead_id, so ListLiveRoots
+			// (which keys on gc.source_bead_id) never sees them; their only durable
+			// link back to the work issue is gc.input_convoy_id. Discover them from
+			// the same id — whether it is the input convoy itself or a work bead the
+			// input convoy tracks — so `gc workflow delete-source` can finalize a
+			// graph.v2 orphan instead of reporting matched_roots=0 (ga-tum).
+			convoyRoots, err := sourceworkflow.ListLiveRootsByInputConvoy(info.store, currentSourceID)
+			if err != nil {
+				return err
+			}
+			roots = uniqueBeads(append(roots, convoyRoots...))
 			if len(roots) > 0 {
 				beadSet := make([]beads.Bead, 0, len(roots))
 				for _, root := range roots {

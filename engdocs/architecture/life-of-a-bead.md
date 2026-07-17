@@ -307,17 +307,33 @@ the bead as a side effect of reading (marking it "read").
 
 ### Wisp garbage collection
 
-The controller runs a periodic wisp GC for closed molecules.
-`memoryWispGC.runGC()` in `cmd/gc/wisp_gc.go` (line 58):
+The controller runs a periodic wisp GC — `memoryWispGC.runGC()` in
+`cmd/gc/wisp_gc.go` — over the graph-class store. Ephemeral wisps live
+in a separate storage tier that reads must opt into via
+`ListQuery.TierMode`, so every GC enumeration passes an explicit tier
+(`TierBoth` for the root universe, `TierWisps` for orphaned
+descendants); a plain default-tier list never sees them. Each sweep:
 
-1. Lists closed molecules: `bd list --json --limit=0 --status=closed --type=molecule`
-2. Compares each molecule's CreatedAt against a TTL cutoff
-3. Deletes expired ones: `bd delete <id> --force`
+1. Enumerates the full root universe (`wispGCRootSelectors`: v1
+   `type=molecule` roots, `gc.kind=wisp` roots, and graph.v2 workflow
+   roots) with tier-aware store `List` queries
+2. Closes abandoned open roots whose subtree is terminal and idle past
+   TTL (dry-run by default; `GC_WISP_GC_CLOSE_ABANDONED` enforces)
+3. Purges closed roots older than the TTL, deleting each root's full
+   ownership closure
+4. Reaps orphaned closed wisp-tier descendants whose root is gone or
+   terminal (dry-run by default; `GC_WISP_GC_REAP_ORPHANS` enforces)
 
 The GC interval and TTL are configured via `[daemon]` config
-(`wisp_gc_interval` and `wisp_ttl`). `newWispGC()` returns nil if either
-is zero (disabled). The controller nil-guards before calling
-`shouldRun()`.
+(`wisp_gc_interval` and `wisp_ttl`); `[mail] retention_ttl` enables the
+read-message retention arm. `newWispGC()` returns nil when disabled.
+The controller nil-guards before calling `shouldRun()`.
+
+Shell-side maintenance must respect the same tier boundary: `bd list`
+excludes ephemeral beads even with `--all`, so wisp discovery from
+scripts goes through `bd query "ephemeral=true"` (see the core pack's
+`wisp-compact.sh`). A list-based sweep is silently blind to every wisp
+it is meant to reap.
 
 ### BdStore.Purge()
 

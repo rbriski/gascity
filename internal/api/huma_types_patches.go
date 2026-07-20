@@ -261,9 +261,10 @@ type StatusSessionCountsDetail struct {
 type StatusStoreHealth struct {
 	Path         string  `json:"path" doc:"On-disk path of the Dolt store."`
 	SizeBytes    int64   `json:"size_bytes" doc:"Total bytes of the store directory."`
-	LiveRows     int     `json:"live_rows" doc:"Live bead row count."`
-	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per row."`
-	Warning      bool    `json:"warning" doc:"True when maintenance is overdue."`
+	LiveRows     int     `json:"live_rows" doc:"Live bead row count. Meaningless when live_rows_ok is false."`
+	LiveRowsOK   bool    `json:"live_rows_ok" doc:"False when the live row count failed, timed out, or no store was available; live_rows, ratio_mb_per_row, and warning are not meaningful in that case."`
+	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per row. Left at 0 when live_rows_ok is false."`
+	Warning      bool    `json:"warning" doc:"True when maintenance is overdue. Always false when live_rows_ok is false."`
 	ThresholdMB  float64 `json:"threshold_mb_per_row" doc:"Ratio threshold; a ratio above this trips warning."`
 	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run."`
 	LastGCStatus string  `json:"last_gc_status,omitempty" doc:"Status of last maintenance run ('success' or 'failed')."`

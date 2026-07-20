@@ -32,6 +32,7 @@ type Health struct {
 	Path         string
 	SizeBytes    int64
 	LiveRows     int
+	LiveRowsOK   bool
 	RatioMB      float64
 	Warning      bool
 	ThresholdMB  float64
@@ -53,14 +54,23 @@ func StorePath(cityPath string) string {
 
 // Compute builds a Health from measured inputs. Pure function — all
 // I/O is performed by the caller via WalkSize and LastMaintenance.
-func Compute(cityPath string, sizeBytes int64, liveRows int, lastGCAt time.Time, lastGCStatus string) Health {
+// liveRowsOK reports whether liveRows is a real count; when false (the
+// count failed, timed out, or no store was available), liveRows is
+// treated as unknown rather than a meaningful zero: RatioMB stays 0 and
+// Warning is never set, since size_bytes > threshold * 0 would flag any
+// non-empty store as overdue purely because the denominator is missing.
+func Compute(cityPath string, sizeBytes int64, liveRows int, liveRowsOK bool, lastGCAt time.Time, lastGCStatus string) Health {
 	h := Health{
 		Path:         StorePath(cityPath),
 		SizeBytes:    sizeBytes,
 		LiveRows:     liveRows,
+		LiveRowsOK:   liveRowsOK,
 		ThresholdMB:  DefaultThresholdMB,
 		LastGCAt:     lastGCAt,
 		LastGCStatus: lastGCStatus,
+	}
+	if !liveRowsOK {
+		return h
 	}
 	if liveRows > 0 {
 		h.RatioMB = float64(sizeBytes) / (bytesPerMB * float64(liveRows))

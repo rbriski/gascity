@@ -97,6 +97,7 @@ type StoreHealth struct {
 	Path         string  `json:"path"`
 	SizeBytes    int64   `json:"size_bytes"`
 	LiveRows     int     `json:"live_rows"`
+	LiveRowsOK   bool    `json:"live_rows_ok"`
 	RatioMB      float64 `json:"ratio_mb_per_row"`
 	Warning      bool    `json:"warning"`
 	ThresholdMB  float64 `json:"threshold_mb_per_row"`
@@ -325,6 +326,7 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 			Path:         v.StoreHealth.Path,
 			SizeBytes:    v.StoreHealth.SizeBytes,
 			LiveRows:     v.StoreHealth.LiveRows,
+			LiveRowsOK:   v.StoreHealth.LiveRowsOK,
 			RatioMB:      v.StoreHealth.RatioMB,
 			Warning:      v.StoreHealth.Warning,
 			ThresholdMB:  v.StoreHealth.ThresholdMB,

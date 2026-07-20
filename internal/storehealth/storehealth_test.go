@@ -38,7 +38,7 @@ func TestStorePath_DoltliteMetadata(t *testing.T) {
 func TestComputeWarningHighRatio(t *testing.T) {
 	// 11.2 GB (decimal) / 221 rows = ~50.68 MB/row, warning.
 	const size = 11_200_000_000
-	h := Compute("/c", size, 221, time.Time{}, "")
+	h := Compute("/c", size, 221, true, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false, want true for size=%d rows=221", size)
 	}
@@ -56,7 +56,7 @@ func TestComputeWarningHighRatio(t *testing.T) {
 func TestComputeNoWarningLowRatio(t *testing.T) {
 	// 50 MB / 221 rows = ~0.23 MB/row, no warning.
 	const size = 50_000_000
-	h := Compute("/c", size, 221, time.Time{}, "")
+	h := Compute("/c", size, 221, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for size=%d rows=221", size)
 	}
@@ -69,7 +69,7 @@ func TestComputeZeroRowsNonZeroBytesWarns(t *testing.T) {
 	// Degenerate case: bytes on disk with zero live rows. The literal
 	// threshold expression (size > 1M * rows) warns; the ratio is left
 	// at its zero value since dividing by zero is meaningless.
-	h := Compute("/c", 1_000_001, 0, time.Time{}, "")
+	h := Compute("/c", 1_000_001, 0, true, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false, want true when bytes > 0 and rows = 0")
 	}
@@ -79,9 +79,26 @@ func TestComputeZeroRowsNonZeroBytesWarns(t *testing.T) {
 }
 
 func TestComputeZeroEverything(t *testing.T) {
-	h := Compute("/c", 0, 0, time.Time{}, "")
+	h := Compute("/c", 0, 0, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for all-zero inputs")
+	}
+}
+
+func TestComputeUnavailableRowCountNeverWarns(t *testing.T) {
+	// Regression for ga-72a: a failed/timed-out live-row count must not
+	// be treated as a meaningful zero. Without this guard, size > 1MB*0
+	// flags any non-empty store as maintenance overdue purely because
+	// the denominator is missing, not because it's actually overdue.
+	h := Compute("/c", 1_500_000_000, 0, false, time.Time{}, "")
+	if h.Warning {
+		t.Fatalf("Warning = true, want false when live row count is unavailable")
+	}
+	if h.LiveRowsOK {
+		t.Fatalf("LiveRowsOK = true, want false")
+	}
+	if h.RatioMB != 0 {
+		t.Fatalf("RatioMB = %v, want 0 when live row count is unavailable", h.RatioMB)
 	}
 }
 
@@ -89,11 +106,11 @@ func TestComputeBoundary(t *testing.T) {
 	// Exactly at the threshold: size = 1M * rows should NOT warn
 	// (the inequality is strict ">", not ">=").
 	const rows = 10
-	h := Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows), rows, time.Time{}, "")
+	h := Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows), rows, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true at exact threshold, want false")
 	}
-	h = Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows)+1, rows, time.Time{}, "")
+	h = Compute("/c", int64(DefaultThresholdMB*bytesPerMB)*int64(rows)+1, rows, true, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false one byte over threshold, want true")
 	}
@@ -101,7 +118,7 @@ func TestComputeBoundary(t *testing.T) {
 
 func TestComputeCarriesLastGC(t *testing.T) {
 	ts := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	h := Compute("/c", 1, 1, ts, "success")
+	h := Compute("/c", 1, 1, true, ts, "success")
 	if !h.LastGCAt.Equal(ts) {
 		t.Fatalf("LastGCAt = %v, want %v", h.LastGCAt, ts)
 	}

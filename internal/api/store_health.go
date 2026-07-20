@@ -54,9 +54,9 @@ func (s *Server) computeStoreHealth(ctx context.Context) *StatusStoreHealth {
 	// context/timeout through WalkSize is deferred until it shows up
 	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
-	rows := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
+	rows, rowsOK := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
 	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
-	h := storehealth.Compute(cityPath, size, rows, lastAt, lastStatus)
+	h := storehealth.Compute(cityPath, size, rows, rowsOK, lastAt, lastStatus)
 	return statusStoreHealthFromDomain(h)
 }
 
@@ -67,6 +67,7 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 		Path:        h.Path,
 		SizeBytes:   h.SizeBytes,
 		LiveRows:    h.LiveRows,
+		LiveRowsOK:  h.LiveRowsOK,
 		RatioMB:     h.RatioMB,
 		Warning:     h.Warning,
 		ThresholdMB: h.ThresholdMB,
@@ -78,21 +79,22 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 	return out
 }
 
-// countBeadStoreRows returns the number of beads in store. Zero when
-// store is nil or the scan fails — the ratio is best-effort. The
-// closed-inclusive query is never answerable from the in-memory cache,
-// so this path always hydrates; counting closed history without
+// countBeadStoreRows returns the number of beads in store and whether that
+// count is trustworthy. ok is false when store is nil or the scan fails —
+// callers must not treat the accompanying 0 as a real row count in that
+// case. The closed-inclusive query is never answerable from the in-memory
+// cache, so this path always hydrates; counting closed history without
 // hydration needs backend support (#1896 follow-up). Because it always
 // hydrates, this is the store-health block's exposure to ga-cdmx6x's
 // bd-child leak; statusListStoreWithTimeout's state.ScopedStoreLike wiring
 // covers it the same way as the work-count fallback.
-func countBeadStoreRows(ctx context.Context, state State, store beads.Store) int {
+func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (rows int, ok bool) {
 	if store == nil {
-		return 0
+		return 0, false
 	}
 	list, err := statusListStoreWithTimeout(ctx, state, store, beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return len(list)
+	return len(list), true
 }

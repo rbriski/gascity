@@ -3792,13 +3792,16 @@ type StatusStoreHealth struct {
 	// LastGcStatus Status of last maintenance run ('success' or 'failed').
 	LastGcStatus *string `json:"last_gc_status,omitempty"`
 
-	// LiveRows Live bead row count.
+	// LiveRows Live bead row count. Meaningless when live_rows_ok is false.
 	LiveRows int64 `json:"live_rows"`
+
+	// LiveRowsOk False when the live row count failed, timed out, or no store was available; live_rows, ratio_mb_per_row, and warning are not meaningful in that case.
+	LiveRowsOk bool `json:"live_rows_ok"`
 
 	// Path On-disk path of the Dolt store.
 	Path string `json:"path"`
 
-	// RatioMbPerRow Derived megabytes per row.
+	// RatioMbPerRow Derived megabytes per row. Left at 0 when live_rows_ok is false.
 	RatioMbPerRow float64 `json:"ratio_mb_per_row"`
 
 	// SizeBytes Total bytes of the store directory.
@@ -3807,7 +3810,7 @@ type StatusStoreHealth struct {
 	// ThresholdMbPerRow Ratio threshold; a ratio above this trips warning.
 	ThresholdMbPerRow float64 `json:"threshold_mb_per_row"`
 
-	// Warning True when maintenance is overdue.
+	// Warning True when maintenance is overdue. Always false when live_rows_ok is false.
 	Warning bool `json:"warning"`
 }
 

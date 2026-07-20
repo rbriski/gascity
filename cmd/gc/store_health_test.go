@@ -33,7 +33,7 @@ func TestStoreHealthSIBytes(t *testing.T) {
 }
 
 func TestStoreHealthFromInputsOmitsLastGCWhenZero(t *testing.T) {
-	h := storeHealthFromInputs("/c", 1_000_000, 1, time.Time{}, "")
+	h := storeHealthFromInputs("/c", 1_000_000, 1, true, time.Time{}, "")
 	if h.LastGCAt != "" {
 		t.Errorf("LastGCAt = %q, want empty", h.LastGCAt)
 	}
@@ -52,7 +52,7 @@ func TestStoreHealthFromInputsOmitsLastGCWhenZero(t *testing.T) {
 
 func TestStoreHealthFromInputsFormatsLastGCAsRFC3339(t *testing.T) {
 	ts := time.Date(2026, 4, 1, 3, 15, 30, 0, time.UTC)
-	h := storeHealthFromInputs("/c", 0, 0, ts, "success")
+	h := storeHealthFromInputs("/c", 0, 0, true, ts, "success")
 	if h.LastGCAt != "2026-04-01T03:15:30Z" {
 		t.Errorf("LastGCAt = %q, want 2026-04-01T03:15:30Z", h.LastGCAt)
 	}
@@ -70,7 +70,7 @@ func TestRenderStoreHealthBlockNil(t *testing.T) {
 }
 
 func TestRenderStoreHealthBlockWarning(t *testing.T) {
-	h := storeHealthFromInputs("/c", 11_200_000_000, 221, time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC), "success")
+	h := storeHealthFromInputs("/c", 11_200_000_000, 221, true, time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC), "success")
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, h)
 
@@ -91,8 +91,29 @@ func TestRenderStoreHealthBlockWarning(t *testing.T) {
 	}
 }
 
+func TestRenderStoreHealthBlockUnavailableRowCountNeverWarns(t *testing.T) {
+	// Regression for ga-72a: a 1.5 GB store with a failed/timed-out live
+	// row count must render "unavailable", not a meaningful-looking
+	// "Live rows: 0" / "Ratio: 0.0 MB/row" that misleads a reader into
+	// thinking maintenance is overdue.
+	h := storeHealthFromInputs("/c", 1_500_000_000, 0, false, time.Time{}, "")
+	var buf bytes.Buffer
+	renderStoreHealthBlock(&buf, h)
+
+	out := buf.String()
+	if !strings.Contains(out, "Live rows:   unavailable") {
+		t.Errorf("output missing unavailable live rows line:\n%s", out)
+	}
+	if strings.Contains(out, "0.0 MB/row") {
+		t.Errorf("output printed a meaningless 0.0 MB/row ratio:\n%s", out)
+	}
+	if strings.Contains(out, "⚠") || strings.Contains(out, "maintenance overdue") {
+		t.Errorf("output warned of overdue maintenance from an unavailable row count:\n%s", out)
+	}
+}
+
 func TestRenderStoreHealthBlockNoWarning(t *testing.T) {
-	h := storeHealthFromInputs("/c", 50_000_000, 221, time.Time{}, "")
+	h := storeHealthFromInputs("/c", 50_000_000, 221, true, time.Time{}, "")
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, h)
 
@@ -109,7 +130,11 @@ func TestRenderStoreHealthBlockNoWarning(t *testing.T) {
 }
 
 func TestLiveRowCountNilStore(t *testing.T) {
-	if got := liveRowCount(nil); got != 0 {
+	got, ok := liveRowCount(nil)
+	if ok {
+		t.Fatalf("liveRowCount(nil) ok = true, want false")
+	}
+	if got != 0 {
 		t.Fatalf("liveRowCount(nil) = %d, want 0", got)
 	}
 }
@@ -121,7 +146,11 @@ func TestLiveRowCountCountsBeads(t *testing.T) {
 			t.Fatalf("Create: %v", err)
 		}
 	}
-	if got := liveRowCount(store); got != 3 {
+	got, ok := liveRowCount(store)
+	if !ok {
+		t.Fatalf("liveRowCount ok = false, want true")
+	}
+	if got != 3 {
 		t.Fatalf("liveRowCount = %d, want 3", got)
 	}
 }
@@ -140,7 +169,11 @@ func TestLiveRowCountIncludesClosedBeads(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if got := liveRowCount(store); got != 2 {
+	got, ok := liveRowCount(store)
+	if !ok {
+		t.Fatalf("liveRowCount ok = false, want true")
+	}
+	if got != 2 {
 		t.Fatalf("liveRowCount = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
 	}
 }

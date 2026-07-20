@@ -111,6 +111,7 @@ type StatusStoreHealthView struct {
 	Path         string
 	SizeBytes    int64
 	LiveRows     int
+	LiveRowsOK   bool
 	RatioMB      float64
 	Warning      bool
 	ThresholdMB  float64

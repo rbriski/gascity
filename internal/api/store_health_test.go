@@ -186,7 +186,11 @@ func TestComputeStoreHealthEmptyCityPath(t *testing.T) {
 }
 
 func TestCountBeadStoreRowsNil(t *testing.T) {
-	if got := countBeadStoreRows(context.Background(), newFakeState(t), nil); got != 0 {
+	got, ok := countBeadStoreRows(context.Background(), newFakeState(t), nil)
+	if ok {
+		t.Fatalf("countBeadStoreRows(nil) ok = true, want false")
+	}
+	if got != 0 {
 		t.Fatalf("countBeadStoreRows(nil) = %d, want 0", got)
 	}
 }
@@ -204,7 +208,11 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got := countBeadStoreRows(context.Background(), newFakeState(t), store); got != 2 {
+	got, ok := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if !ok {
+		t.Fatalf("countBeadStoreRows ok = false, want true")
+	}
+	if got != 2 {
 		t.Fatalf("countBeadStoreRows = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
 	}
 }

@@ -70,6 +70,7 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 			Path:        sh.Path,
 			SizeBytes:   sh.SizeBytes,
 			LiveRows:    int(sh.LiveRows),
+			LiveRowsOK:  sh.LiveRowsOk,
 			RatioMB:     sh.RatioMbPerRow,
 			Warning:     sh.Warning,
 			ThresholdMB: sh.ThresholdMbPerRow,

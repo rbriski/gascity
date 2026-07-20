@@ -45,9 +45,12 @@ func TestLiveRowCountBoundsSlowScan(t *testing.T) {
 	}
 
 	start := time.Now()
-	got := liveRowCount(store)
+	got, ok := liveRowCount(store)
 	elapsed := time.Since(start)
 
+	if ok {
+		t.Fatalf("liveRowCount ok = true, want false when the scan times out")
+	}
 	if got != 0 {
 		t.Fatalf("liveRowCount = %d, want 0 when the scan times out", got)
 	}
@@ -72,7 +75,11 @@ func TestLiveRowCountUsesCounterFastPath(t *testing.T) {
 		},
 	}
 
-	if got := liveRowCount(store); got != 42 {
+	got, ok := liveRowCount(store)
+	if !ok {
+		t.Fatalf("liveRowCount ok = false, want true from the Counter fast path")
+	}
+	if got != 42 {
 		t.Fatalf("liveRowCount = %d, want 42 from the Counter fast path", got)
 	}
 }

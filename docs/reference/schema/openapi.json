@@ -8437,16 +8437,20 @@
             "type": "string"
           },
           "live_rows": {
-            "description": "Live bead row count.",
+            "description": "Live bead row count. Meaningless when live_rows_ok is false.",
             "format": "int64",
             "type": "integer"
+          },
+          "live_rows_ok": {
+            "description": "False when the live row count failed, timed out, or no store was available; live_rows, ratio_mb_per_row, and warning are not meaningful in that case.",
+            "type": "boolean"
           },
           "path": {
             "description": "On-disk path of the Dolt store.",
             "type": "string"
           },
           "ratio_mb_per_row": {
-            "description": "Derived megabytes per row.",
+            "description": "Derived megabytes per row. Left at 0 when live_rows_ok is false.",
             "format": "double",
             "type": "number"
           },
@@ -8461,7 +8465,7 @@
             "type": "number"
           },
           "warning": {
-            "description": "True when maintenance is overdue.",
+            "description": "True when maintenance is overdue. Always false when live_rows_ok is false.",
             "type": "boolean"
           }
         },
@@ -8469,6 +8473,7 @@
           "path",
           "size_bytes",
           "live_rows",
+          "live_rows_ok",
           "ratio_mb_per_row",
           "warning",
           "threshold_mb_per_row"

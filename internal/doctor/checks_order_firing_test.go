@@ -637,3 +637,61 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 		t.Fatalf("latest = %v, want %v (newer order-run history)", got, freshRun)
 	}
 }
+
+func TestLatestOrderFiredAt_LastRunHangBoundedByTimeout(t *testing.T) {
+	// Regression for ga-b4x: a wedged Dolt connection can block the
+	// underlying store read indefinitely even when gc dolt health reports
+	// the server reachable. latestOrderFiredAt must fail the single order
+	// fast instead of hanging the whole order-firing-current check.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected := 4 * time.Hour
+	order := orders.Order{Name: "mol-dog-stale-db", Trigger: "cron"}
+	staleEvent := now.Add(-13 * time.Hour)
+	evts := []events.Event{
+		{Type: events.OrderFired, Subject: order.ScopedName(), Ts: staleEvent},
+	}
+
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	check := &OrderFiringCurrentCheck{
+		lastRun: func(orders.Order) (time.Time, error) {
+			<-unblock // simulates a lookup that never returns
+			return time.Time{}, nil
+		},
+		lastRunTimeout: 20 * time.Millisecond,
+	}
+
+	start := time.Now()
+	_, err := check.latestOrderFiredAt(evts, order, expected, now)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("latestOrderFiredAt returned nil error for a hung lastRun; want a timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want a timeout error", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("latestOrderFiredAt took %s to return for a hung lastRun; want it bounded by lastRunTimeout", elapsed)
+	}
+}
+
+func TestOrderFiringCurrent_LastRunTimeoutDefaultsWhenUnset(t *testing.T) {
+	// WithOrderFiringCurrentLastRunTimeout is optional; NewOrderFiringCurrentCheck
+	// without it must still fall back to orderFiringCurrentDefaultLastRunTimeout
+	// rather than a zero (immediately-firing) timeout.
+	cfg := &config.City{}
+	check := NewOrderFiringCurrentCheck(cfg, t.TempDir(), WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+		return time.Time{}, nil
+	}))
+	if check.lastRunTimeout != 0 {
+		t.Fatalf("lastRunTimeout = %v, want zero-value (resolved to default lazily in boundedLastRun)", check.lastRunTimeout)
+	}
+	got, err := check.boundedLastRun(orders.Order{Name: "x"})
+	if err != nil {
+		t.Fatalf("boundedLastRun returned error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got = %v, want zero time", got)
+	}
+}

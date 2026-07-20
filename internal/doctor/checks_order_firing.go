@@ -20,6 +20,14 @@ const (
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
 )
 
+// orderFiringCurrentDefaultLastRunTimeout bounds a single order-history
+// lookup (c.lastRun) so a wedged Dolt connection fails the one order fast
+// instead of hanging the whole `gc doctor` run. Kept comfortably under the
+// managed Dolt listener's read_timeout (config.DefaultDoltReadTimeoutMillis,
+// 15s) so the client-side bound fires first with a clear, attributable error
+// rather than racing an opaque server-side connection kill.
+const orderFiringCurrentDefaultLastRunTimeout = 5 * time.Second
+
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
 type OrderFiringCurrentLastRunFunc func(order orders.Order) (time.Time, error)
 
@@ -34,12 +42,22 @@ func WithOrderFiringCurrentLastRunFunc(fn OrderFiringCurrentLastRunFunc) OrderFi
 	}
 }
 
+// WithOrderFiringCurrentLastRunTimeout overrides the per-order bound on
+// lastRun lookups (default orderFiringCurrentDefaultLastRunTimeout). Tests
+// use a short override to exercise the timeout path without a real delay.
+func WithOrderFiringCurrentLastRunTimeout(d time.Duration) OrderFiringCurrentOption {
+	return func(c *OrderFiringCurrentCheck) {
+		c.lastRunTimeout = d
+	}
+}
+
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
 type OrderFiringCurrentCheck struct {
-	cfg      *config.City
-	cityPath string
-	clock    func() time.Time
-	lastRun  OrderFiringCurrentLastRunFunc
+	cfg            *config.City
+	cityPath       string
+	clock          func() time.Time
+	lastRun        OrderFiringCurrentLastRunFunc
+	lastRunTimeout time.Duration
 }
 
 // NewOrderFiringCurrentCheck creates a check for cron and cooldown order freshness.
@@ -541,7 +559,7 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order 
 	if !latest.IsZero() && now.Sub(latest) < expected+expected/2 {
 		return latest, nil
 	}
-	runAt, err := c.lastRun(order)
+	runAt, err := c.boundedLastRun(order)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -549,6 +567,37 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order 
 		return runAt, nil
 	}
 	return latest, nil
+}
+
+// boundedLastRun calls c.lastRun with a client-side deadline. c.lastRun's
+// underlying store reads (orders.Store.LastRun -> beads.Store.List) take no
+// context and can block indefinitely on a wedged Dolt connection even when
+// `gc dolt health` reports the server reachable — e.g. a connection the
+// managed listener's read_timeout already reaped server-side, or one stuck
+// behind a lock. Without a bound, one stalled order silently wedges the
+// entire order-firing-current check (and `gc doctor` with it). The lookup
+// keeps running in its goroutine after a timeout fires; the buffered channel
+// lets it exit without leaking once it finally returns.
+func (c *OrderFiringCurrentCheck) boundedLastRun(order orders.Order) (time.Time, error) {
+	timeout := c.lastRunTimeout
+	if timeout <= 0 {
+		timeout = orderFiringCurrentDefaultLastRunTimeout
+	}
+	type lastRunResult struct {
+		at  time.Time
+		err error
+	}
+	ch := make(chan lastRunResult, 1)
+	go func() {
+		at, err := c.lastRun(order)
+		ch <- lastRunResult{at: at, err: err}
+	}()
+	select {
+	case res := <-ch:
+		return res.at, res.err
+	case <-time.After(timeout):
+		return time.Time{}, fmt.Errorf("order history lookup timed out after %s", timeout)
+	}
 }
 
 func latestOrderFiredAt(evts []events.Event, subject string) time.Time {

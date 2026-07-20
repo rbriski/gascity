@@ -292,6 +292,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Assignee address gate (ga-pr8): reject a malformed rig/agent assignee
+	// address (e.g. the short form of a binding-qualified agent) before it
+	// reaches bd, so a bad handoff target fails closed instead of silently
+	// stranding the bead. See bd_assignee_gate.go for scope and rationale.
+	if runAssigneeAddressGate(bdArgs, cfg, stderr) {
+		return 1
+	}
+
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 

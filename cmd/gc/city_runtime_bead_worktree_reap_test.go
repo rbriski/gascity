@@ -79,18 +79,29 @@ func TestCityRuntimeTick_SkipsClosedBeadWorktreeReapWhenDisabled(t *testing.T) {
 // the runtime tick invokes reapClosedBeadWorktrees when
 // DaemonConfig.AutoReapClosedBeadWorktrees is explicitly true.
 //
-// The reaper's skipping log confirms the gate fires. The worktree dir remains
-// because a plain non-git directory is treated as dirty by the safety checks
-// (git status fails → assumes uncommitted work → safe skip).
+// The reaper's skipping log confirms the gate fires. The worktree remains
+// because it has an uncommitted file, so the safety checks refuse removal.
 //
 // Acceptance: ga-xxsd7k.2 — runtime tick records reap_closed_bead_worktrees
 // phase when enabled.
 func TestCityRuntimeTick_AttemptsClosedBeadWorktreeReapWhenEnabled(t *testing.T) {
 	cityPath := t.TempDir()
+	rigRoot := filepath.Join(t.TempDir(), "rig")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, rigRoot, "init")
+	runGit(t, rigRoot, "config", "user.email", "test@test.com")
+	runGit(t, rigRoot, "config", "user.name", "Test")
+	runGit(t, rigRoot, "commit", "--allow-empty", "-m", "init")
 
 	wtDir := filepath.Join(cityPath, ".gc", "worktrees", "mrig", "ga-abc123")
-	if err := os.MkdirAll(wtDir, 0o755); err != nil {
-		t.Fatalf("creating worktree dir: %v", err)
+	if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
+		t.Fatalf("creating worktree parent dir: %v", err)
+	}
+	runGit(t, rigRoot, "worktree", "add", "--detach", wtDir, "HEAD")
+	if err := os.WriteFile(filepath.Join(wtDir, "dirty.txt"), []byte("dirty"), 0o644); err != nil {
+		t.Fatalf("writing dirty file: %v", err)
 	}
 
 	rigStore := beads.NewMemStoreFrom(1, []beads.Bead{{
@@ -102,6 +113,7 @@ func TestCityRuntimeTick_AttemptsClosedBeadWorktreeReapWhenEnabled(t *testing.T)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test", Prefix: "ga"},
 		Daemon:    config.DaemonConfig{AutoReapClosedBeadWorktrees: &enabled},
+		Rigs:      []config.Rig{{Name: "mrig", Path: rigRoot}},
 	}
 
 	cityStore := beads.NewMemStore()

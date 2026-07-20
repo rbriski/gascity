@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,14 +11,27 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
-// reapClosedBeadWorktrees scans per-bead git worktrees under
-// cityPath/.gc/worktrees/<rig>/ and removes any that are associated with a
-// closed bead and pass all safety gates (no uncommitted work, no unpushed
-// commits, no stashes). Named session home directories are never removed.
-// Returns the number of worktrees successfully removed.
+// reapClosedBeadWorktrees scans registered git worktrees for each rig and
+// removes any that are associated with a closed bead and pass all safety
+// gates (no uncommitted work, no unpushed commits, no stashes). Named
+// session home directories are never removed. Returns the number of
+// worktrees successfully removed.
+//
+// Worktrees are discovered via `git worktree list` against each rig's own
+// repo root, not by walking cityPath/.gc/worktrees/<rig>/ one level deep.
+// An agent's work_dir template supplies arbitrary intermediate directory
+// segments between the rig and the per-bead worktree (e.g.
+// rig/polecats/<agent-name>/<bead-id>-slug), so a shallow directory walk
+// misses real worktrees nested below role/agent-name directories — asking
+// git directly is nesting-agnostic and matches the SDK's zero-hardcoded-role
+// rule (this package never assumes a "polecats" or "refinery" path segment).
+// Worktree removal also runs from the rig's repo root: cityPath is a
+// directory that contains per-rig checkouts, never a git repo itself, so
+// `git worktree remove` scoped to cityPath always fails.
 func reapClosedBeadWorktrees(
 	cityPath string,
 	cfg *config.City,
@@ -53,26 +65,37 @@ func reapClosedBeadWorktrees(
 		if store == nil {
 			continue
 		}
-		rigWorktreeDir := filepath.Join(wtRoot, rigName)
-		entries, err := os.ReadDir(rigWorktreeDir)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: reading %s: %v\n", rigWorktreeDir, err) //nolint:errcheck
-			}
+		rigRoot := rigRootForName(rigName, cfg.Rigs)
+		if rigRoot == "" {
 			continue
 		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
+		mainRepo := git.New(rigRoot)
+		if !mainRepo.IsRepo() {
+			continue
+		}
+		worktrees, err := mainRepo.WorktreeList()
+		if err != nil {
+			fmt.Fprintf(stderr, "reapClosedBeadWorktrees: listing worktrees for rig %s: %v\n", rigName, err) //nolint:errcheck
+			continue
+		}
+		for _, wt := range worktrees {
+			worktreePath := wt.Path
+
+			// Scope gate: only act on paths strictly under the worktree
+			// root — never the rig's own primary checkout or a worktree
+			// registered elsewhere.
+			if !isStrictlyUnderDir(wtRoot, worktreePath) {
 				continue
 			}
-			name := entry.Name()
+
+			name := filepath.Base(worktreePath)
 
 			// Session home guard: never touch agent template directories.
 			if sessionHomes[name] {
 				continue
 			}
 
-			// Extract a bead ID candidate from the directory name.
+			// Extract a bead ID candidate from the worktree's leaf directory name.
 			beadID := extractBeadIDFromWorktreeName(cfg, name)
 			if beadID == "" {
 				continue
@@ -82,13 +105,6 @@ func reapClosedBeadWorktrees(
 			bead, err := store.Get(beadID)
 			if err != nil || bead.Status != "closed" {
 				// ErrNotFound, transient error, or bead not yet closed — skip.
-				continue
-			}
-
-			worktreePath := filepath.Join(rigWorktreeDir, name)
-
-			// Scope gate: only act on paths strictly under the worktree root.
-			if !isStrictlyUnderDir(wtRoot, worktreePath) {
 				continue
 			}
 
@@ -126,7 +142,6 @@ func reapClosedBeadWorktrees(
 
 			// Remove the worktree. git worktree remove must be run from the
 			// main repo root, not from within the worktree being removed.
-			mainRepo := git.New(cityPath)
 			if err := mainRepo.WorktreeRemove(worktreePath, false); err != nil {
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
 				continue
@@ -173,8 +188,17 @@ func extractBeadIDFromWorktreeName(cfg *config.City, name string) string {
 }
 
 // isStrictlyUnderDir reports whether path is strictly contained within dir
-// (i.e., it is not dir itself and has dir as a prefix component).
+// (i.e., it is not dir itself and has dir as a prefix component). Both
+// paths are symlink-resolved before comparison: worktree paths returned by
+// `git worktree list` are canonicalized (e.g. macOS /tmp -> /private/tmp),
+// so a lexical-only comparison against an un-resolved dir would spuriously
+// reject worktrees actually inside it.
 func isStrictlyUnderDir(dir, path string) bool {
+	dir = pathutil.NormalizePathForCompare(dir)
+	path = pathutil.NormalizePathForCompare(path)
+	if dir == "" || path == "" {
+		return false
+	}
 	rel, err := filepath.Rel(dir, path)
 	if err != nil {
 		return false

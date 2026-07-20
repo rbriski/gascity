@@ -64,8 +64,15 @@ dolt_sql() {
   query="$1"
   host="${GC_DOLT_HOST:-127.0.0.1}"
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  _dolt_sql_rc=0
   run_bounded 120 dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
-    sql --result-format csv -q "$query"
+    sql --result-format csv -q "$query" || _dolt_sql_rc=$?
+  if [ "$_dolt_sql_rc" -eq 124 ]; then
+    # The client timed out; the server may still be running $query.
+    # Reclaim it instead of leaking server-side work (gascity ga-tyg).
+    dolt_kill_stale_queries "$host" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$query"
+  fi
+  return "$_dolt_sql_rc"
 }
 
 find_remote_sql() {

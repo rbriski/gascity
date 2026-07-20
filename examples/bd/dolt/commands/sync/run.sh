@@ -86,6 +86,70 @@ PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 beads_bd="$GC_BEADS_BD_SCRIPT"
 data_dir="$DOLT_DATA_DIR"
 
+# Per-database backoff so a persistently failing remote does not add fetch/
+# push work on every 15-minute remotes-patrol tick (gascity ga-tyg). State is
+# a small marker file per db under PACK_STATE_DIR/sync-backoff/, holding the
+# consecutive-failure count and the epoch after which the next attempt is
+# allowed. Failure doubles the delay (5m base, 1h cap); any non-failure
+# outcome (push, up-to-date, ahead, behind, first-push, no-remote) clears it.
+# Only applied to the unfiltered "sync everything" sweep — an explicit
+# `--db NAME` invocation is a deliberate operator/agent retry and always runs.
+sync_backoff_dir="$PACK_STATE_DIR/sync-backoff"
+
+sync_backoff_marker() {
+  printf '%s/%s.state' "$sync_backoff_dir" "$1"
+}
+
+# sync_backoff_delay_for_count N — emit the backoff delay in seconds for the
+# Nth consecutive failure (N >= 1): 300s, 600s, 1200s, ... capped at 3600s.
+sync_backoff_delay_for_count() {
+  _sbd_n="$1"
+  _sbd_delay=300
+  _sbd_i=1
+  while [ "$_sbd_i" -lt "$_sbd_n" ] && [ "$_sbd_delay" -lt 3600 ]; do
+    _sbd_delay=$((_sbd_delay * 2))
+    _sbd_i=$((_sbd_i + 1))
+  done
+  [ "$_sbd_delay" -gt 3600 ] && _sbd_delay=3600
+  printf '%s' "$_sbd_delay"
+}
+
+# sync_backoff_should_skip DB — true (0) when DB is still inside its backoff
+# window and this run should skip it without contacting the remote.
+sync_backoff_should_skip() {
+  _sbs_marker=$(sync_backoff_marker "$1")
+  [ -f "$_sbs_marker" ] || return 1
+  _sbs_until=$(sed -n 's/^until=//p' "$_sbs_marker" 2>/dev/null | head -1)
+  case "$_sbs_until" in ''|*[!0-9]*) return 1 ;; esac
+  _sbs_now=$(date +%s 2>/dev/null) || return 1
+  [ "$_sbs_now" -lt "$_sbs_until" ]
+}
+
+sync_backoff_record_failure() {
+  valid_database_name "$1" || return 0
+  _sbf_marker=$(sync_backoff_marker "$1")
+  mkdir -p "$sync_backoff_dir" 2>/dev/null || return 0
+  _sbf_count=0
+  if [ -f "$_sbf_marker" ]; then
+    _sbf_count=$(sed -n 's/^count=//p' "$_sbf_marker" 2>/dev/null | head -1)
+    case "$_sbf_count" in ''|*[!0-9]*) _sbf_count=0 ;; esac
+  fi
+  _sbf_count=$((_sbf_count + 1))
+  _sbf_delay=$(sync_backoff_delay_for_count "$_sbf_count")
+  _sbf_now=$(date +%s 2>/dev/null) || return 0
+  _sbf_until=$((_sbf_now + _sbf_delay))
+  {
+    printf 'count=%s\n' "$_sbf_count"
+    printf 'until=%s\n' "$_sbf_until"
+  } > "$_sbf_marker.tmp" 2>/dev/null && mv -f "$_sbf_marker.tmp" "$_sbf_marker" 2>/dev/null
+  printf '  %s: backing off %ss after %s consecutive failure(s) (retry with: gc dolt sync --db %s)\n' \
+    "$1" "$_sbf_delay" "$_sbf_count" "$1" >&2
+}
+
+sync_backoff_clear() {
+  rm -f "$(sync_backoff_marker "$1")" 2>/dev/null || true
+}
+
 # Wall-clock bound for SQL-mode remote push (seconds). Defaults to 1800s; the
 # prior fixed 120s ceiling SIGKILLed large first pushes that succeed when issued
 # directly to the running sql-server. An explicitly-empty / non-numeric / any
@@ -238,8 +302,15 @@ dolt_sql() {
   tmo="${2:-120}"
   host="${GC_DOLT_HOST:-127.0.0.1}"
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  _dolt_sql_rc=0
   run_bounded "$tmo" dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
-    sql --result-format csv -q "$query"
+    sql --result-format csv -q "$query" || _dolt_sql_rc=$?
+  if [ "$_dolt_sql_rc" -eq 124 ]; then
+    # The client timed out; the server may still be running $query.
+    # Reclaim it instead of leaking server-side work (gascity ga-tyg).
+    dolt_kill_stale_queries "$host" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$query"
+  fi
+  return "$_dolt_sql_rc"
 }
 
 # classify_count <db> <revrange> — emit the dolt_log commit count for a revision
@@ -609,6 +680,65 @@ fi
 exit_code=0
 server_running=false
 is_running && server_running=true
+
+# Cross-script maintenance lock, shared with `gc dolt compact` via the same
+# lock file (dolt_maintenance_lock_key, runtime.sh): sync's DOLT_FETCH/
+# DOLT_PUSH calls and compact's DOLT_GC hold server-side state that must not
+# interleave (gascity ga-tyg). Non-blocking acquire with bounded retries and
+# explicit backoff (1s, 2s, 4s, 8s, 8s, ... capped, ~30s total budget); if
+# the lock is still held after that, this run yields cleanly rather than
+# piling up blocked pushes — the next remotes-patrol tick is the retry.
+# Best-effort only: an unavailable `flock`, or any failure to create/open the
+# lock file, logs a warning and proceeds without cross-script exclusion
+# rather than blocking sync entirely.
+sync_lock_fd=8
+sync_lock_held=""
+sync_lock_release() {
+  if [ -n "$sync_lock_held" ]; then
+    flock -u "$sync_lock_fd" 2>/dev/null || true
+    eval "exec ${sync_lock_fd}>&-" 2>/dev/null || true
+    sync_lock_held=""
+  fi
+}
+trap sync_lock_release EXIT
+
+if [ "$server_running" = true ] && [ "$dry_run" != true ] && command -v flock >/dev/null 2>&1; then
+  sync_lock_root="/tmp/gc-dolt-maintenance"
+  sync_lock_key=$(dolt_maintenance_lock_key "${GC_DOLT_HOST:-127.0.0.1}" "$GC_DOLT_PORT")
+  sync_lock_old_umask=$(umask)
+  umask 077
+  mkdir -p "$sync_lock_root" 2>/dev/null || true
+  umask "$sync_lock_old_umask"
+  chmod 700 "$sync_lock_root" 2>/dev/null || true
+  sync_lock_path="$sync_lock_root/${sync_lock_key}.lock"
+  sync_lock_old_umask=$(umask)
+  umask 077
+  : >> "$sync_lock_path" 2>/dev/null || true
+  umask "$sync_lock_old_umask"
+  if eval "exec ${sync_lock_fd}<>\"\$sync_lock_path\"" 2>/dev/null; then
+    chmod 600 "$sync_lock_path" 2>/dev/null || true
+    sync_lock_acquired=false
+    sync_lock_waited=0
+    sync_lock_delay=1
+    while [ "$sync_lock_waited" -le 30 ]; do
+      if flock -n "$sync_lock_fd"; then
+        sync_lock_acquired=true
+        sync_lock_held=1
+        break
+      fi
+      sleep "$sync_lock_delay"
+      sync_lock_waited=$((sync_lock_waited + sync_lock_delay))
+      [ "$sync_lock_delay" -lt 8 ] && sync_lock_delay=$((sync_lock_delay * 2))
+    done
+    if [ "$sync_lock_acquired" != true ]; then
+      echo "sync: another dolt maintenance operation (compact or sync) holds the lock for host=${GC_DOLT_HOST:-127.0.0.1} port=$GC_DOLT_PORT after ${sync_lock_waited}s of backoff — skipping this run" >&2
+      exit 0
+    fi
+  else
+    echo "sync: WARN: unable to open maintenance lock file $sync_lock_path; proceeding without cross-script locking" >&2
+  fi
+fi
+
 if [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
@@ -621,7 +751,16 @@ if [ -d "$data_dir" ]; then
     fi
 
     if [ "$server_running" = true ]; then
-      sync_database_sql "$name" || exit_code=1
+      if [ -z "$db_filter" ] && sync_backoff_should_skip "$name"; then
+        echo "  $name: skipped (remote backoff active after repeated failures; retry with: gc dolt sync --db $name)"
+        continue
+      fi
+      if sync_database_sql "$name"; then
+        sync_backoff_clear "$name"
+      else
+        exit_code=1
+        sync_backoff_record_failure "$name"
+      fi
     else
       sync_database_cli "$d" "$name" || exit_code=1
     fi

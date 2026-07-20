@@ -390,15 +390,11 @@ esac
 # Cross-city flock keyed on host:port so concurrent compactions on the
 # same Dolt server don't interleave. Compaction holds open transactions
 # and a second compactor running concurrently would race on the
-# graph-rewrite step.
-lock_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^\[\(.*\)\]$/\1/')
-if compact_dolt_host_is_local "$lock_host"; then
-  # Deliberately collapse loopback aliases; over-serializing local endpoints is
-  # safer than allowing two compaction jobs to interleave on one local runtime.
-  lock_host="127.0.0.1"
-fi
-lock_key=$(printf '%s-%s' "$lock_host" "$GC_DOLT_PORT" | tr -c 'A-Za-z0-9_.-' '-')
-lock_root="/tmp/gc-dolt-compact"
+# graph-rewrite step. `gc dolt sync` contends on this same lock file
+# (dolt_maintenance_lock_key, runtime.sh) so a sync push and a compaction
+# GC never interleave on one server either (gascity ga-tyg).
+lock_key=$(dolt_maintenance_lock_key "$host" "$GC_DOLT_PORT")
+lock_root="/tmp/gc-dolt-maintenance"
 old_umask=$(umask)
 umask 077
 mkdir -p "$lock_root" || {
@@ -603,16 +599,29 @@ discover_database_names() {
 
 # dolt_query — wrapper that runs a single SQL statement against the
 # managed server with the configured port/host/user. Honors the
-# per-call timeout. Output is the raw -r result-format-tsv body.
+# per-call timeout (defaults to the global call_timeout; pass a third
+# arg to override, e.g. push_timeout). Output is the raw
+# -r result-format-tsv body.
+#
+# On a client-side timeout (exit 124), run_bounded's --kill-after only
+# terminates the client CLI — the server keeps running $query to
+# completion. Reclaim it via dolt_kill_stale_queries instead of leaking
+# server-side work (gascity ga-tyg).
 dolt_query() {
   db="$1"
   query="$2"
+  tmo="${3:-$call_timeout}"
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded "$call_timeout" \
+  _dolt_query_rc=0
+  run_bounded "$tmo" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
     --use-db "$db" \
-    sql -r tabular -q "$query"
+    sql -r tabular -q "$query" || _dolt_query_rc=$?
+  if [ "$_dolt_query_rc" -eq 124 ]; then
+    dolt_kill_stale_queries "$host" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$query"
+  fi
+  return "$_dolt_query_rc"
 }
 
 emit_error_file() {
@@ -903,12 +912,9 @@ push_remote_refspec() {
   else
     refspec_arg="$local_branch:$remote_branch"
   fi
-  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  run_bounded "$push_timeout" \
-    dolt --host "$host" --port "$GC_DOLT_PORT" \
-    --user "$GC_DOLT_USER" --no-tls \
-    --use-db "$db" \
-    sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg')"
+  dolt_query "$db" \
+    "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg')" \
+    "$push_timeout"
 }
 
 # preflight_counts — write "<table> <count> <value-hash>" lines for the user

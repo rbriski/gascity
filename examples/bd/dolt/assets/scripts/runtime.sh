@@ -277,3 +277,87 @@ PY
     return 124
   fi
 }
+
+# sql_escape_literal VALUE — emit VALUE escaped for embedding inside a
+# single-quoted SQL string literal (backslashes doubled, then single
+# quotes doubled). Used by dolt_kill_stale_queries to build an exact-match
+# WHERE clause from an arbitrary previously-issued query string.
+sql_escape_literal() {
+  printf '%s' "$1" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g"
+}
+
+# dolt_kill_stale_queries HOST PORT USER QUERY — best-effort reclaim of
+# server-side work orphaned by a run_bounded timeout. run_bounded's
+# --kill-after only terminates the client CLI process; on Dolt 2.1.10 the
+# server-side CALL (DOLT_FETCH/DOLT_PUSH/DOLT_GC/...) keeps running to
+# completion because nothing tells the server the client gave up, which
+# left DOLT_FETCH/DOLT_GC calls accumulating for hours (gascity ga-tyg).
+# This looks up the live query by exact text match against
+# information_schema.processlist and issues KILL QUERY for each match,
+# freeing the server-side connection slot and CPU/IO the orphaned call
+# was consuming.
+#
+# Scanning and killing are each bounded by GC_DOLT_KILL_SCAN_TIMEOUT_SECS
+# (default 10s) so a wedged server cannot hang this cleanup step itself.
+# Failures here are logged, not fatal — the caller already has its own
+# timeout error to report.
+dolt_kill_stale_queries() {
+  _dksq_host="$1"; _dksq_port="$2"; _dksq_user="$3"; _dksq_query="$4"
+  _dksq_scan_timeout="${GC_DOLT_KILL_SCAN_TIMEOUT_SECS:-10}"
+  _dksq_escaped=$(sql_escape_literal "$_dksq_query")
+  _dksq_ids=$(run_bounded "$_dksq_scan_timeout" \
+    dolt --host "$_dksq_host" --port "$_dksq_port" --user "$_dksq_user" --no-tls \
+    sql --result-format csv -q "SELECT id FROM information_schema.processlist WHERE info = '$_dksq_escaped'" 2>/dev/null) || {
+    printf 'dolt runtime: WARN: could not scan processlist to reclaim timed-out query\n' >&2
+    return 1
+  }
+  printf '%s\n' "$_dksq_ids" | tail -n +2 | while IFS= read -r _dksq_id; do
+    _dksq_id=$(printf '%s' "$_dksq_id" | tr -dc '0-9')
+    [ -n "$_dksq_id" ] || continue
+    printf 'dolt runtime: client timed out; killing orphaned server-side query id=%s\n' "$_dksq_id" >&2
+    run_bounded "$_dksq_scan_timeout" \
+      dolt --host "$_dksq_host" --port "$_dksq_port" --user "$_dksq_user" --no-tls \
+      sql -q "KILL QUERY $_dksq_id" >/dev/null 2>&1 || true
+  done
+}
+
+# dolt_maintenance_lock_key HOST PORT — emit the sanitized lock-file basename
+# (no extension) that `gc dolt compact` and `gc dolt sync` both use to
+# serialize maintenance operations against the same managed Dolt server.
+# Concurrent compaction (open transactions, graph-rewrite) and sync pushes
+# (DOLT_FETCH/DOLT_PUSH) racing on one server is part of the failure mode
+# behind the leaked-call incident (gascity ga-tyg): both commands must
+# contend on the identical lock file for a given host:port, so this
+# normalization has to be shared verbatim rather than reimplemented per
+# script. Loopback aliases (empty, localhost, 0.0.0.0, ::, ::1, 127.x.x.x)
+# collapse to 127.0.0.1 — over-serializing local endpoints is safer than
+# letting two maintenance ops interleave on one local runtime.
+dolt_maintenance_lock_key() {
+  _dmlk_port="$2"
+  _dmlk_host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^\[\(.*\)\]$/\1/')
+  case "$_dmlk_host" in
+    ''|localhost|0.0.0.0|::1|::)
+      _dmlk_host="127.0.0.1"
+      ;;
+    127.*.*.*)
+      _dmlk_ip=$_dmlk_host
+      IFS=.
+      # NOTE: `set --` below overwrites the function's own positional
+      # params ($1/$2), which is why the port was saved to _dmlk_port
+      # before this point rather than read from $2 further down.
+      set -- $_dmlk_ip
+      unset IFS
+      if [ "$#" -eq 4 ] && [ "$1" = "127" ]; then
+        _dmlk_valid=1
+        for _dmlk_octet in "$2" "$3" "$4"; do
+          case "$_dmlk_octet" in
+            ''|*[!0-9]*) _dmlk_valid=0 ;;
+            *) [ "$_dmlk_octet" -le 255 ] || _dmlk_valid=0 ;;
+          esac
+        done
+        [ "$_dmlk_valid" = 1 ] && _dmlk_host="127.0.0.1"
+      fi
+      ;;
+  esac
+  printf '%s-%s' "$_dmlk_host" "$_dmlk_port" | tr -c 'A-Za-z0-9_.-' '-'
+}

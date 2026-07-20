@@ -237,9 +237,16 @@ export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
 # even on unexpected values. Stdout/stderr are captured by callers as needed.
 dolt_sql_q() {
   _dolt_sql_q_timeout="$1"; shift
+  _dolt_sql_q_rc=0
   run_bounded "$_dolt_sql_q_timeout" \
     dolt --host "$host" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls \
-    sql -q "$1"
+    sql -q "$1" || _dolt_sql_q_rc=$?
+  if [ "$_dolt_sql_q_rc" -eq 124 ] && command -v dolt_kill_stale_queries >/dev/null 2>&1; then
+    # The client timed out; the server may still be running $1.
+    # Reclaim it instead of leaking server-side work (gascity ga-tyg).
+    dolt_kill_stale_queries "$host" "$GC_DOLT_PORT" "$GC_DOLT_USER" "$1"
+  fi
+  return "$_dolt_sql_q_rc"
 }
 
 probe_available=false

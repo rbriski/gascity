@@ -149,6 +149,64 @@ func TestCityStatusSessionCountsReuseLoadedSnapshot(t *testing.T) {
 	}
 }
 
+func TestStatusTimingIsDebugOnlyAndDoesNotReloadSnapshot(t *testing.T) {
+	store := &failingListStatusStore{MemStore: beads.NewMemStore()}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "gc-active",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state": string(session.StateActive),
+		},
+	}})
+	cityPath := registerCityForSnapshot(t)
+	stubSupervisorAlive(t)
+	stubStoreHealthEvents(t, nil)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "bright-lights"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "rig",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+		Rigs: []config.Rig{{Name: "rig", Path: "/tmp/rig"}},
+	}
+
+	t.Setenv("GC_DEBUG", "0")
+	var quiet bytes.Buffer
+	_ = collectCityStatusSnapshotFromStoreSnapshot(runtime.NewFake(), cfg, cityPath, store, snapshot, &quiet)
+	if quiet.Len() != 0 {
+		t.Fatalf("debug-disabled stderr = %q, want empty", quiet.String())
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls = %d, want 1 for the existing store-health row count", store.listCalls)
+	}
+
+	t.Setenv("GC_DEBUG", "1")
+	var debug bytes.Buffer
+	_ = collectCityStatusSnapshotFromStoreSnapshot(runtime.NewFake(), cfg, cityPath, store, snapshot, &debug)
+	for _, phase := range []string{"store-size-walk", "pool-discovery", "runtime-observation-fanout", "rig-row-assembly"} {
+		if !strings.Contains(debug.String(), "gc status: timing phase="+phase+" duration=") {
+			t.Errorf("debug stderr missing timing for %q:\n%s", phase, debug.String())
+		}
+	}
+	if store.listCalls != 2 {
+		t.Fatalf("List calls = %d, want 2: one existing store-health row count per collection, with no timing-induced snapshot reload", store.listCalls)
+	}
+}
+
+func TestLoadStatusSessionSnapshotEmitsOneDebugTiming(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	var stderr bytes.Buffer
+	if snapshot := loadStatusSessionSnapshot("/city", &config.City{}, beads.NewMemStore(), &stderr); snapshot == nil {
+		t.Fatal("snapshot = nil, want empty snapshot")
+	}
+	if got := strings.Count(stderr.String(), "phase=fallback-snapshot-collection"); got != 1 {
+		t.Fatalf("fallback snapshot timings = %d, want 1:\n%s", got, stderr.String())
+	}
+}
+
 func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 	oldTimeout := statusSessionSnapshotTimeout
 	statusSessionSnapshotTimeout = 20 * time.Millisecond

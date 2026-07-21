@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storehealth"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -25,6 +27,19 @@ import (
 // command from fanning out to hundreds of goroutines on very large cities
 // while still cutting wall time on the common 10-30 agent case.
 const statusObservationConcurrency = 8
+
+// statusTiming records an opt-in duration for one local gc status phase. It
+// deliberately uses the command-scoped stderr so normal status output remains
+// unchanged and tests do not race on process-wide stderr.
+func statusTiming(stderr io.Writer, phase string, fn func()) {
+	if !gcDebugEnabled() {
+		fn()
+		return
+	}
+	started := time.Now()
+	fn()
+	fmt.Fprintf(stderr, "gc status: timing phase=%s duration=%s\n", phase, time.Since(started).Round(time.Microsecond)) //nolint:errcheck // best-effort debug stderr
+}
 
 // observeStatusTargetsParallel runs observeSessionTargetWithWarning for each
 // target concurrently with a bounded worker pool. Results are returned in
@@ -146,7 +161,17 @@ func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) 
 			_ = closer.Close()
 		}
 	}()
-	return collectStoreHealth(cityPath, store, ep)
+	return collectStoreHealthWithTiming(cityPath, store, ep, stderr)
+}
+
+func collectStoreHealthWithTiming(cityPath string, store beads.Store, ep events.Provider, stderr io.Writer) *StoreHealth {
+	var size int64
+	statusTiming(stderr, "store-size-walk", func() {
+		size = storehealth.WalkSize(storehealth.StorePath(cityPath))
+	})
+	rows := liveRowCount(store)
+	lastAt, lastStatus := storehealth.LastMaintenance(ep)
+	return storeHealthFromInputs(cityPath, size, rows, lastAt, lastStatus)
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
@@ -227,7 +252,11 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			}
 			scaleLabel := fmt.Sprintf("scaled (min=%d, %s)", sp0.Min, maxDisplay)
 			headerShown := false
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
+			var instances []string
+			statusTiming(stderr, "pool-discovery", func() {
+				instances = discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp)
+			})
+			for _, qualifiedInstance := range instances {
 				target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				row := cityStatusAgentRow{
@@ -271,7 +300,10 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	for i, p := range plans {
 		targets[i] = p.target
 	}
-	observations := observeStatusTargetsParallel(sp, cfg, cityPath, store, targets, stderr)
+	var observations []worker.LiveObservation
+	statusTiming(stderr, "runtime-observation-fanout", func() {
+		observations = observeStatusTargetsParallel(sp, cfg, cityPath, store, targets, stderr)
+	})
 
 	// Phase 3: stitch observation results back into rows and tallies in the
 	// original order to keep output deterministic.
@@ -287,22 +319,24 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		addRigCount(p.rigDir, p.suspended || obs.Suspended || p.target.suspended)
 	}
 
-	for _, r := range cfg.Rigs {
-		suspended := suspendedRigs[r.Name]
-		if !suspended {
-			if tally := rigCounts[r.Name]; tally != nil && tally.Total > 0 && tally.Total == tally.Suspended {
-				suspended = true
+	statusTiming(stderr, "rig-row-assembly", func() {
+		for _, r := range cfg.Rigs {
+			suspended := suspendedRigs[r.Name]
+			if !suspended {
+				if tally := rigCounts[r.Name]; tally != nil && tally.Total > 0 && tally.Total == tally.Suspended {
+					suspended = true
+				}
 			}
+			snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
+				Name:                r.Name,
+				Path:                r.Path,
+				Prefix:              r.EffectivePrefix(),
+				Suspended:           suspended,
+				DefaultSlingTarget:  r.DefaultSlingTarget,
+				DefaultSlingTargets: r.DefaultSlingTargets,
+			})
 		}
-		snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
-			Name:                r.Name,
-			Path:                r.Path,
-			Prefix:              r.EffectivePrefix(),
-			Suspended:           suspended,
-			DefaultSlingTarget:  r.DefaultSlingTarget,
-			DefaultSlingTargets: r.DefaultSlingTargets,
-		})
-	}
+	})
 
 	for _, ns := range cfg.NamedSessions {
 		identity := ns.QualifiedName()

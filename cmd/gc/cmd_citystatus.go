@@ -400,6 +400,14 @@ type statusObservationTarget struct {
 }
 
 func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
+	var snapshot *sessionBeadSnapshot
+	statusTiming(stderr, "fallback-snapshot-collection", func() {
+		snapshot = loadStatusSessionSnapshotUntimed(cityPath, cfg, store, stderr)
+	})
+	return snapshot
+}
+
+func loadStatusSessionSnapshotUntimed(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
 		return newSessionBeadSnapshotFromInfos(nil)
 	}

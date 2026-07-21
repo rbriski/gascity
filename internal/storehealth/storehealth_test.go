@@ -183,9 +183,96 @@ func TestLastMaintenanceOnlyDoneEvents(t *testing.T) {
 }
 
 func TestLastMaintenanceNoEvents(t *testing.T) {
-	ep := events.NewFake()
+	ep := &trackingTailProvider{Fake: events.NewFake()}
 	ts, status := LastMaintenance(ep)
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}
+	if len(ep.listFilters) != 0 {
+		t.Fatalf("List called %d times, want 0", len(ep.listFilters))
+	}
 }
+
+func TestLastMaintenanceUsesTailProviderForLatestEvents(t *testing.T) {
+	ep := &trackingTailProvider{Fake: events.NewFake()}
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+
+	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older})
+	ep.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer})
+
+	ts, status := LastMaintenance(ep)
+	if !ts.Equal(newer) || status != "failed" {
+		t.Fatalf("LastMaintenance() = (%v, %q), want (%v, failed)", ts, status, newer)
+	}
+	if len(ep.listFilters) != 0 {
+		t.Fatalf("List called %d times, want 0 when tails contain both event types", len(ep.listFilters))
+	}
+	if len(ep.tailFilters) != 2 {
+		t.Fatalf("ListTail called %d times, want 2", len(ep.tailFilters))
+	}
+	for _, filter := range ep.tailFilters {
+		if filter.Limit != 0 {
+			t.Fatalf("ListTail filter Limit = %d, want 0", filter.Limit)
+		}
+	}
+	for _, limit := range ep.tailLimits {
+		if limit != 1 {
+			t.Fatalf("ListTail limit = %d, want 1", limit)
+		}
+	}
+}
+
+func TestLastMaintenanceUsesTailForMixedArchiveAndActiveEvents(t *testing.T) {
+	ep := &trackingTailProvider{Fake: events.NewFake()}
+	archiveNewer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	activeOlder := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	ep.Record(events.Event{Type: events.StoreMaintenanceDone, Subject: "archived", Ts: archiveNewer})
+	ep.Record(events.Event{Type: events.StoreMaintenanceFailed, Subject: "active", Ts: activeOlder})
+
+	ts, status := LastMaintenance(ep)
+	if !ts.Equal(archiveNewer) || status != "success" {
+		t.Fatalf("LastMaintenance() = (%v, %q), want (%v, success)", ts, status, archiveNewer)
+	}
+	if len(ep.listFilters) != 0 {
+		t.Fatalf("List called %d times, want 0", len(ep.listFilters))
+	}
+}
+
+func TestLastMaintenanceTailProviderErrorReturnsNoMaintenance(t *testing.T) {
+	ts, status := LastMaintenance(events.NewFailFake())
+	if !ts.IsZero() || status != "" {
+		t.Fatalf("LastMaintenance(unavailable) = (%v, %q), want (zero, empty)", ts, status)
+	}
+}
+
+func TestLastMaintenanceFallsBackForProviderWithoutTail(t *testing.T) {
+	base := events.NewFake()
+	want := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	base.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: want})
+
+	ts, status := LastMaintenance(listOnlyProvider{Provider: base})
+	if !ts.Equal(want) || status != "success" {
+		t.Fatalf("LastMaintenance() = (%v, %q), want (%v, success)", ts, status, want)
+	}
+}
+
+type trackingTailProvider struct {
+	*events.Fake
+	listFilters []events.Filter
+	tailFilters []events.Filter
+	tailLimits  []int
+}
+
+func (p *trackingTailProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listFilters = append(p.listFilters, filter)
+	return p.Fake.List(filter)
+}
+
+func (p *trackingTailProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	p.tailFilters = append(p.tailFilters, filter)
+	p.tailLimits = append(p.tailLimits, limit)
+	return p.Fake.ListTail(filter, limit)
+}
+
+type listOnlyProvider struct{ events.Provider }

@@ -109,7 +109,7 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		{events.StoreMaintenanceDone, "success"},
 		{events.StoreMaintenanceFailed, "failed"},
 	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
+		evts, err := latestMaintenanceEvents(ep, events.Filter{Type: spec.typ})
 		if err != nil {
 			continue
 		}
@@ -121,6 +121,17 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		}
 	}
 	return latestTs, latestStatus
+}
+
+// latestMaintenanceEvents requests one trailing event when the provider can
+// serve a bounded tail. Providers without tail support retain the complete-read
+// behavior required by the Provider interface.
+func latestMaintenanceEvents(ep events.Provider, filter events.Filter) ([]events.Event, error) {
+	tail, ok := ep.(events.TailProvider)
+	if !ok {
+		return ep.List(filter)
+	}
+	return tail.ListTail(filter, 1)
 }
 
 const bytesPerMB = 1_000_000

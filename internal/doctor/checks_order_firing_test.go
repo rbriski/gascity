@@ -164,6 +164,52 @@ func TestOrderFiringCurrent_FiredRecently(t *testing.T) {
 	}
 }
 
+func TestReadOrderFiringCurrentEvents_UsesOneScanForLargeMixedHistory(t *testing.T) {
+	// Doctor needs both event types to classify a never-fired order. Keep that
+	// lookup to one pass so large event logs are not read once per type.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	const fillerEvents = 20_000
+	eventsFixture := make([]events.Event, 0, fillerEvents+3)
+	for i := 0; i < fillerEvents; i++ {
+		eventsFixture = append(eventsFixture, events.Event{Type: events.BeadCreated, Ts: now.Add(time.Duration(-fillerEvents+i) * time.Second)})
+	}
+	eventsFixture = append(eventsFixture,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-2 * time.Hour)},
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-time.Hour)},
+	)
+
+	reads := 0
+	fired, startedAt, err := readOrderFiringCurrentEvents("events.jsonl", func(path string, types ...string) ([]events.Event, error) {
+		reads++
+		if path != "events.jsonl" {
+			t.Fatalf("path = %q, want events.jsonl", path)
+		}
+		if len(types) != 2 || types[0] != events.OrderFired || types[1] != events.ControllerStarted {
+			t.Fatalf("types = %q, want order.fired and controller.started", types)
+		}
+		relevant := make([]events.Event, 0, 3)
+		for _, event := range eventsFixture {
+			if event.Type == events.OrderFired || event.Type == events.ControllerStarted {
+				relevant = append(relevant, event)
+			}
+		}
+		return relevant, nil
+	})
+	if err != nil {
+		t.Fatalf("readOrderFiringCurrentEvents: %v", err)
+	}
+	if reads != 1 {
+		t.Fatalf("event history scans = %d, want 1", reads)
+	}
+	if len(fired) != 1 || fired[0].Subject != "cleanup-cooldown" {
+		t.Fatalf("fired = %#v, want the one order.fired event", fired)
+	}
+	if want := now.Add(-time.Hour); !startedAt.Equal(want) {
+		t.Fatalf("latest controller start = %v, want %v", startedAt, want)
+	}
+}
+
 func TestOrderFiringCurrent_UsesNewestOrderRunHistory(t *testing.T) {
 	// Manual `gc order run` creates order-run beads even when no controller
 	// order.fired event is emitted. Doctor must therefore merge bead history

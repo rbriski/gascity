@@ -513,6 +513,19 @@ func TestReadFiltered(t *testing.T) {
 		}
 	})
 
+	t.Run("by_types", func(t *testing.T) {
+		got, err := ReadTypes(path, BeadCreated, SessionWoke)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d, want 2", len(got))
+		}
+		if got[0].Type != BeadCreated || got[1].Type != SessionWoke {
+			t.Errorf("types = %q, %q, want %q, %q", got[0].Type, got[1].Type, BeadCreated, SessionWoke)
+		}
+	})
+
 	t.Run("by_actor", func(t *testing.T) {
 		got, err := ReadFiltered(path, Filter{Actor: "gc"})
 		if err != nil {

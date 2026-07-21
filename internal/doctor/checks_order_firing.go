@@ -109,16 +109,10 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFired})
+	firedEvents, startedAt, err := readOrderFiringCurrentEvents(eventPath, events.ReadTypes)
 	if err != nil {
 		result.Status = StatusError
-		result.Message = fmt.Sprintf("read order firing events: %v", err)
-		return result
-	}
-	startedAt, err := latestControllerStartedAt(eventPath)
-	if err != nil {
-		result.Status = StatusError
-		result.Message = fmt.Sprintf("read controller start events: %v", err)
+		result.Message = fmt.Sprintf("read order firing history: %v", err)
 		return result
 	}
 
@@ -537,18 +531,27 @@ func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int,
 	}
 }
 
-func latestControllerStartedAt(eventPath string) (time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
+// readOrderFiringCurrentEvents makes one chronological pass over the event
+// history. Both order.fired and controller.started are needed to classify
+// never-fired orders, so separate filtered reads would rescan the whole log.
+func readOrderFiringCurrentEvents(eventPath string, readEvents func(string, ...string) ([]events.Event, error)) ([]events.Event, time.Time, error) {
+	relevantEvents, err := readEvents(eventPath, events.OrderFired, events.ControllerStarted)
 	if err != nil {
-		return time.Time{}, err
+		return nil, time.Time{}, err
 	}
+	firedEvents := make([]events.Event, 0, len(relevantEvents))
 	var latest time.Time
-	for _, event := range startEvents {
-		if event.Ts.After(latest) {
-			latest = event.Ts
+	for _, event := range relevantEvents {
+		switch event.Type {
+		case events.OrderFired:
+			firedEvents = append(firedEvents, event)
+		case events.ControllerStarted:
+			if event.Ts.After(latest) {
+				latest = event.Ts
+			}
 		}
 	}
-	return latest, nil
+	return firedEvents, latest, nil
 }
 
 func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {

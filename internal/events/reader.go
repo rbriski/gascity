@@ -84,6 +84,25 @@ func ReadAll(path string) ([]Event, error) {
 // Scanner errors return the events parsed before the error alongside
 // the error.
 func ReadFiltered(path string, filter Filter) ([]Event, error) {
+	return readMatching(path, filter, func(e Event) bool {
+		return matchesFilter(e, filter)
+	})
+}
+
+// ReadTypes reads events whose type is one of types. It makes one pass over
+// the active log and its archives while retaining only matching events.
+func ReadTypes(path string, types ...string) ([]Event, error) {
+	typeSet := make(map[string]struct{}, len(types))
+	for _, eventType := range types {
+		typeSet[eventType] = struct{}{}
+	}
+	return readMatching(path, Filter{}, func(e Event) bool {
+		_, ok := typeSet[e.Type]
+		return ok
+	})
+}
+
+func readMatching(path string, filter Filter, matches func(Event) bool) ([]Event, error) {
 	dir := filepath.Dir(path)
 	archives, err := archiveFilesIn(dir)
 	if err != nil {
@@ -100,7 +119,7 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 		}
 		archivePath := filepath.Join(dir, info.Basename)
 		err := streamArchive(archivePath, filter, func(e Event) bool {
-			if !matchesFilter(e, filter) {
+			if !matches(e) {
 				return true
 			}
 			result = append(result, e)
@@ -133,7 +152,7 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
 		}
-		if !matchesFilter(e, filter) {
+		if !matches(e) {
 			continue
 		}
 		result = append(result, e)

@@ -23,12 +23,12 @@ func TestV2RoutedToNamespaceCheckWarnsOnShortBoundRoutes(t *testing.T) {
 			{Name: "repo", Path: rigDir},
 		},
 	}
-	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+	cityStore := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
-	}, nil)
-	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+	}, nil)}
+	rigStore := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "RIG-1", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "repo/polecat"}},
-	}, nil)
+	}, nil)}
 	stores := map[string]beads.Store{
 		cityDir: cityStore,
 		rigDir:  rigStore,
@@ -54,16 +54,30 @@ func TestV2RoutedToNamespaceCheckWarnsOnShortBoundRoutes(t *testing.T) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
 	}
+	for scope, store := range map[string]*routeQuerySpyStore{"city": cityStore, "rig": rigStore} {
+		if len(store.queries) != 1 {
+			t.Errorf("%s List calls = %d, want 1", scope, len(store.queries))
+		}
+	}
 }
 
-func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
+func TestV2RoutedToNamespaceCheckScansScopeOnceWithoutLabels(t *testing.T) {
 	cityDir := t.TempDir()
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "dog", BindingName: "gastown"}},
+	cfg := &config.City{}
+	beadsForStore := make([]beads.Bead, 0, 1_000)
+	for i := range 100 {
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("agent-%03d", i), BindingName: "gastown"})
 	}
-	store := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
-	}, nil)}
+	for i := range 1_000 {
+		beadsForStore = append(beadsForStore, beads.Bead{
+			ID:       fmt.Sprintf("CITY-%d", i),
+			Title:    "work",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": fmt.Sprintf("agent-%03d", i%100)},
+		})
+	}
+	store := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, beadsForStore, nil)}
 
 	result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
 		if path != cityDir {
@@ -75,16 +89,18 @@ func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
 	if result.Status != doctor.StatusWarning {
 		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
 	}
-	if len(store.queries) == 0 {
-		t.Fatal("expected at least one route query")
+	if len(store.queries) != 1 {
+		t.Fatalf("List calls = %d, want 1", len(store.queries))
 	}
-	for _, query := range store.queries {
-		if query.AllowScan {
-			t.Fatalf("query %+v used AllowScan; route namespace check should use targeted metadata lookups", query)
-		}
-		if got := query.Metadata["gc.routed_to"]; got == "" {
-			t.Fatalf("query %+v missing gc.routed_to metadata filter", query)
-		}
+	query := store.queries[0]
+	if !query.AllowScan {
+		t.Fatalf("query %+v AllowScan = false, want true", query)
+	}
+	if !query.SkipLabels {
+		t.Fatalf("query %+v SkipLabels = false, want true", query)
+	}
+	if len(query.Metadata) != 0 {
+		t.Fatalf("query %+v Metadata = %#v, want no metadata filter", query, query.Metadata)
 	}
 }
 

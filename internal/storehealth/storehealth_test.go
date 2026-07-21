@@ -1,6 +1,7 @@
 package storehealth
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -236,6 +237,34 @@ func TestLastMaintenanceUsesTailForMixedArchiveAndActiveEvents(t *testing.T) {
 	}
 	if len(ep.listFilters) != 0 {
 		t.Fatalf("List called %d times, want 0", len(ep.listFilters))
+	}
+}
+
+func TestLastMaintenanceFileRecorderTailSpansArchiveAndActive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	recorder, err := events.NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recorder.Close() })
+
+	archivedNewer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+	activeOlder := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: archivedNewer})
+	rotation, err := recorder.ForceRotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotation.Done != nil {
+		<-rotation.Done
+	}
+	recorder.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: activeOlder})
+
+	ts, status := LastMaintenance(recorder)
+	if !ts.Equal(archivedNewer) || status != "success" {
+		t.Fatalf("LastMaintenance() = (%v, %q), want (%v, success)", ts, status, archivedNewer)
 	}
 }
 

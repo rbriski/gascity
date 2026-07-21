@@ -374,13 +374,38 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	return nil
 }
 
-// ReadFilteredTail reads the trailing matching events from path. A positive
-// limit returns at most that many events in chronological order; limit <= 0
-// falls back to ReadFiltered.
+// ReadFilteredTail reads the trailing matching events from path and its
+// canonical sibling archives. A positive limit returns at most that many
+// events in chronological order; limit <= 0 falls back to ReadFiltered.
 func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
 		return ReadFiltered(path, filter)
 	}
+	active, err := readFilteredTailActive(path, filter, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(active) >= limit {
+		return active, nil
+	}
+
+	archives, err := archiveFilesIn(filepath.Dir(path))
+	if err != nil {
+		return active, nil
+	}
+	result := active
+	for i := len(archives) - 1; i >= 0 && len(result) < limit; i-- {
+		remaining := limit - len(result)
+		archive, err := readFilteredArchiveTail(filepath.Join(filepath.Dir(path), archives[i].Basename), filter, remaining)
+		if err != nil {
+			return result, fmt.Errorf("reading archive %q: %w", archives[i].Basename, err)
+		}
+		result = append(archive, result...)
+	}
+	return result, nil
+}
+
+func readFilteredTailActive(path string, filter Filter, limit int) ([]Event, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -395,6 +420,21 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 		return nil, fmt.Errorf("stat events tail: %w", err)
 	}
 	return readFilteredTailFromFile(f, info.Size(), filter, limit)
+}
+
+func readFilteredArchiveTail(path string, filter Filter, limit int) ([]Event, error) {
+	var result []Event
+	err := streamArchive(path, filter, func(e Event) bool {
+		if !matchesFilter(e, filter) {
+			return true
+		}
+		result = append(result, e)
+		if len(result) > limit {
+			result = result[1:]
+		}
+		return true
+	})
+	return result, err
 }
 
 func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {

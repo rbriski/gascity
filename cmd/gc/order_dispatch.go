@@ -569,12 +569,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			return last, err
 		}
 		cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
+		var eventCursor uint64
 		if a.Trigger == "event" {
 			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 				continue
 			}
+			eventCursor = cursor
 			cursorFn = func(string) uint64 {
 				return cursor
 			}
@@ -603,11 +605,19 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			continue
 		}
-		// Thread the dispatch tick's context into the condition check so a
-		// shutdown, reload, or canceled tick interrupts a slow check promptly
-		// instead of waiting out its (now operator-configurable) check_timeout.
+		// Thread the dispatch tick's context into condition checks so cancellation
+		// interrupts a slow subprocess; event-provider calls are separately bounded
+		// below because their interface cannot accept a context.
 		triggerOpts.ConditionCtx = ctx
-		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
+		result, triggerErr := checkOrderTriggerBounded(ctx, a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
+		if triggerErr != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: evaluating trigger for %s: %v", a.ScopedName(), triggerErr)
+			continue
+		}
+		if result.Err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: evaluating trigger for %s: %v", a.ScopedName(), result.Err)
+			continue
+		}
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 			continue
@@ -620,6 +630,17 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			// (ga-ocypq2). Raise the order's check_timeout to fix.
 			if a.Trigger == "condition" && strings.Contains(result.Reason, orders.ConditionCheckTimedOutMarker) {
 				logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
+			}
+			if a.Trigger == "event" && result.Cursor > eventCursor {
+				cursor := orders.EventCursor(result.Cursor)
+				if _, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRunClosed(
+					scoped,
+					orders.RunOutcomeNone,
+					&cursor,
+					"event trigger cursor advanced past controller bookkeeping events",
+				); err != nil {
+					logDispatchError(m.stderr, "gc: order dispatch: advancing event cursor for %s: %v", scoped, err)
+				}
 			}
 			continue
 		}
@@ -2019,6 +2040,43 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // the rest of the sweep proceeds. Package-level var so it is tunable and
 // overridable in tests.
 var orderGateTimeout = 8 * time.Second
+
+// orderTriggerTimeout bounds one order's trigger evaluation. Unlike dispatch
+// work, trigger checks run on the controller tick goroutine; an event backend
+// that stalls while reading a retained backlog must therefore be isolated so
+// later cooldown and event orders still get their turn.
+var orderTriggerTimeout = 8 * time.Second
+
+// checkOrderTriggerBounded evaluates one order trigger without allowing a
+// blocking provider read to stall the entire scheduler tick. The provider
+// interface is not context-aware, so a timed-out evaluation is allowed to
+// finish in the background; its buffered result channel makes that completion
+// non-blocking and the next tick starts from the durable cursor unchanged.
+func checkOrderTriggerBounded(
+	ctx context.Context,
+	a orders.Order,
+	now time.Time,
+	lastRunFn orders.LastRunFunc,
+	ep events.Provider,
+	cursorFn orders.CursorFunc,
+	opts orders.TriggerOptions,
+) (orders.TriggerResult, error) {
+	resultCh := make(chan orders.TriggerResult, 1)
+	go func() {
+		resultCh <- orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, opts)
+	}()
+
+	timer := time.NewTimer(orderTriggerTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result, nil
+	case <-timer.C:
+		return orders.TriggerResult{}, fmt.Errorf("trigger evaluation timed out after %s", orderTriggerTimeout)
+	case <-ctx.Done():
+		return orders.TriggerResult{}, fmt.Errorf("trigger evaluation aborted: %w", ctx.Err())
+	}
+}
 
 // orderGateBackoffDuration is the suppression window set after a gate timeout,
 // anchored to the actual wall clock at the moment the timeout fires (not the

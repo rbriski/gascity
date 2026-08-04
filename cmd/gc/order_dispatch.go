@@ -632,14 +632,38 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
 			}
 			if a.Trigger == "event" && result.Cursor > eventCursor {
+				front := orders.NewStore(beads.OrdersStore{Store: store})
 				cursor := orders.EventCursor(result.Cursor)
-				if _, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRunClosed(
+				run, err := front.CreateCursorCheckpoint(
 					scoped,
-					orders.RunOutcomeNone,
-					&cursor,
+					cursor,
 					"event trigger cursor advanced past controller bookkeeping events",
-				); err != nil {
+				)
+				if err != nil {
 					logDispatchError(m.stderr, "gc: order dispatch: advancing event cursor for %s: %v", scoped, err)
+					continue
+				}
+
+				// A bead.created or bead.closed cursor run emits one event of the
+				// same type after the first scan. Inspect that new page before moving
+				// the same run's cursor again. If a real event arrived concurrently,
+				// leave the original cursor in place so the next tick dispatches it;
+				// otherwise the second cursor covers the run's own bookkeeping event
+				// and the cursor advance cannot self-regenerate forever.
+				if a.On == events.BeadCreated || a.On == events.BeadClosed {
+					postCursorFn := func(string) uint64 { return result.Cursor }
+					post, postErr := checkOrderTriggerBounded(ctx, a, now, lastRunFn, m.ep, postCursorFn, triggerOpts)
+					switch {
+					case postErr != nil:
+						logDispatchError(m.stderr, "gc: order dispatch: verifying advanced event cursor for %s: %v", scoped, postErr)
+					case post.Err != nil:
+						logDispatchError(m.stderr, "gc: order dispatch: verifying advanced event cursor for %s: %v", scoped, post.Err)
+					case !post.Due && post.Cursor > result.Cursor:
+						postCursor := orders.EventCursor(post.Cursor)
+						if err := front.SetCursor(run.ID, scoped, postCursor); err != nil {
+							logDispatchError(m.stderr, "gc: order dispatch: covering cursor bookkeeping event for %s: %v", scoped, err)
+						}
+					}
 				}
 			}
 			continue
@@ -2041,17 +2065,18 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // overridable in tests.
 var orderGateTimeout = 8 * time.Second
 
-// orderTriggerTimeout bounds one order's trigger evaluation. Unlike dispatch
-// work, trigger checks run on the controller tick goroutine; an event backend
-// that stalls while reading a retained backlog must therefore be isolated so
-// later cooldown and event orders still get their turn.
+// orderTriggerTimeout bounds one event order's trigger evaluation. Unlike
+// condition triggers, the event provider interface cannot accept a context;
+// a backend that stalls while reading a retained backlog must therefore be
+// isolated so later cooldown and event orders still get their turn.
 var orderTriggerTimeout = 8 * time.Second
 
-// checkOrderTriggerBounded evaluates one order trigger without allowing a
-// blocking provider read to stall the entire scheduler tick. The provider
-// interface is not context-aware, so a timed-out evaluation is allowed to
-// finish in the background; its buffered result channel makes that completion
-// non-blocking and the next tick starts from the durable cursor unchanged.
+// checkOrderTriggerBounded evaluates one order trigger. Only event triggers
+// need the outer bound: condition triggers already honor their operator-set
+// check_timeout and the dispatch context, while the event provider interface
+// cannot accept a context. A timed-out event read is allowed to finish in the
+// background; its buffered result channel makes that completion non-blocking
+// and the next tick starts from the durable cursor unchanged.
 func checkOrderTriggerBounded(
 	ctx context.Context,
 	a orders.Order,
@@ -2061,6 +2086,10 @@ func checkOrderTriggerBounded(
 	cursorFn orders.CursorFunc,
 	opts orders.TriggerOptions,
 ) (orders.TriggerResult, error) {
+	if a.Trigger != "event" {
+		return orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, opts), nil
+	}
+
 	resultCh := make(chan orders.TriggerResult, 1)
 	go func() {
 		resultCh <- orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, opts)

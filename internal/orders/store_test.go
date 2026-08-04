@@ -202,6 +202,37 @@ func TestCreateRunClosedWithCursor(t *testing.T) {
 	}
 }
 
+func TestCreateCursorCheckpointDoesNotEmitUpdate(t *testing.T) {
+	st, rec := recordingOrdersStore()
+
+	run, err := st.CreateCursorCheckpoint("rig/agent", EventCursor(9), "tracking-only event page consumed")
+	if err != nil {
+		t.Fatalf("CreateCursorCheckpoint: %v", err)
+	}
+	if run.Open || run.Cursor != EventCursor(9) {
+		t.Fatalf("run = %+v, want closed cursor 9", run)
+	}
+
+	ops := make([]string, 0)
+	for _, c := range rec.Calls() {
+		ops = append(ops, c.Op)
+	}
+	if want := []string{"Create", "Close"}; !reflect.DeepEqual(ops, want) {
+		t.Fatalf("ops = %v, want %v; a cursor checkpoint must not emit bead.updated", ops, want)
+	}
+	create := rec.CallsForOp("Create")[0].Bead
+	wantLabels := []string{"order-run:rig/agent", "order-tracking", "order:rig/agent", "seq:9"}
+	if !reflect.DeepEqual(create.Labels, wantLabels) {
+		t.Errorf("labels = %v, want %v", create.Labels, wantLabels)
+	}
+	if create.Metadata["close_reason"] != "tracking-only event page consumed" {
+		t.Errorf("close_reason = %q", create.Metadata["close_reason"])
+	}
+	if !create.NoHistory {
+		t.Error("NoHistory = false, want true")
+	}
+}
+
 // TestRecentRunsReadsHistory proves RecentRuns lists tracking beads newest-first
 // (including closed) and decodes them into OrderRun values carrying the cooldown
 // clock and open flag.

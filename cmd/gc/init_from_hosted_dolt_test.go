@@ -71,6 +71,7 @@ func TestInitFromWithoutHostedPreservesTemplate(t *testing.T) {
 
 	src := gastownExamplePath(t)
 	cityPath := filepath.Join(t.TempDir(), "city")
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	var stdout, stderr bytes.Buffer
 	// disabled hosted options => template preserved

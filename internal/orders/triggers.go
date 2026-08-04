@@ -24,7 +24,21 @@ type TriggerResult struct {
 	Reason string
 	// LastRun is the last execution time (zero if never run).
 	LastRun time.Time
+	// Cursor is the highest event sequence inspected while evaluating an event
+	// trigger. It is zero for non-event triggers and when no matching event was
+	// read. Callers persist it when they intentionally advance past filtered
+	// controller bookkeeping events.
+	Cursor uint64
+	// Err records a trigger-read failure. Due is false when Err is non-nil; the
+	// dispatcher logs the failure and continues evaluating peer orders.
+	Err error
 }
+
+// eventTriggerScanLimit bounds the number of matching events materialized by
+// one event-trigger evaluation. Event orders need only one non-bookkeeping
+// event to become due; a bounded page keeps a never-run order from loading an
+// unbounded retained history into the controller tick.
+const eventTriggerScanLimit = 128
 
 // LastRunFunc returns the last run time for a named order.
 // Returns zero time and nil error if never run.
@@ -382,12 +396,17 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	matched, err := ep.List(events.Filter{
 		Type:     a.On,
 		AfterSeq: cursor,
+		Limit:    eventTriggerScanLimit,
 	})
 	if err != nil {
-		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err)}
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err), Err: err}
 	}
 	var count int
+	var lastSeq uint64
 	for _, e := range matched {
+		if e.Seq > lastSeq {
+			lastSeq = e.Seq
+		}
 		// Exclude the dispatcher's own order-tracking bookkeeping beads so an event
 		// order never self-fires on lifecycle events emitted by those beads (#3720).
 		if !payloadHasLabel(e.Payload, labelOrderTracking) {
@@ -395,9 +414,9 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		}
 	}
 	if count == 0 {
-		return TriggerResult{Due: false, Reason: "event: no matching events"}
+		return TriggerResult{Due: false, Reason: "event: no matching events", Cursor: lastSeq}
 	}
-	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
+	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On), Cursor: lastSeq}
 }
 
 // payloadHasLabel reports whether a JSON bead payload contains the given label.

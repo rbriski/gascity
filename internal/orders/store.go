@@ -340,6 +340,43 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 	return run, nil
 }
 
+// CreateCursorCheckpoint creates and closes a cursor-only order run without
+// mutating the bead between those operations. Cursor labels and close metadata
+// are present on the initial Create, so the checkpoint emits bead.created and
+// bead.closed lifecycle events but no bead.updated event. That distinction is
+// load-bearing for bead.updated-triggered orders: persisting their cursor via
+// SetCursor would itself produce the next matching event and could never
+// converge.
+func (s *Store) CreateCursorCheckpoint(scoped string, cursor EventCursor, closeReason string) (OrderRun, error) {
+	labels := append(baseLabels(scoped, RunOutcomeNone),
+		labelOrderTitlePrefix+scoped,
+		fmt.Sprintf("%s%d", labelSeqPrefix, uint64(cursor)),
+	)
+	var metadata map[string]string
+	if closeReason != "" {
+		metadata = map[string]string{"close_reason": closeReason}
+	}
+	created, err := s.store.Create(beads.Bead{
+		Title:     trackingTitle(scoped),
+		Labels:    labels,
+		Metadata:  metadata,
+		NoHistory: true,
+	})
+	if err != nil {
+		return OrderRun{}, fmt.Errorf("creating cursor checkpoint for %q: %w", scoped, err)
+	}
+	run := OrderRun{
+		ID:        created.ID,
+		Scoped:    scoped,
+		CreatedAt: created.CreatedAt,
+		Cursor:    cursor,
+	}
+	if err := s.store.Close(created.ID); err != nil {
+		return run, fmt.Errorf("closing cursor checkpoint %q: %w", created.ID, err)
+	}
+	return run, nil
+}
+
 // RecentRuns lists the tracking/order-run beads for scoped newest-first
 // (including closed), decoded into OrderRun values. It is the typed face of the
 // `gc order history` read (cmd_order.go): it confines the order-run-label List

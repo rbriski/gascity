@@ -576,6 +576,7 @@ func SkipBlockedWorkflowDependents(store beads.Store, control beads.Bead) (int, 
 	seen := map[string]bool{control.ID: true}
 	queue := []string{control.ID}
 	pending := make(map[string]beads.Bead)
+	finalizers := make(map[string]beads.Bead)
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
@@ -597,8 +598,22 @@ func SkipBlockedWorkflowDependents(store beads.Store, control beads.Bead) (int, 
 			seen[dependent.ID] = true
 			queue = append(queue, dependent.ID)
 			if dependent.Status != "closed" {
-				pending[dependent.ID] = dependent
+				if dependent.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
+					finalizers[dependent.ID] = dependent
+				} else {
+					pending[dependent.ID] = dependent
+				}
 			}
+		}
+	}
+
+	// Keep workflow finalizers runnable so they can close the root and clean up
+	// sidecars/artifacts. A direct edge to the failed control lets outcome
+	// aggregation observe the terminal failure after intermediate work is
+	// skipped. DepAdd is idempotent when the finalizer is already a direct sink.
+	for _, finalizerID := range sortedPendingIDs(finalizers) {
+		if err := store.DepAdd(finalizerID, control.ID, "blocks"); err != nil {
+			return 0, fmt.Errorf("linking finalizer %s to failed control %s: %w", finalizerID, control.ID, err)
 		}
 	}
 	return skipScopeMembers(store, sortedPendingIDs(pending))

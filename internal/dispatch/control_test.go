@@ -537,22 +537,110 @@ func TestProcessRetryControlHardFailSkipsUnscopedDownstream(t *testing.T) {
 	mustDep(t, store, control.ID, attempt.ID, "blocks")
 	mustDep(t, store, downstream.ID, control.ID, "blocks")
 	mustDep(t, store, finalizer.ID, downstream.ID, "blocks")
+	mustDep(t, store, root.ID, finalizer.ID, "blocks")
 
 	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
-	if result.Action != "hard-fail" || result.Skipped != 2 {
-		t.Fatalf("result = %+v, want hard-fail with two skipped downstream beads", result)
+	if result.Action != "hard-fail" || result.Skipped != 1 {
+		t.Fatalf("result = %+v, want hard-fail with one skipped downstream bead", result)
 	}
-	for _, id := range []string{downstream.ID, finalizer.ID} {
-		got := mustGet(t, store, id)
-		if got.Status != "closed" || got.Metadata["gc.outcome"] != "skipped" {
-			t.Fatalf("downstream %s = status %q outcome %q, want closed/skipped", id, got.Status, got.Metadata["gc.outcome"])
-		}
-		if mustReadyContains(t, store, id) {
-			t.Fatalf("downstream %s is ready after hard failure", id)
-		}
+	gotDownstream := mustGet(t, store, downstream.ID)
+	if gotDownstream.Status != "closed" || gotDownstream.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("downstream = status %q outcome %q, want closed/skipped", gotDownstream.Status, gotDownstream.Metadata["gc.outcome"])
+	}
+	if mustReadyContains(t, store, downstream.ID) {
+		t.Fatal("ordinary downstream work is ready after hard failure")
+	}
+	if !mustReadyContains(t, store, finalizer.ID) {
+		t.Fatal("workflow finalizer is not ready after downstream skip")
+	}
+
+	finalizeResult, err := ProcessControl(store, mustGet(t, store, finalizer.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if finalizeResult.Action != "workflow-fail" {
+		t.Fatalf("finalize result = %+v, want workflow-fail", finalizeResult)
+	}
+	gotRoot := mustGet(t, store, root.ID)
+	if gotRoot.Status != "closed" || gotRoot.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("root = status %q outcome %q, want closed/fail", gotRoot.Status, gotRoot.Metadata["gc.outcome"])
+	}
+	gotFinalizer := mustGet(t, store, finalizer.ID)
+	if gotFinalizer.Status != "closed" || gotFinalizer.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("finalizer = status %q outcome %q, want closed/pass", gotFinalizer.Status, gotFinalizer.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessRetryControlSkipFailureLeavesControlBlockingRemainingWork(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "requirements",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.requirements",
+			"gc.step_id":          "requirements",
+			"gc.max_attempts":     "1",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"requirements","title":"Requirements","type":"task","retry":{"max_attempts":1}}`,
+		},
+	})
+	attempt := mustCreate(t, base, beads.Bead{
+		Title: "requirements attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.requirements.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "hard",
+			"gc.failure_reason": "invalid_spec",
+		},
+	})
+	first := mustCreate(t, base, beads.Bead{
+		Title:    "first downstream",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	remaining := mustCreate(t, base, beads.Bead{
+		Title:    "remaining downstream",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	mustClose(t, base, attempt.ID)
+	mustDep(t, base, control.ID, attempt.ID, "blocks")
+	mustDep(t, base, first.ID, control.ID, "blocks")
+	mustDep(t, base, remaining.ID, control.ID, "blocks")
+
+	store := &failUpdateForBeadStore{
+		Store:  base,
+		beadID: remaining.ID,
+		err:    errors.New("injected downstream close failure"),
+	}
+	if _, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{}); err == nil {
+		t.Fatal("processRetryControl unexpectedly succeeded")
+	}
+
+	gotControl := mustGet(t, store, control.ID)
+	if gotControl.Status == "closed" {
+		t.Fatal("control closed after a partial downstream skip failure")
+	}
+	gotFirst := mustGet(t, store, first.ID)
+	if gotFirst.Status != "closed" || gotFirst.Metadata["gc.outcome"] != "skipped" {
+		t.Fatalf("first downstream = status %q outcome %q, want closed/skipped", gotFirst.Status, gotFirst.Metadata["gc.outcome"])
+	}
+	gotRemaining := mustGet(t, store, remaining.ID)
+	if gotRemaining.Status != "open" {
+		t.Fatalf("remaining downstream status = %q, want open", gotRemaining.Status)
+	}
+	if mustReadyContains(t, store, remaining.ID) {
+		t.Fatal("remaining downstream became ready while failed control stayed open")
 	}
 }
 
@@ -2955,6 +3043,19 @@ func mustDep(t *testing.T, store beads.Store, from, to, depType string) { //noli
 type listFailStore struct {
 	beads.Store
 	err error
+}
+
+type failUpdateForBeadStore struct {
+	beads.Store
+	beadID string
+	err    error
+}
+
+func (s *failUpdateForBeadStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.beadID {
+		return s.err
+	}
+	return s.Store.Update(id, opts)
 }
 
 func (s *listFailStore) List(beads.ListQuery) ([]beads.Bead, error) {

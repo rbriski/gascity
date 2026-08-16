@@ -1712,6 +1712,83 @@ func TestCompactScriptRetriesPendingPushWhenRemoteHeadEqualsCompactedSource(t *t
 	}
 }
 
+func TestCompactScriptExplicitlyRetriesStalePendingPushForOnlyDB(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if _, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"); err != nil {
+		t.Fatalf("initial compact should defer the push: %v", err)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	replaceCompactMarkerCreatedAt(t, pendingPush, "2000-01-01T00:00:00Z")
+
+	staleOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("ordinary compaction must keep a stale pending-push marker blocked:\n%s", staleOut)
+	}
+	if !strings.Contains(staleOut, "marker is stale") {
+		t.Fatalf("ordinary compaction should explain the stale retry block:\n%s", staleOut)
+	}
+	if data, readErr := os.ReadFile(fixture.doltLog); readErr != nil {
+		t.Fatalf("read Dolt log after stale retry: %v", readErr)
+	} else if strings.Contains(string(data), "DOLT_PUSH") {
+		t.Fatalf("ordinary stale retry must not push:\n%s", data)
+	}
+
+	out, err := fixture.runWithArgs(t, "remote_success", []string{"--retry-stale-pending-push", "--only-db", "beads"}, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("explicit stale pending-push retry should re-verify and push: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "explicit stale pending-push recovery") || !strings.Contains(out, "pushed compacted main") {
+		t.Fatalf("explicit recovery output missing proof of its guarded push:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read Dolt log after explicit recovery: %v", err)
+	}
+	if !strings.Contains(string(data), "CALL DOLT_FETCH('origin')") || !strings.Contains(string(data), "DOLT_PUSH") {
+		t.Fatalf("explicit recovery must fetch and then push through the normal safety path:\n%s", data)
+	}
+	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
+		t.Fatalf("successful explicit recovery should clear the pending-push marker, stat err=%v", err)
+	}
+}
+
+func TestCompactScriptExplicitStalePendingPushRetryRequiresOnlyDB(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.runWithArgs(t, "success", []string{"--retry-stale-pending-push"})
+	if err == nil {
+		t.Fatalf("stale pending-push recovery must require --only-db:\n%s", out)
+	}
+	if !strings.Contains(out, "--retry-stale-pending-push requires --only-db") {
+		t.Fatalf("missing scoped-recovery diagnostic:\n%s", out)
+	}
+}
+
+func TestCompactScriptExplicitStalePendingPushRetryDoesNotBypassPendingGCStaleness(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if err := os.MkdirAll(filepath.Dir(pendingGC), 0o700); err != nil {
+		t.Fatalf("mkdir pending-GC marker directory: %v", err)
+	}
+	if err := os.WriteFile(pendingGC, []byte("db=beads\nreason=deferred full GC\ncreated_at=2000-01-01T00:00:00Z\nremote=origin\nexpected_remote_head=headcommit\nexpected_remote_head_verified=1\ncompacted_from_head=headcommit\nlocal_branch=main\nremote_branch=main\n"), 0o600); err != nil {
+		t.Fatalf("write stale pending-GC marker: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "remote_success", []string{"--retry-stale-pending-push", "--only-db", "beads"}, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("pending-GC staleness must remain blocked by the pending-push-only override:\n%s", out)
+	}
+	if !strings.Contains(out, "pending_gc marker is stale") {
+		t.Fatalf("expected pending-GC stale-marker diagnostic:\n%s", out)
+	}
+	data, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("read Dolt log: %v", readErr)
+	}
+	if strings.Contains(string(data), "DOLT_GC") || strings.Contains(string(data), "DOLT_PUSH") {
+		t.Fatalf("stale pending-GC must not reclaim or push:\n%s", data)
+	}
+}
+
 func TestCompactScriptPreservesPendingPushCreatedAtAcrossUnresolvedRetries(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	firstOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")

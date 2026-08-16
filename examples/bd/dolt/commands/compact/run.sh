@@ -138,7 +138,12 @@ set -eu
 #                      remote is uncredentialed, where the fetch would crash the
 #                      managed dolt server. Compaction proceeds from the local
 #                      source of truth and any remote push is deferred.
+#   --retry-stale-pending-push
+#                      retry a stale deferred remote push for explicitly named
+#                      --only-db targets. The retry still fetches, verifies the
+#                      remote head, and checks ancestry before it can push.
 gc_only=0
+retry_stale_pending_push=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --gc-only)
@@ -178,12 +183,16 @@ while [ "$#" -gt 0 ]; do
       GC_DOLT_COMPACT_SKIP_FETCH=1
       shift
       ;;
+    --retry-stale-pending-push)
+      retry_stale_pending_push=1
+      shift
+      ;;
     --)
       shift
       break
       ;;
     -*)
-      printf 'compact: unknown flag %s (supported: --gc-only, --only-db <name>, --dry-run, --skip-fetch)\n' "$1" >&2
+      printf 'compact: unknown flag %s (supported: --gc-only, --only-db <name>, --dry-run, --skip-fetch, --retry-stale-pending-push)\n' "$1" >&2
       exit 2
       ;;
     *)
@@ -301,6 +310,10 @@ only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
+if [ "$retry_stale_pending_push" = "1" ] && [ -z "$only_dbs" ]; then
+  printf 'compact: --retry-stale-pending-push requires --only-db to scope a potentially mutating remote recovery\n' >&2
+  exit 2
+fi
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
@@ -1617,6 +1630,11 @@ ensure_remote_push_retry_fresh() {
     age_secs=0
   fi
   if [ "$age_secs" -gt "$pending_push_max_age_secs" ]; then
+    if [ "$retry_stale_pending_push" = "1" ] && [ "$marker_label" = "pending_push" ]; then
+      printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — explicit stale pending-push recovery will re-verify remote state before push\n' \
+        "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs"
+      return 0
+    fi
     printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — manual review required before remote push retry\n' \
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
     send_compact_quarantine_alert "$db" "$(basename "$dir")" "$(compact_marker_path "$dir" "$db")" "$marker_label marker is stale" "$(compact_marker_value "$dir" "$db" created_at || true)" || true

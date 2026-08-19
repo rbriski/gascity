@@ -829,7 +829,10 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 						size:         len(data),
 					}
 					step.Description = step.descriptionFileReference.render(vars)
-					// Preserve the path token during subsequent expansion substitution.
+					// Record the resolved path out-of-band so a later
+					// substitution pass over Description (expansion
+					// templates, loop bodies) can recognize this stub and
+					// leave its embedded path untouched (gastownhall/gascity#4860).
 					step.DescriptionFileResolvedPath = path
 				} else {
 					step.Description = string(data)

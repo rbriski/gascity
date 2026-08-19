@@ -14,7 +14,8 @@ import (
 )
 
 type ciCriticalPathWorkflow struct {
-	Jobs map[string]ciCriticalPathJob `yaml:"jobs"`
+	Triggers map[string]any               `yaml:"on"`
+	Jobs     map[string]ciCriticalPathJob `yaml:"jobs"`
 }
 
 type ciCriticalPathJob struct {
@@ -1126,6 +1127,9 @@ func (m *ciCriticalPathJobMatrix) UnmarshalYAML(node *yaml.Node) error {
 
 func TestForkVerifyRunsOnlyInForks(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "fork-verify.yml")
+	if _, ok := wf.Triggers["pull_request"]; !ok {
+		t.Fatal("fork-verify workflow must run automatically for pull request heads")
+	}
 	job, ok := wf.Jobs["verify"]
 	if !ok {
 		t.Fatal("fork-verify workflow has no verify job")

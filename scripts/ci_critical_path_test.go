@@ -1135,6 +1135,11 @@ func TestForkVerifyRunsOnlyInForks(t *testing.T) {
 	if strings.TrimSpace(job.If) != want {
 		t.Fatalf("fork verify job condition = %q, want %q so canonical PRs do not duplicate CI", job.If, want)
 	}
+	for _, step := range job.Steps {
+		if strings.Contains(step.Uses, "actions/checkout") && strings.TrimSpace(step.With["ref"]) != "${{ github.sha }}" {
+			t.Fatalf("fork verify checkout ref = %q, want github.sha so manual dispatch verifies the selected candidate head", step.With["ref"])
+		}
+	}
 }
 
 func TestPackGateAddsOnlyParallelPackCoverage(t *testing.T) {

@@ -30,6 +30,8 @@ jobs:
       BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}

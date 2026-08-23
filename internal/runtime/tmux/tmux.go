@@ -3653,18 +3653,20 @@ func paneContainsBusyIndicator(lines []string) bool {
 	// line matches claudeBusySpinnerRe; and the status footer ellipsizes
 	// "esc to interrupt" down to "esc …". A busy session then reads idle,
 	// every confirmed-submit reports ErrNudgeSubmitUnconfirmed, and the
-	// queued nudge re-delivers forever. Re-run the spinner match over the
-	// joined capture so a wrapped parenthetical is seen whole, and accept
+	// queued nudge re-delivers forever. Re-run the spinner match over each
+	// adjacent pair so a wrapped parenthetical is seen whole without joining
+	// unrelated scrollback, and accept
 	// the ellipsized footer fragment ("· esc …"/"• esc …") that only the
 	// busy footer produces.
-	joined := strings.Join(lines, " ")
-	if claudeBusySpinnerRe.MatchString(joined) ||
-		strings.Contains(joined, "esc to interrupt") {
-		return true
-	}
-	for _, sep := range []string{"· esc …", "· esc…", "• esc …", "• esc…"} {
-		if strings.Contains(joined, sep) {
+	for i := 0; i+1 < len(lines); i++ {
+		pair := lines[i] + " " + lines[i+1]
+		if claudeBusySpinnerRe.MatchString(pair) || strings.Contains(pair, "esc to interrupt") {
 			return true
+		}
+		for _, sep := range []string{"· esc …", "· esc…", "• esc …", "• esc…"} {
+			if strings.Contains(pair, sep) {
+				return true
+			}
 		}
 	}
 	return false

@@ -573,6 +573,12 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			fmt.Fprintf(stderr, "gc nudge drain: retiring read-mail reminders: %v\n", err) //nolint:errcheck
 		}
 	}
+	items, extinct := splitPurposeExtinctSessionReminders(deliveryStore.Store, items)
+	if len(extinct) > 0 {
+		if err := terminalizePurposeExtinctSessionReminders(target.cityPath, extinct); err != nil {
+			fmt.Fprintf(stderr, "gc nudge drain: retiring reminders about closed beads: %v\n", err) //nolint:errcheck
+		}
+	}
 	if len(items) == 0 {
 		if inject {
 			return 0
@@ -2002,9 +2008,9 @@ func splitUnconfirmedSubmitNudges(cause error, items []queuedNudge) (retry, pres
 		return items, nil
 	}
 	for _, item := range items {
-		// Attempts counts submits already recorded, so Attempts+1 is the
-		// submit that just reached the runtime.
-		if item.Attempts+1 >= queuedNudgeUnconfirmedSubmitCeiling {
+		priorUnconfirmed := item.Attempts > 0 &&
+			strings.Contains(item.LastError, sessiontmux.ErrNudgeSubmitUnconfirmed.Error())
+		if priorUnconfirmed && item.Attempts+1 >= queuedNudgeUnconfirmedSubmitCeiling {
 			presumed = append(presumed, item)
 			continue
 		}

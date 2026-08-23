@@ -649,7 +649,6 @@ func (s *Store) ManagedWakeWouldStrand(id string, now time.Time) (state string, 
 	if !IsSessionBeadOrRepairable(b) {
 		return "", false, nil
 	}
-	RepairEmptyType(s.store.Store, &b)
 	lcInput := LifecycleInputFromMetadata(b.Status, b.Metadata)
 	lcInput.Now = now
 	switch base := ProjectLifecycle(lcInput).BaseState; base {

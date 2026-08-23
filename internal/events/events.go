@@ -417,7 +417,9 @@ type Recorder interface {
 type Provider interface {
 	Recorder
 
-	// List returns events matching the filter.
+	// List returns events matching the filter in ascending sequence order.
+	// A positive Limit is applied to that order so callers can advance cursors
+	// without skipping older, uninspected events.
 	List(filter Filter) ([]Event, error)
 
 	// LatestSeq returns the highest sequence number, or 0 if empty.

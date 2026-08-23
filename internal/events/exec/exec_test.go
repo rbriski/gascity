@@ -206,6 +206,28 @@ esac
 	}
 }
 
+func TestListOrdersScriptEventsBeforeApplyingLimit(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  list) cat > /dev/null
+    echo '[{"seq":3,"type":"bead.created"},{"seq":2,"type":"bead.created"},{"seq":1,"type":"bead.created"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+
+	evts, err := p.List(events.Filter{Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(evts) != 2 || evts[0].Seq != 1 || evts[1].Seq != 2 {
+		t.Fatalf("List = %#v, want events 1 then 2", evts)
+	}
+}
+
 func TestListUsesLegacyScriptFilterShape(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, `

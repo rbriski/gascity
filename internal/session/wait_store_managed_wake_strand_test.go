@@ -109,7 +109,7 @@ func TestManagedWakeWouldStrand_IsReadOnly(t *testing.T) {
 	if _, _, err := s.ManagedWakeWouldStrand("s-drained", waitStoreNow); err != nil {
 		t.Fatalf("ManagedWakeWouldStrand: %v", err)
 	}
-	if writes := rec.CallsForOp("SetMetadataBatch"); len(writes) != 0 {
-		t.Fatalf("ManagedWakeWouldStrand emitted %d SetMetadataBatch writes, want 0 (must be read-only)", len(writes))
+	if writes := rec.Calls(); len(writes) != 0 {
+		t.Fatalf("ManagedWakeWouldStrand emitted %d writes, want 0 (must be read-only)", len(writes))
 	}
 }

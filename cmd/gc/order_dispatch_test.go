@@ -1721,7 +1721,7 @@ func TestOrderDispatchBlockedEventTriggerDoesNotStarveCooldownPeer(t *testing.T)
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
 	select {
 	case <-provider.started:
-	default:
+	case <-time.After(5 * time.Second):
 		t.Fatal("event trigger List was not evaluated")
 	}
 	m.drain(context.Background())

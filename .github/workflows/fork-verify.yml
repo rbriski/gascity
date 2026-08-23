@@ -24,7 +24,7 @@ jobs:
     # Canonical PR branches already run the complete Blacksmith CI graph.
     # This lightweight fallback exists only for forks that cannot use those
     # runners or repository secrets.
-    if: ${{ github.repository != 'gastownhall/gascity' }}
+    if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != 'gastownhall/gascity') || (github.event_name != 'pull_request' && github.repository != 'gastownhall/gascity') }}
     runs-on: ubuntu-latest
     env:
       DOLT_VERSION: "2.1.7"
@@ -33,6 +33,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}

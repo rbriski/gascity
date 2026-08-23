@@ -182,7 +182,7 @@ func TestRenderCLIMarkdown_ExampleDedented(t *testing.T) {
 	// Cobra Example strings indent every line for terminal help; the
 	// rendered code fence must strip that common indent from all lines,
 	// not just the first.
-	want := "```\nmyapp deploy staging\nmyapp deploy production --force\n```"
+	want := "```sh\nmyapp deploy staging\nmyapp deploy production --force\n```"
 	if !strings.Contains(md, want) {
 		t.Errorf("Example block not dedented; want %q in output", want)
 	}

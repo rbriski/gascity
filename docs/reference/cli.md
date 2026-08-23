@@ -20,7 +20,7 @@ description: "Every gc command, flag, and example, generated from the CLI defini
 
 Gas City CLI — orchestration-builder for multi-agent workflows
 
-```
+```sh
 gc [flags]
 ```
 
@@ -96,7 +96,7 @@ Manage agent configuration in city.toml.
 Runtime operations (attach, list, peek, nudge, kill, start, stop, destroy)
 have moved to "gc session" and "gc runtime".
 
-```
+```sh
 gc agent
 ```
 
@@ -120,13 +120,13 @@ the canonical prompt.template.md location. Schema-2 convention agents are
 city-scoped; define rig-scoped agents in pack config or [[patches.agent]].
 Use --suspended to scaffold the agent in a suspended state.
 
-```
+```sh
 gc agent add --name <name> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc agent add --name mayor
 gc agent add --name polecat
 gc agent add --name worker --prompt-template ./worker.md --suspended
@@ -147,7 +147,7 @@ List configured agents from the resolved city configuration.
 Use --json to inspect agent routing fields, including effective work_query
 and sling_query values.
 
-```
+```sh
 gc agent list [flags]
 ```
 
@@ -162,7 +162,7 @@ Resume a suspended agent by clearing suspended in its durable config.
 The reconciler will start the agent on its next tick. Supports bare
 names (resolved via rig context) and qualified names (e.g. "myrig/worker").
 
-```
+```sh
 gc agent resume <name> [flags]
 ```
 
@@ -178,7 +178,7 @@ Suspended agents are skipped by the reconciler — their sessions are not
 started or restarted. Existing sessions continue running but won't be
 replaced if they exit. Use "gc agent resume" to restore.
 
-```
+```sh
 gc agent suspend <name> [flags]
 ```
 
@@ -202,7 +202,7 @@ For k8s-backed agent-script agents, set lifecycle = "one_shot" in the agent
 config so the runtime treats a clean script exit as expected work completion
 instead of startup death.
 
-```
+```sh
 gc agent-script --script <path> [flags]
 ```
 
@@ -216,7 +216,7 @@ Analyze produces correlated reports over the events log and
 bead state. All subcommands are read-only and safe to run alongside a
 live controller.
 
-```
+```sh
 gc analyze
 ```
 
@@ -244,7 +244,7 @@ report warns when the source event stream is missing them.
 
 Read-only: this command never writes events or beads.
 
-```
+```sh
 gc analyze reliability [flags]
 ```
 
@@ -302,13 +302,13 @@ gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
 
-```
+```sh
 gc bd [bd-args...]
 ```
 
 **Example:**
 
-```
+```sh
 gc bd --rig my-project list
 gc bd --rig my-project create "New task"
 gc bd show my-project-abc          # auto-detects rig from bead prefix
@@ -326,7 +326,7 @@ Subcommands for topology operations, health checking, diagnostics, exact-store
 metadata compare-and-set, and read-only list/show routed through the supervisor
 API with transparent fallback to direct bd reads.
 
-```
+```sh
 gc beads
 ```
 
@@ -345,7 +345,7 @@ Manage the canonical city endpoint topology for bd-backed beads stores.
 Use use-managed to make the city GC-managed again. Use use-external to pin the
 city to an external Dolt endpoint and rewrite inherited rig mirrors.
 
-```
+```sh
 gc beads city
 ```
 
@@ -358,7 +358,7 @@ gc beads city
 
 Set the city endpoint to an external Dolt server
 
-```
+```sh
 gc beads city use-external [flags]
 ```
 
@@ -374,7 +374,7 @@ gc beads city use-external [flags]
 
 Set the city endpoint to GC-managed
 
-```
+```sh
 gc beads city use-managed [flags]
 ```
 
@@ -392,13 +392,13 @@ and recovery internally. For the file provider, always succeeds (no-op).
 
 Also used by the beads-health system order for periodic monitoring.
 
-```
+```sh
 gc beads health [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc beads health
 gc beads health --quiet
 gc beads health --json
@@ -420,13 +420,13 @@ JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
 it). The bare --json flag is reserved by the CLI's JSON-contract layer
 and is not wired for this command; use --format=json.
 
-```
+```sh
 gc beads list [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc beads list
 gc beads list --label ready-to-build
 gc beads list --status open --format=json
@@ -457,13 +457,13 @@ Use --json for the canonical machine-output contract. --format=json remains
 accepted for compatibility. Combining --json with an explicit --format=text is
 a usage error.
 
-```
+```sh
 gc beads metadata-cas <bead-id> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc beads metadata-cas tr-123 \
   --store-ref=rig:tributary \
   --key=semantic_review_sha \
@@ -492,13 +492,13 @@ _cache_age_s; fallback-path JSON omits it). The bare --json flag is
 reserved by the CLI's JSON-contract layer and is not wired for this
 command; use --format=json.
 
-```
+```sh
 gc beads show <bead-id> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc beads show ga-abc
 gc beads show ga-abc --format=json
 ```
@@ -519,13 +519,13 @@ in [session.k8s].
 Secrets (Claude credentials) are never baked — they stay as K8s Secret
 volume mounts at runtime.
 
-```
+```sh
 gc build-image [city-path] [flags]
 ```
 
 **Example:**
 
-```
+```sh
 # Build context only (no docker build)
 gc build-image ~/bright-lights --context-only
 
@@ -552,7 +552,7 @@ gc build-image ~/bright-lights --tag registry.io/my-city:latest --push
 
 List all cities registered with the machine-wide supervisor.
 
-```
+```sh
 gc cities [flags]
 ```
 
@@ -568,7 +568,7 @@ gc cities [flags]
 
 List registered cities
 
-```
+```sh
 gc cities list [flags]
 ```
 
@@ -581,7 +581,7 @@ gc cities list [flags]
 Generate the autocompletion script for gc for the specified shell.
 See each sub-command's help for details on how to use the generated script.
 
-```
+```sh
 gc completion
 ```
 
@@ -615,7 +615,7 @@ To load completions for every new session, execute once:
 
 You will need to start a new shell for this setup to take effect.
 
-```
+```sh
 gc completion bash
 ```
 
@@ -637,7 +637,7 @@ To load completions for every new session, execute once:
 
 You will need to start a new shell for this setup to take effect.
 
-```
+```sh
 gc completion fish [flags]
 ```
 
@@ -656,7 +656,7 @@ To load completions in your current shell session:
 To load completions for every new session, add the output of the above command
 to your powershell profile.
 
-```
+```sh
 gc completion powershell [flags]
 ```
 
@@ -689,7 +689,7 @@ To load completions for every new session, execute once:
 
 You will need to start a new shell for this setup to take effect.
 
-```
+```sh
 gc completion zsh [flags]
 ```
 
@@ -705,7 +705,7 @@ The config system supports multi-file composition with includes,
 packs, patches, and overrides. Use "show" to dump the resolved
 config and "explain" to see where each value originated.
 
-```
+```sh
 gc config
 ```
 
@@ -729,13 +729,13 @@ debugging base-chain inheritance.
 
 Use --json to emit machine-readable output (providers only).
 
-```
+```sh
 gc config explain [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc config explain
 gc config explain --agent mayor
 gc config explain --rig my-project
@@ -761,13 +761,13 @@ then outputs the merged result. Use --validate to check for errors
 without printing. Use --provenance to see which file contributed each
 config element. Use -f to layer additional config files.
 
-```
+```sh
 gc config show [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc config show
 gc config show --validate
 gc config show --provenance
@@ -791,7 +791,7 @@ plane: its URL, the remote city name, and an optional credential command. Select
 a context per-invocation with --context &lt;name&gt;, or set a sticky default with
 'gc context use &lt;name&gt;' (a discoverable local city always wins over the default).
 
-```
+```sh
 gc context
 ```
 
@@ -813,7 +813,7 @@ remote city name (defaults to &lt;name&gt;). At most one credential technique ap
 --grant-command mints an X-GC-City-Write grant for a direct hardened self-host;
 --credential-command mints a transport bearer consumed by an edge/proxy.
 
-```
+```sh
 gc context add <name> [flags]
 ```
 
@@ -836,7 +836,7 @@ Applies the same precedence as every command — explicit flag &gt; explicit env
 local city discovery &gt; sticky default — and prints the target it would use,
 noting what was shadowed. Makes no network call.
 
-```
+```sh
 gc context current
 ```
 
@@ -844,7 +844,7 @@ gc context current
 
 List named remote cities
 
-```
+```sh
 gc context list [flags]
 ```
 
@@ -856,7 +856,7 @@ gc context list [flags]
 
 Remove a named remote city
 
-```
+```sh
 gc context remove <name>
 ```
 
@@ -864,7 +864,7 @@ gc context remove <name>
 
 Show a named remote city
 
-```
+```sh
 gc context show <name> [flags]
 ```
 
@@ -880,7 +880,7 @@ The default is used only when no local city is discoverable from the current
 directory — a local city always wins (git-like). Clear it with 'gc context use'
 with no arguments is not supported; remove the default by removing the context.
 
-```
+```sh
 gc context use <name>
 ```
 
@@ -892,7 +892,7 @@ A root bead + formula + gate = repeat until the gate passes or max
 iterations are reached. The controller processes wisp_closed events
 and drives the loop automatically.
 
-```
+```sh
 gc converge
 ```
 
@@ -912,7 +912,7 @@ gc converge
 
 Approve and close a convergence loop (manual gate)
 
-```
+```sh
 gc converge approve <bead-id> [flags]
 ```
 
@@ -924,7 +924,7 @@ gc converge approve <bead-id> [flags]
 
 Create a convergence loop
 
-```
+```sh
 gc converge create [flags]
 ```
 
@@ -948,7 +948,7 @@ gc converge create [flags]
 
 Force next iteration (manual gate)
 
-```
+```sh
 gc converge iterate <bead-id> [flags]
 ```
 
@@ -960,7 +960,7 @@ gc converge iterate <bead-id> [flags]
 
 List convergence loops
 
-```
+```sh
 gc converge list [flags]
 ```
 
@@ -975,7 +975,7 @@ gc converge list [flags]
 
 Retry a terminated convergence loop
 
-```
+```sh
 gc converge retry <bead-id> [flags]
 ```
 
@@ -988,7 +988,7 @@ gc converge retry <bead-id> [flags]
 
 Show convergence loop status
 
-```
+```sh
 gc converge status <bead-id> [flags]
 ```
 
@@ -1000,7 +1000,7 @@ gc converge status <bead-id> [flags]
 
 Stop a convergence loop
 
-```
+```sh
 gc converge stop <bead-id> [flags]
 ```
 
@@ -1012,7 +1012,7 @@ gc converge stop <bead-id> [flags]
 
 Dry-run the gate condition (no state changes)
 
-```
+```sh
 gc converge test-gate <bead-id> [flags]
 ```
 
@@ -1024,7 +1024,7 @@ gc converge test-gate <bead-id> [flags]
 
 Dry-run the trigger condition (no state changes)
 
-```
+```sh
 gc converge test-trigger <bead-id> [flags]
 ```
 
@@ -1047,7 +1047,7 @@ workflow roots; the dispatch subcommands (control, delete,
 delete-source, reopen-source) manage workflow trees and their
 control beads.
 
-```
+```sh
 gc convoy
 ```
 
@@ -1074,7 +1074,7 @@ Link an existing issue bead to a convoy.
 Adds a tracks dependency from the convoy to the issue, making it appear
 in the convoy's progress tracking without changing the issue parent.
 
-```
+```sh
 gc convoy add <convoy-id> <issue-id> [flags]
 ```
 
@@ -1089,7 +1089,7 @@ Scan open convoys and auto-close any where all child issues are resolved.
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
 
-```
+```sh
 gc convoy check [flags]
 ```
 
@@ -1104,7 +1104,7 @@ Close a convoy bead manually.
 Marks the convoy as closed regardless of child issue status. Use
 "gc convoy check" to auto-close convoys where all issues are resolved.
 
-```
+```sh
 gc convoy close <id> [flags]
 ```
 
@@ -1118,7 +1118,7 @@ Process a single control bead, or run the control-dispatcher loop
 with --serve to continuously process ready control beads.
 Use --follow &lt;agent&gt; to filter the serve loop to a specific agent template.
 
-```
+```sh
 gc convoy control [bead-id] [flags]
 ```
 
@@ -1134,13 +1134,13 @@ Create a convoy and optionally link existing issues to it.
 Creates a convoy bead and tracks any provided issue IDs. Issues can
 also be added later with "gc convoy add".
 
-```
+```sh
 gc convoy create <name> [issue-ids...] [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc convoy create sprint-42
 gc convoy create sprint-42 issue-1 issue-2 issue-3
 gc convoy create deploy --owner mayor --notify mayor --merge mr
@@ -1166,7 +1166,7 @@ with matching gc.root_bead_id. Without --force, shows a preview.
 By default, beads are closed with gc.outcome=skipped. Use --delete to
 remove them from the store via bd delete --cascade --force.
 
-```
+```sh
 gc convoy delete <convoy-id> [flags]
 ```
 
@@ -1181,7 +1181,7 @@ Find every live workflow root sourced from the given bead and close
 its subtree. By default this is a preview. Use --apply to mutate.
 Use --delete with --apply to also delete closed beads.
 
-```
+```sh
 gc convoy delete-source <source-bead-id> [flags]
 ```
 
@@ -1200,13 +1200,13 @@ Landing is the natural lifecycle termination for owned convoys created
 via "gc sling --owned". It verifies all children are closed (or uses
 --force), closes the convoy bead, and records a ConvoyClosed event.
 
-```
+```sh
 gc convoy land <convoy-id> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc convoy land gc-42
 gc convoy land gc-42 --force
 gc convoy land gc-42 --dry-run
@@ -1225,7 +1225,7 @@ List all open convoys with completion progress.
 Shows each convoy's ID, title, and the number of closed vs total
 child issues.
 
-```
+```sh
 gc convoy list [flags]
 ```
 
@@ -1237,7 +1237,7 @@ gc convoy list [flags]
 
 Reopen a source bead after workflow cleanup
 
-```
+```sh
 gc convoy reopen-source <source-bead-id> [flags]
 ```
 
@@ -1253,7 +1253,7 @@ Show detailed status of a convoy and all its child issues.
 Displays the convoy's ID, title, status, completion progress, and a
 table of all child issues with their status and assignee.
 
-```
+```sh
 gc convoy status <id> [flags]
 ```
 
@@ -1268,7 +1268,7 @@ Find open issues in convoys that have no assignee.
 Lists issues that are ready for work but not claimed by any agent.
 Useful for identifying bottlenecks in convoy processing.
 
-```
+```sh
 gc convoy stranded [flags]
 ```
 
@@ -1283,7 +1283,7 @@ Set the target branch metadata on a convoy.
 Child work beads can inherit this target branch when slung with
 feature-branch formulas such as mol-polecat-work.
 
-```
+```sh
 gc convoy target <convoy-id> <branch> [flags]
 ```
 
@@ -1305,13 +1305,13 @@ Cost is a list-price estimate for decision support, not an authoritative
 charge; invocations with no pricing are flagged "unpriced" and excluded from
 the cost total.
 
-```
+```sh
 gc costs
 ```
 
 **Example:**
 
-```
+```sh
 gc costs
 ```
 
@@ -1325,7 +1325,7 @@ supervisor URL, opens it in your default browser, and prints it too (or tells
 you how to start the supervisor). Use --no-open to print the URL without
 launching a browser.
 
-```
+```sh
 gc dashboard [flags]
 ```
 
@@ -1346,7 +1346,7 @@ The dashboard SPA is embedded in the gc binary and served same-origin by the
 supervisor; "gc dashboard serve" no longer starts a static server. It resolves
 and prints the supervisor URL (or tells you how to start the supervisor).
 
-```
+```sh
 gc dashboard serve [flags]
 ```
 
@@ -1369,13 +1369,13 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
-```
+```sh
 gc doctor [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc doctor
 gc doctor --fix
 gc doctor --verbose
@@ -1434,7 +1434,7 @@ the command cannot prove all registered rig databases are protected.
 Cleanup stage errors are reported in the envelope even when the command
 can still return successfully after emitting the report.
 
-```
+```sh
 gc dolt-cleanup [flags]
 ```
 
@@ -1450,7 +1450,7 @@ gc dolt-cleanup [flags]
 
 Event operations
 
-```
+```sh
 gc event
 ```
 
@@ -1467,7 +1467,7 @@ attaching arbitrary JSON payloads. JSON summaries report whether submission to
 the configured provider was attempted; the event bus does not acknowledge
 durable persistence.
 
-```
+```sh
 gc event emit <type> [flags]
 ```
 
@@ -1492,13 +1492,13 @@ scope, it reflects the supervisor's /v0/events and /stream endpoints.
 List, watch, and follow output are always JSON Lines. Each line is one API
 DTO or SSE envelope.
 
-```
+```sh
 gc events [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc events
 gc events --type bead.created --since 1h
 gc events --watch --type convoy.closed --timeout 5m
@@ -1532,7 +1532,7 @@ Project exactly one stopped local graph.v2 execution run into execution facts.
 The default is a dry run. Pass --apply to append the projected snapshot to the
 default city event log.
 
-```
+```sh
 gc events reemit-execution --city <city> --run <run> [--apply] [flags]
 ```
 
@@ -1547,13 +1547,13 @@ Force rotate the city event log through the running supervisor.
 
 Output is one JSON line. Empty active logs are successful no-ops.
 
-```
+```sh
 gc events rotate [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc events rotate
 gc events rotate --wait
 gc --city /path/to/city events rotate --api http://127.0.0.1:8080
@@ -1577,7 +1577,7 @@ and hands it to the right specialist.
 
 These commands require the city API server; they have no local fallback.
 
-```
+```sh
 gc extmsg
 ```
 
@@ -1595,7 +1595,7 @@ delivery resolves a live session for the agent each time, cold-waking one
 when none is live. Binding an actively-bound conversation conflicts; use
 "gc extmsg handoff" to rebind.
 
-```
+```sh
 gc extmsg bind [flags]
 ```
 
@@ -1618,7 +1618,7 @@ the active binding. Run from inside an agent session to hand a
 conversation to the right specialist — the routing judgment lives in the
 agent's prompt, this verb is pure transport.
 
-```
+```sh
 gc extmsg handoff [flags]
 ```
 
@@ -1639,7 +1639,7 @@ Remove active external-conversation bindings. Filter by conversation
 (--provider/--conversation-id), by --agent, by --session, or a
 combination. At least one filter is required.
 
-```
+```sh
 gc extmsg unbind [flags]
 ```
 
@@ -1664,7 +1664,7 @@ A formula is a reusable TOML method for how multi-step work should be done
 the file format, the formulas v2 contract, and the [requires]
 formula_compiler opt-in.
 
-```
+```sh
 gc formula
 ```
 
@@ -1726,7 +1726,7 @@ has. If an earlier cook already stranded beads in a split city's work
 store, copy them into the binding with
 gc storage recover-stranded --from-work --fleet-stopped.
 
-```
+```sh
 gc formula cook <formula-name> [flags]
 ```
 
@@ -1747,7 +1747,7 @@ city and rig pack layers, the city's own formulas/ directory, and the
 rig-local formulas_dir directory. Later layers win for same-named
 formulas.
 
-```
+```sh
 gc formula list [flags]
 ```
 
@@ -1771,7 +1771,7 @@ Examples:
   gc formula show mol-feature --var title="Auth system" --var branch=main
   gc formula show mol-polecat-work --rig mo
 
-```
+```sh
 gc formula show <formula-name> [flags]
 ```
 
@@ -1793,7 +1793,7 @@ search paths.
 Use this to detect whether a running session's formula has been updated
 since it was spawned.
 
-```
+```sh
 gc formula version-check <bead-id> [flags]
 ```
 
@@ -1805,7 +1805,7 @@ gc formula version-check <bead-id> [flags]
 
 GitHub integration commands
 
-```
+```sh
 gc github
 ```
 
@@ -1817,7 +1817,7 @@ gc github
 
 GitHub pull-request monitor commands
 
-```
+```sh
 gc github pr
 ```
 
@@ -1835,7 +1835,7 @@ need repair: failed checks, merge conflicts, blocked mergeability, or branches
 behind their base. By default clean and pending-only PRs are omitted; pass
 --all to include every observed PR.
 
-```
+```sh
 gc github pr backfill [monitor-name] [flags]
 ```
 
@@ -1857,13 +1857,13 @@ automatically. Readiness is computed within the displayed set.
 By default prints a table. Use --tree for a Unicode tree view or
 --mermaid for a Mermaid.js flowchart you can paste into Markdown.
 
-```
+```sh
 gc graph <bead-ids|convoy-id...> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc graph gc-42               # expand convoy children
 gc graph gc-1 gc-2 gc-3     # arbitrary beads
 gc graph gc-42 --tree        # dependency tree
@@ -1917,7 +1917,7 @@ Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
 or ID. Subject is required unless --auto is set.
 
-```
+```sh
 gc handoff [subject] [message] [flags]
 ```
 
@@ -1933,7 +1933,7 @@ gc handoff [subject] [message] [flags]
 Help provides help for any command in the application.
 Simply type gc help [path to command] for full details.
 
-```
+```sh
 gc help [command]
 ```
 
@@ -1947,7 +1947,7 @@ With --claim: runs the standard startup claim protocol for one work item.
 
 		The agent is determined from $GC_AGENT or a positional argument.
 
-```
+```sh
 gc hook [agent] [flags]
 ```
 
@@ -1970,7 +1970,7 @@ This protects provider hook callbacks from wedged data-plane commands. The
 child process is the current gc executable, and &lt;gc args...&gt; are passed to it
 verbatim.
 
-```
+```sh
 gc hook run -- <gc args...> [flags]
 ```
 
@@ -1983,7 +1983,7 @@ gc hook run -- <gc args...> [flags]
 
 Manage pack imports
 
-```
+```sh
 gc import
 ```
 
@@ -2022,13 +2022,13 @@ source and optional version.
 The [imports.&lt;name&gt;] table key is the local binding name. Imported package
 names are display/advisory metadata and never become registry identity.
 
-```
+```sh
 gc import add <source> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc import add ./packs/review
 gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2.0'
 
@@ -2046,7 +2046,7 @@ gc import add https://github.com/org/repo/tree/main/packs/review --version '^1.2
 
 Validate installed pack import state
 
-```
+```sh
 gc import check
 ```
 
@@ -2054,7 +2054,7 @@ gc import check
 
 Manage pack-source git credentials
 
-```
+```sh
 gc import credential
 ```
 
@@ -2068,7 +2068,7 @@ gc import credential
 
 Register a pack-source credential
 
-```
+```sh
 gc import credential add <match> (--helper CMD | --token-file PATH | --token-env NAME | --ssh-key-file PATH) [--username NAME] [--global] [flags]
 ```
 
@@ -2085,7 +2085,7 @@ gc import credential add <match> (--helper CMD | --token-file PATH | --token-env
 
 List registered pack-source credentials
 
-```
+```sh
 gc import credential list
 ```
 
@@ -2093,7 +2093,7 @@ gc import credential list
 
 Remove a registered pack-source credential
 
-```
+```sh
 gc import credential remove <match> [flags]
 ```
 
@@ -2105,7 +2105,7 @@ gc import credential remove <match> [flags]
 
 Install imports from pack.toml and packs.lock
 
-```
+```sh
 gc import install
 ```
 
@@ -2113,7 +2113,7 @@ gc import install
 
 List imported packs
 
-```
+```sh
 gc import list [flags]
 ```
 
@@ -2137,7 +2137,7 @@ registry set and ignore the current directory. Prune is a dry run unless
 whose directory was modified more recently than N days ago, protecting
 in-flight installs from a race.
 
-```
+```sh
 gc import prune [flags]
 ```
 
@@ -2151,7 +2151,7 @@ gc import prune [flags]
 
 Remove a pack import
 
-```
+```sh
 gc import remove <name>
 ```
 
@@ -2164,7 +2164,7 @@ and rig-scoped [rigs.imports.*]) plus the full packs.lock closure and the
 lockfile content hash. With --json the output is a stable machine-readable
 document for drift checkers.
 
-```
+```sh
 gc import status [flags]
 ```
 
@@ -2176,7 +2176,7 @@ gc import status [flags]
 
 Upgrade imported packs within their constraints
 
-```
+```sh
 gc import upgrade [name]
 ```
 
@@ -2184,7 +2184,7 @@ gc import upgrade [name]
 
 Explain why an import is present
 
-```
+```sh
 gc import why <name-or-source>
 ```
 
@@ -2205,13 +2205,13 @@ Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
 committed workspace — e.g. from a bootstrap.sh shipped in the repo).
 
-```
+```sh
 gc init [path] [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc init
 gc init ~/my-city
 gc init --default-provider codex ~/my-city
@@ -2256,7 +2256,7 @@ warnings, and parses prompt templates with the same missing-key behavior used
 by runtime prompt rendering. Use gc lint . to recursively find every pack.toml
 below the current directory.
 
-```
+```sh
 gc lint <pack> [flags]
 ```
 
@@ -2273,7 +2273,7 @@ any server that implements the Gas City Service Protocol v0. It opens a browser
 to sign in; use --device for headless shells, or --token to store an existing
 token. The token is stored per service under ~/.gc/credentials.json.
 
-```
+```sh
 gc login [flags]
 ```
 
@@ -2293,7 +2293,7 @@ remove the stored token. Because the session is the only long-lived credential,
 this is the kill switch for a leaked ~/.gc/credentials.json — the local token is
 always removed even if the server-side revoke fails or is not yet supported.
 
-```
+```sh
 gc logout [flags]
 ```
 
@@ -2310,7 +2310,7 @@ Mail is implemented as beads with type="message". Messages have a
 sender, recipient, subject, and body. Use "gc mail check --inject" in agent
 hooks to deliver mail notifications into agent prompts.
 
-```
+```sh
 gc mail
 ```
 
@@ -2341,7 +2341,7 @@ For large advisory backlogs, use --to or --all-recipients with
 --subject-prefix, --subject-contains, or --from to archive a bounded matching
 slice without enumerating IDs by hand.
 
-```
+```sh
 gc mail archive <id>... [flags]
 ```
 
@@ -2367,13 +2367,13 @@ empty. With --inject: outputs a &lt;system-reminder&gt; block suitable for
 hook injection (always exits 0). The recipient defaults to $GC_SESSION_ID,
 $GC_ALIAS, $GC_AGENT, or "human".
 
-```
+```sh
 gc mail check [session] [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc mail check
 gc mail check --inject
 gc mail check mayor
@@ -2389,7 +2389,7 @@ gc mail check mayor
 Show total and unread message counts for a session alias or human.
 The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".
 
-```
+```sh
 gc mail count [session] [flags]
 ```
 
@@ -2403,7 +2403,7 @@ Delete one or more messages by closing the beads. Same effect as archive
 but with different user intent. When multiple IDs are passed, they are
 deleted in a single batch round-trip.
 
-```
+```sh
 gc mail delete <id>... [flags]
 ```
 
@@ -2418,7 +2418,7 @@ List all unread messages for a session alias or human.
 Shows message ID, sender, subject, and body in a table. The recipient defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.
 
-```
+```sh
 gc mail inbox [session] [flags]
 ```
 
@@ -2430,7 +2430,7 @@ gc mail inbox [session] [flags]
 
 Mark a message as read without displaying it. The message will no longer appear in inbox results.
 
-```
+```sh
 gc mail mark-read <id> [flags]
 ```
 
@@ -2442,7 +2442,7 @@ gc mail mark-read <id> [flags]
 
 Mark a message as unread. The message will appear again in inbox results.
 
-```
+```sh
 gc mail mark-unread <id> [flags]
 ```
 
@@ -2457,7 +2457,7 @@ Display a message without marking it as read.
 Same output as "gc mail read" but does not change the message's read status.
 The message will continue to appear in inbox results.
 
-```
+```sh
 gc mail peek <id> [flags]
 ```
 
@@ -2472,7 +2472,7 @@ Display a message and mark it as read.
 Shows the full message details (ID, sender, recipient, subject, date, body).
 The message stays in the store — use "gc mail archive" to remove it.
 
-```
+```sh
 gc mail read <id> [flags]
 ```
 
@@ -2490,7 +2490,7 @@ it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
-```
+```sh
 gc mail reply <id> [-s subject] [-m body] [flags]
 ```
 
@@ -2514,13 +2514,13 @@ Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
 
-```
+```sh
 gc mail send [<to>] [<body>] [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc mail send mayor "Build is green"
 gc mail send mayor -s "Build is green"
 gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
@@ -2544,7 +2544,7 @@ gc mail send --all "Status update: tests passing"
 
 Show all messages sharing a thread ID or message ID, ordered by time.
 
-```
+```sh
 gc mail thread <id> [flags]
 ```
 
@@ -2559,7 +2559,7 @@ Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance
 The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
 in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
 
-```
+```sh
 gc maintenance
 ```
 
@@ -2572,7 +2572,7 @@ gc maintenance
 
 Trigger a Dolt store maintenance run
 
-```
+```sh
 gc maintenance dolt-gc [flags]
 ```
 
@@ -2585,7 +2585,7 @@ gc maintenance dolt-gc [flags]
 
 Show Dolt store maintenance status
 
-```
+```sh
 gc maintenance status [flags]
 ```
 
@@ -2601,7 +2601,7 @@ Projected MCP is target-specific. Use "gc mcp list --agent &lt;name&gt;" when
 the agent has a single deterministic projection target from config, or
 "gc mcp list --session &lt;id&gt;" for a live session target.
 
-```
+```sh
 gc mcp
 ```
 
@@ -2613,7 +2613,7 @@ gc mcp
 
 Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.
 
-```
+```sh
 gc mcp list [flags]
 ```
 
@@ -2627,7 +2627,7 @@ gc mcp list [flags]
 
 Inspect or control Gas City command usage metrics
 
-```
+```sh
 gc metrics
 ```
 
@@ -2642,7 +2642,7 @@ gc metrics
 
 Print the fixed state-independent command-usage request example
 
-```
+```sh
 gc metrics example [flags]
 ```
 
@@ -2654,7 +2654,7 @@ gc metrics example [flags]
 
 Disable command usage metrics and delete local queued data
 
-```
+```sh
 gc metrics off
 ```
 
@@ -2662,7 +2662,7 @@ gc metrics off
 
 Read and accept the command-usage disclosure on a verified TTY
 
-```
+```sh
 gc metrics on
 ```
 
@@ -2670,7 +2670,7 @@ gc metrics on
 
 Show redacted local command-usage metrics status
 
-```
+```sh
 gc metrics status [flags]
 ```
 
@@ -2686,7 +2686,7 @@ Inspect and deliver deferred nudges.
 Deferred nudges are reminders that were queued because the target agent
 was asleep or was not at a safe interactive boundary yet.
 
-```
+```sh
 gc nudge
 ```
 
@@ -2700,7 +2700,7 @@ Show queued and dead-letter nudges for a session.
 
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.
 
-```
+```sh
 gc nudge status [session] [flags]
 ```
 
@@ -2717,7 +2717,7 @@ condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates triggers on each
 tick and dispatches work when a trigger opens.
 
-```
+```sh
 gc order
 ```
 
@@ -2738,7 +2738,7 @@ Evaluate trigger conditions for all orders and show which are due.
 Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.
 
-```
+```sh
 gc order check [flags]
 ```
 
@@ -2758,7 +2758,7 @@ Widen it with --limit (0 fetches every retained run) or bound it by time
 with --since. On a city with a long order-run history an unbounded read
 costs tens of seconds, so prefer keeping a bound when triaging.
 
-```
+```sh
 gc order history [name] [flags]
 ```
 
@@ -2776,7 +2776,7 @@ List all available orders with their trigger type, schedule, and target.
 Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.
 
-```
+```sh
 gc order list [flags]
 ```
 
@@ -2798,7 +2798,7 @@ Use --var key=value (repeatable) to pass args to the order: formula orders
 receive them as formula vars, exec orders as environment variables. A param
 declared required in [order.params] must be supplied or the run fails.
 
-```
+```sh
 gc order run <name> [flags]
 ```
 
@@ -2816,7 +2816,7 @@ Shows the order name, description, formula reference, trigger type,
 scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.
 
-```
+```sh
 gc order show <name> [flags]
 ```
 
@@ -2836,7 +2836,7 @@ per invocation prevents runaway sweeps under load.
 Use --dry-run to log what would be closed without making any changes.
 The controller watchdog also runs this sweep automatically every 5 minutes.
 
-```
+```sh
 gc order sweep-nudge-mail [flags]
 ```
 
@@ -2869,7 +2869,7 @@ GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
 proceed. This guard prevents accidental mass-deletes without an explicit
 operator acknowledgement.
 
-```
+```sh
 gc order sweep-tracking [order ...] [flags]
 ```
 
@@ -2889,7 +2889,7 @@ Packs are git repositories containing pack.toml files that
 define agent configurations for rigs. They are cached locally and
 can be pinned to specific git refs.
 
-```
+```sh
 gc pack
 ```
 
@@ -2908,7 +2908,7 @@ Fetches all configured pack sources from their git repositories,
 updates the local cache, and writes a lockfile with commit hashes
 for reproducibility. Automatically called during "gc start".
 
-```
+```sh
 gc pack fetch
 ```
 
@@ -2919,7 +2919,7 @@ Show configured pack sources with their cache status.
 Displays each pack's name, source URL, git ref, cache status,
 and locked commit hash (if available).
 
-```
+```sh
 gc pack list
 ```
 
@@ -2935,7 +2935,7 @@ the canonical hosted Registry uses the existing Gasworks login through
 to configure that command without invoking a shell. Gasworks credentials are
 never persisted by gc and are never sent to custom Registry origins.
 
-```
+```sh
 gc pack registry
 ```
 
@@ -2956,7 +2956,7 @@ gc pack registry
 
 Add a pack registry
 
-```
+```sh
 gc pack registry add <registry-name> <source> [flags]
 ```
 
@@ -2969,7 +2969,7 @@ gc pack registry add <registry-name> <source> [flags]
 
 List configured pack registries
 
-```
+```sh
 gc pack registry list [flags]
 ```
 
@@ -2984,7 +2984,7 @@ Log in to Gas City Registry and store a local API token.
 By default this opens a browser for GitHub or Google Workspace sign-in. Use
 --device for headless shells, or --token to store an existing registry token.
 
-```
+```sh
 gc pack registry login [flags]
 ```
 
@@ -3012,7 +3012,7 @@ Registry token, GitHub Actions OIDC, then the existing Gasworks login for the
 canonical hosted Registry. Run "gasworks login" once before using the provider,
 or use "gc pack registry login" to create a separate native Registry token.
 
-```
+```sh
 gc pack registry publish <path-to-pack-root> [flags]
 ```
 
@@ -3035,7 +3035,7 @@ gc pack registry publish <path-to-pack-root> [flags]
 
 Refresh cached pack registry catalogs
 
-```
+```sh
 gc pack registry refresh [registry-name] [flags]
 ```
 
@@ -3047,7 +3047,7 @@ gc pack registry refresh [registry-name] [flags]
 
 Remove a pack registry
 
-```
+```sh
 gc pack registry remove <registry-name> [flags]
 ```
 
@@ -3061,7 +3061,7 @@ Show recent publish requests you submitted to Registry, or one request with its 
 
 This command is read-only. Use a personal Registry token; run "gc pack registry login" if you have not logged in yet.
 
-```
+```sh
 gc pack registry requests [request-id] [flags]
 ```
 
@@ -3075,7 +3075,7 @@ gc pack registry requests [request-id] [flags]
 
 Search cached pack registry catalogs
 
-```
+```sh
 gc pack registry search [query] [flags]
 ```
 
@@ -3091,7 +3091,7 @@ gc pack registry search [query] [flags]
 
 Show one pack registry entry
 
-```
+```sh
 gc pack registry show <pack-name> [flags]
 ```
 
@@ -3108,7 +3108,7 @@ Explicit, environment, and stored native Registry tokens take precedence. For
 the canonical hosted Registry, gc otherwise uses the existing Gasworks login
 through the configured credential provider without storing its credential.
 
-```
+```sh
 gc pack registry whoami [flags]
 ```
 
@@ -3121,7 +3121,7 @@ gc pack registry whoami [flags]
 
 Author pack registry release metadata, including canonical pack content hashes.
 
-```
+```sh
 gc pack release
 ```
 
@@ -3136,7 +3136,7 @@ gc pack release
 
 Compute a pack release content hash
 
-```
+```sh
 gc pack release hash <source> [flags]
 ```
 
@@ -3149,7 +3149,7 @@ gc pack release hash <source> [flags]
 
 Stamp a registry release entry with a computed content hash
 
-```
+```sh
 gc pack release stamp <registry.toml> <pack-name> [flags]
 ```
 
@@ -3168,7 +3168,7 @@ gc pack release stamp <registry.toml> <pack-name> [flags]
 
 Validate registry release content hashes
 
-```
+```sh
 gc pack release validate <registry.toml> [flags]
 ```
 
@@ -3181,7 +3181,7 @@ gc pack release validate <registry.toml> [flags]
 
 Verify a pack release content hash
 
-```
+```sh
 gc pack release verify <source> [flags]
 ```
 
@@ -3219,7 +3219,7 @@ prompt_template (a supported minimal config), on templates that render
 to empty output from valid conditional logic, or on suspended states
 (city or agent) — those are legitimate quiet states, not mistakes.
 
-```
+```sh
 gc prime [agent-name] [flags]
 ```
 
@@ -3237,7 +3237,7 @@ Subcommands for authoring agent prompt templates.
 Currently the only subcommand is 'synth', which invokes the configured
 provider in one-shot mode to generate a prompt template for a given role.
 
-```
+```sh
 gc prompt
 ```
 
@@ -3302,7 +3302,7 @@ The output is LLM-generated. Review it carefully before relying on it.
 When --write is used, a comment header records the inputs and generation
 date for traceability.
 
-```
+```sh
 gc prompt synth [flags]
 ```
 
@@ -3344,7 +3344,7 @@ Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.
 
-```
+```sh
 gc ready [flags]
 ```
 
@@ -3374,7 +3374,7 @@ otherwise the directory basename) — in every case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 
-```
+```sh
 gc register [path] [flags]
 ```
 
@@ -3404,7 +3404,7 @@ without disrupting in-flight work. Sessions whose template no longer
 maps to a configured agent are NOT updated; normal orphan/suspended
 drain handles them on the next tick.
 
-```
+```sh
 gc reload [path|name] [flags]
 ```
 
@@ -3423,7 +3423,7 @@ Equivalent to running "gc stop" followed by "gc start". Under supervisor
 mode this unregisters the city, then re-registers it and triggers an
 immediate reconcile.
 
-```
+```sh
 gc restart [path|name] [flags]
 ```
 
@@ -3441,7 +3441,7 @@ Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
 individual agents, or "gc rig resume" for rigs.
 
-```
+```sh
 gc resume [path|name] [flags]
 ```
 
@@ -3457,7 +3457,7 @@ Rigs are project directories that the city orchestrates. Each rig gets
 its own beads database, agent hooks, and cross-rig routing. Agents
 are scoped to rigs via their "dir" field.
 
-```
+```sh
 gc rig
 ```
 
@@ -3506,13 +3506,13 @@ For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
 and other config into the DB, never destructively reinitializes). The git repo
 check remains informational.
 
-```
+```sh
 gc rig add <path> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc rig add /path/to/project
 gc rig add /path/to/project --name myrig
 gc rig add /path/to/project --prefix r1
@@ -3544,7 +3544,7 @@ Shows the HQ rig (the city itself) and all configured rigs. Each rig
 displays its bead ID prefix, recorded default branch when set, and whether
 its beads database is initialized.
 
-```
+```sh
 gc rig list [flags]
 ```
 
@@ -3559,13 +3559,13 @@ Remove a rig from the current city's configuration.
 Removes the rig entry from city.toml and removes its machine-local path
 binding from .gc/site.toml.
 
-```
+```sh
 gc rig remove <name> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc rig remove myrig
 ```
 
@@ -3580,7 +3580,7 @@ Kill all agent sessions belonging to a rig.
 The reconciler will restart the agents on its next tick. This is a
 quick way to force-refresh all agents working on a particular project.
 
-```
+```sh
 gc rig restart [name]
 ```
 
@@ -3592,7 +3592,7 @@ even when the rig declares suspended_on_start = true.
 
 The reconciler will start the rig's agents on its next tick.
 
-```
+```sh
 gc rig resume [name] [flags]
 ```
 
@@ -3613,13 +3613,13 @@ will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state.
 
-```
+```sh
 gc rig set-endpoint <rig> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc rig set-endpoint frontend --inherit
 gc rig set-endpoint frontend --external --host db.example.com --port 3307
 gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
@@ -3644,7 +3644,7 @@ gc rig set-endpoint frontend --inherit --dry-run
 
 Show rig status and agent running state
 
-```
+```sh
 gc rig status [name] [flags]
 ```
 
@@ -3664,7 +3664,7 @@ database remains accessible. Use "gc rig resume" to restore.
 Suspension state is stored in the runtime directory, not city.toml,
 so it is local to this machine and does not need to be committed.
 
-```
+```sh
 gc rig suspend [name] [flags]
 ```
 
@@ -3683,7 +3683,7 @@ designed to be called from within running agent sessions, not by humans.
 The exception is "gc runtime check", which validates a Runtime Provider
 Protocol executable — run by humans and runtime-pack CIs.
 
-```
+```sh
 gc runtime
 ```
 
@@ -3717,7 +3717,7 @@ are always treated as the executable itself.
 
 The protocol contract is docs/reference/exec-session-provider.md.
 
-```
+```sh
 gc runtime check <name|executable> [flags]
 ```
 
@@ -3744,7 +3744,7 @@ arguments are always the executable itself.
 Use --json for a machine-readable report (CI artifacts). Exits non-zero if
 any required requirement fails.
 
-```
+```sh
 gc runtime conformance <name|executable> [flags]
 ```
 
@@ -3762,7 +3762,7 @@ for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
 "gc runtime undrain" to cancel.
 
-```
+```sh
 gc runtime drain <name> [flags]
 ```
 
@@ -3779,7 +3779,7 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-```
+```sh
 gc runtime drain-ack [name] [flags]
 ```
 
@@ -3795,7 +3795,7 @@ Returns exit code 0 if draining, 1 if not. Designed for use in
 conditionals: "if gc runtime drain-check; then finish-up; fi". Without
 arguments, uses the current session context.
 
-```
+```sh
 gc runtime drain-check [name] [flags]
 ```
 
@@ -3819,7 +3819,7 @@ does not put the session into a suspended state or change its sleep_intent.
 The default duration (45m0s) covers long-running operations.
 Pass --duration to override.
 
-```
+```sh
 gc runtime heartbeat [flags]
 ```
 
@@ -3847,7 +3847,7 @@ timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
 This command is designed to be called from within a session context.
 It emits a session.draining event before waiting.
 
-```
+```sh
 gc runtime request-restart
 ```
 
@@ -3858,7 +3858,7 @@ Cancel a pending drain signal on a session.
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID.
 
-```
+```sh
 gc runtime undrain <name> [flags]
 ```
 
@@ -3870,7 +3870,7 @@ gc runtime undrain <name> [flags]
 
 Inspect workspace services
 
-```
+```sh
 gc service
 ```
 
@@ -3884,7 +3884,7 @@ gc service
 
 Show detailed workspace service status
 
-```
+```sh
 gc service doctor <name> [flags]
 ```
 
@@ -3896,7 +3896,7 @@ gc service doctor <name> [flags]
 
 List workspace services
 
-```
+```sh
 gc service list [flags]
 ```
 
@@ -3911,7 +3911,7 @@ Stop and restart a workspace service by name.
 The controller closes the current service process and starts a fresh one.
 Useful after updating pack scripts without a full city restart.
 
-```
+```sh
 gc service restart <name> [flags]
 ```
 
@@ -3927,7 +3927,7 @@ Sessions are conversations backed by agent templates. They can be
 suspended to free resources and resumed later with full conversation
 continuity.
 
-```
+```sh
 gc session
 ```
 
@@ -3961,7 +3961,7 @@ using the provider's resume mechanism (if supported) or restarts.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
-```
+```sh
 gc session attach <session-id-or-alias>
 ```
 
@@ -3971,7 +3971,7 @@ End a conversation. Stops the runtime if active and closes the bead.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
-```
+```sh
 gc session close <session-id-or-alias> [flags]
 ```
 
@@ -3989,7 +3989,7 @@ useful for unsticking a session without losing its conversation history.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
-```
+```sh
 gc session kill <session-id-or-alias> [flags]
 ```
 
@@ -4001,7 +4001,7 @@ gc session kill <session-id-or-alias> [flags]
 
 List all chat sessions. By default shows active and suspended sessions.
 
-```
+```sh
 gc session list [flags]
 ```
 
@@ -4031,13 +4031,13 @@ The HTTP API's tail query parameter still uses compaction-segment
 semantics.
 Use -f to follow new messages as they arrive.
 
-```
+```sh
 gc session logs <session> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc session logs mayor
 gc session logs mayor --tail 2
 gc session logs gc-123 --tail 20
@@ -4064,13 +4064,13 @@ and refined by the title model in the background.
 If the template config sets tmux_alias, it controls the runtime tmux
 session_name. --alias still sets the public command and mail alias.
 
-```
+```sh
 gc session new <template> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc session new helper
 gc session new helper --alias sky
 gc session new helper --title "debugging auth"
@@ -4101,7 +4101,7 @@ Pass --about &lt;bead-id&gt; when the nudge is about a specific bead. A nudge
 that has to be queued (the session is busy or asleep) is retired instead
 of delivered if that bead closes before the next safe boundary.
 
-```
+```sh
 gc session nudge <id-or-alias> <message...> [flags]
 ```
 
@@ -4115,7 +4115,7 @@ gc session nudge <id-or-alias> <message...> [flags]
 
 View session output without attaching
 
-```
+```sh
 gc session peek <session-id-or-alias> [flags]
 ```
 
@@ -4132,7 +4132,7 @@ Pinning does not clear suspend holds or other hard blockers. If the target is
 a configured named session that has not been materialized yet, pin creates its
 canonical bead so the reconciler can start it when unblocked.
 
-```
+```sh
 gc session pin <session-id-or-alias> [flags]
 ```
 
@@ -4147,13 +4147,13 @@ suspended sessions are affected — active sessions are never pruned. Pass
 --state to opt asleep or drained sessions into the same cleanup pass; multiple
 states may be comma-separated.
 
-```
+```sh
 gc session prune [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc session prune --before 7d
 gc session prune --before 24h
 gc session prune --state asleep,suspended,drained --before 1h
@@ -4169,7 +4169,7 @@ gc session prune --state asleep,suspended,drained --before 1h
 
 Rename a session
 
-```
+```sh
 gc session rename <session-id-or-alias> <title> [flags]
 ```
 
@@ -4189,7 +4189,7 @@ the fresh restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
-```
+```sh
 gc session reset <session-id-or-alias> [flags]
 ```
 
@@ -4204,13 +4204,13 @@ Submit a user message to a session without choosing provider transport details.
 The runtime decides whether to wake, inject immediately, or queue the message
 according to the selected semantic intent.
 
-```
+```sh
 gc session submit <id-or-alias> <message...> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc session submit mayor "status update"
 gc session submit mayor "after this run, handle docs" --intent follow_up
 gc session submit mayor "stop and do this instead" --intent interrupt_now
@@ -4228,7 +4228,7 @@ The session bead persists and can be resumed later.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
-```
+```sh
 gc session suspend <session-id-or-alias> [flags]
 ```
 
@@ -4243,7 +4243,7 @@ Remove only the durable pin override from a session.
 Unpinning does not force an immediate stop. The reconciler will apply the
 normal wake/sleep rules on its next pass.
 
-```
+```sh
 gc session unpin <session-id-or-alias> [flags]
 ```
 
@@ -4255,7 +4255,7 @@ gc session unpin <session-id-or-alias> [flags]
 
 Register a dependency wait for a session
 
-```
+```sh
 gc session wait [session-id-or-alias] [flags]
 ```
 
@@ -4276,13 +4276,13 @@ has no wake reasons, it remains asleep.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
-```
+```sh
 gc session wake <session-id-or-alias> [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc session wake gc-42
 gc session wake mayor
 ```
@@ -4298,7 +4298,7 @@ provides tab-completion for gc commands and flags.
 
 Subcommands: install, remove, status.
 
-```
+```sh
 gc shell
 ```
 
@@ -4316,7 +4316,7 @@ If no shell is specified, the shell is detected from $SHELL.
 The completion script is written to ~/.gc/completions/ and a source line
 is added to your shell RC file.
 
-```
+```sh
 gc shell install [bash|zsh|fish]
 ```
 
@@ -4324,7 +4324,7 @@ gc shell install [bash|zsh|fish]
 
 Remove the gc shell completion hook from your shell RC file and delete the completion script.
 
-```
+```sh
 gc shell remove
 ```
 
@@ -4332,7 +4332,7 @@ gc shell remove
 
 Show shell integration status
 
-```
+```sh
 gc shell status [flags]
 ```
 
@@ -4357,7 +4357,7 @@ name collision. For the materialized set, inspect the
 &lt;scope-root&gt;/.&lt;vendor&gt;/skills/ sink after "gc start" or run
 "gc doctor" to surface collisions.
 
-```
+```sh
 gc skill
 ```
 
@@ -4369,7 +4369,7 @@ gc skill
 
 List the current shared and agent-local visible skills, optionally scoped to an agent or session.
 
-```
+```sh
 gc skill list [flags]
 ```
 
@@ -4409,7 +4409,7 @@ Examples:
   gc sling mayor code-review --formula      # instantiate formula, route its root
   echo "fix login" | gc sling mayor --stdin # read bead text from stdin
 
-```
+```sh
 gc sling [target] <bead-or-formula-or-text> [flags]
 ```
 
@@ -4441,13 +4441,13 @@ packs as needed, registers the city with the machine-wide supervisor,
 ensures the supervisor is running, and triggers immediate reconciliation.
 Use "gc supervisor run" for foreground operation.
 
-```
+```sh
 gc start [path|name] [flags]
 ```
 
 **Example:**
 
-```
+```sh
 gc start
 gc start ~/my-city
 gc start --dry-run
@@ -4466,7 +4466,7 @@ gc supervisor run
 Shows a city-wide overview: controller state, suspension,
 all agents with running status, rigs, and a summary count.
 
-```
+```sh
 gc status [path|name] [flags]
 ```
 
@@ -4496,7 +4496,7 @@ stop waves, the configured shutdown grace wait, and a second orphan
 cleanup pass. Use --force to skip the interrupt grace period and go
 straight to kill.
 
-```
+```sh
 gc stop [path|name] [flags]
 ```
 
@@ -4515,7 +4515,7 @@ These are operator commands. Nothing here runs on boot: a city whose
 names the migrate command, because the source's writer set is something an
 operator arranges rather than something a program can observe.
 
-```
+```sh
 gc storage
 ```
 
@@ -4540,7 +4540,7 @@ The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.
 
-```
+```sh
 gc storage migrate [flags]
 ```
 
@@ -4566,7 +4566,7 @@ command run twice: the migration is one-shot on purpose, and forcing it to
 re-copy would re-import a serving binding from a source that no longer holds
 what the binding does.
 
-```
+```sh
 gc storage recover-stranded [flags]
 ```
 
@@ -4590,7 +4590,7 @@ it would create the very database the report is being asked about.
 It exits non-zero when the city is configured for a binding it has not
 converged on, so a deployment script can gate on it.
 
-```
+```sh
 gc storage status
 ```
 
@@ -4602,7 +4602,7 @@ The supervisor manages all registered cities from a single process,
 hosting a unified API server. Use "gc init", "gc start", or "gc register"
 to add cities.
 
-```
+```sh
 gc supervisor
 ```
 
@@ -4622,7 +4622,7 @@ gc supervisor
 Install the machine-wide supervisor as a platform service that
 starts on login.
 
-```
+```sh
 gc supervisor install [flags]
 ```
 
@@ -4641,7 +4641,7 @@ writing only to the service manager's log: an existing log file is still
 tailed (with a staleness warning), and when the file is absent the command
 points at the service manager's log instead.
 
-```
+```sh
 gc supervisor logs [flags]
 ```
 
@@ -4657,7 +4657,7 @@ immediately re-read the registry and reconcile all cities. Use this
 after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.
 
-```
+```sh
 gc supervisor reload [flags]
 ```
 
@@ -4679,7 +4679,7 @@ in the supervisor's environment to disable the tee when the service manager
 already captures output (e.g. a hand-managed systemd unit with
 StandardOutput=journal).
 
-```
+```sh
 gc supervisor run
 ```
 
@@ -4689,7 +4689,7 @@ Start the machine-wide supervisor in the background.
 
 This forks "gc supervisor run", verifies it became ready, and returns.
 
-```
+```sh
 gc supervisor start [flags]
 ```
 
@@ -4701,7 +4701,7 @@ gc supervisor start [flags]
 
 Check if the supervisor is running
 
-```
+```sh
 gc supervisor status [flags]
 ```
 
@@ -4727,7 +4727,7 @@ whether or not --wait is set, gc then verifies a previously-running
 supervisor actually exited (failing with its PID when the unit does
 not manage it), and stop with nothing running still exits 1.
 
-```
+```sh
 gc supervisor stop [flags]
 ```
 
@@ -4745,7 +4745,7 @@ On systemd, uninstall refuses to remove an active unit when the supervisor
 control socket is unavailable. Start the supervisor first so it can re-adopt
 preserved sessions, then retry uninstall.
 
-```
+```sh
 gc supervisor uninstall
 ```
 
@@ -4761,7 +4761,7 @@ The reconciler won't spawn agents, gc hook/prime return empty.
 
 Use "gc resume" to restore.
 
-```
+```sh
 gc suspend [path|name] [flags]
 ```
 
@@ -4776,7 +4776,7 @@ Inspect and control the session reconciler trace stream.
 Trace state is persisted locally under .gc/runtime/session-reconciler-trace
 and can be managed even when the controller is offline.
 
-```
+```sh
 gc trace
 ```
 
@@ -4794,7 +4794,7 @@ gc trace
 
 Show a cycle by tick id
 
-```
+```sh
 gc trace cycle [flags]
 ```
 
@@ -4806,7 +4806,7 @@ gc trace cycle [flags]
 
 Show reason codes observed in trace records
 
-```
+```sh
 gc trace reasons [flags]
 ```
 
@@ -4819,7 +4819,7 @@ gc trace reasons [flags]
 
 Show trace records
 
-```
+```sh
 gc trace show [flags]
 ```
 
@@ -4837,7 +4837,7 @@ gc trace show [flags]
 
 Start or extend tracing for a template
 
-```
+```sh
 gc trace start [flags]
 ```
 
@@ -4852,7 +4852,7 @@ gc trace start [flags]
 
 Show trace arms and stream state
 
-```
+```sh
 gc trace status [flags]
 ```
 
@@ -4864,7 +4864,7 @@ gc trace status [flags]
 
 Stop tracing for a template
 
-```
+```sh
 gc trace stop [flags]
 ```
 
@@ -4877,7 +4877,7 @@ gc trace stop [flags]
 
 Follow trace records
 
-```
+```sh
 gc trace tail [flags]
 ```
 
@@ -4900,7 +4900,7 @@ If the supervisor is running, it immediately stops managing the city. Unlike
 'gc register' (which is idempotent), this errors when the resolved path is not
 a registered city, so it is not a silent no-op on an unknown target.
 
-```
+```sh
 gc unregister [path|name] [flags]
 ```
 
@@ -4914,7 +4914,7 @@ Print the gc version string.
 
 Use --long to include git commit and build date metadata.
 
-```
+```sh
 gc version [flags]
 ```
 
@@ -4927,7 +4927,7 @@ gc version [flags]
 
 Inspect and manage durable session waits
 
-```
+```sh
 gc wait
 ```
 
@@ -4942,7 +4942,7 @@ gc wait
 
 Cancel a wait
 
-```
+```sh
 gc wait cancel <wait-id> [flags]
 ```
 
@@ -4954,7 +4954,7 @@ gc wait cancel <wait-id> [flags]
 
 Show details for a wait
 
-```
+```sh
 gc wait inspect <wait-id> [flags]
 ```
 
@@ -4966,7 +4966,7 @@ gc wait inspect <wait-id> [flags]
 
 List durable waits
 
-```
+```sh
 gc wait list [flags]
 ```
 
@@ -4980,7 +4980,7 @@ gc wait list [flags]
 
 Manually mark a wait ready
 
-```
+```sh
 gc wait ready <wait-id> [flags]
 ```
 
@@ -4992,7 +4992,7 @@ gc wait ready <wait-id> [flags]
 
 Show the authenticated hosted Gas City account
 
-```
+```sh
 gc whoami [flags]
 ```
 

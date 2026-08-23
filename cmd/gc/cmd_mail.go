@@ -2037,8 +2037,8 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 	// is agents with known identities reading mail addressed to others.
 	actor := eventActor()
 	m, err := mp.Get(id)
-	telemetry.RecordMailOp(context.Background(), "read", err)
 	if err != nil {
+		telemetry.RecordMailOp(context.Background(), "read", err)
 		fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2046,10 +2046,12 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 		fmt.Fprintf(stderr, "gc mail read: %s is addressed to %q, not %q — showing without marking read (recipient's unread state preserved; use `gc mail peek` for send verification)\n", id, m.To, actor) //nolint:errcheck
 	} else {
 		if m, err = mp.Read(id); err != nil {
+			telemetry.RecordMailOp(context.Background(), "read", err)
 			fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
+	telemetry.RecordMailOp(context.Background(), "read", nil)
 
 	rec.Record(events.Event{
 		Type:    events.MailRead,

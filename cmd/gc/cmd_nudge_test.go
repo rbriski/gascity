@@ -5684,13 +5684,14 @@ func TestSplitUnconfirmedSubmitNudges(t *testing.T) {
 	unconfirmed := fmt.Errorf("%w: session %q", sessiontmux.ErrNudgeSubmitUnconfirmed, "sess")
 	items := []queuedNudge{
 		{ID: "fresh", Attempts: 0},
-		{ID: "second", Attempts: 1},
-		{ID: "later", Attempts: 3},
+		{ID: "second", Attempts: 1, LastError: sessiontmux.ErrNudgeSubmitUnconfirmed.Error()},
+		{ID: "later", Attempts: 3, LastError: sessiontmux.ErrNudgeSubmitUnconfirmed.Error()},
+		{ID: "other-failure", Attempts: 1, LastError: "paste failed"},
 	}
 
 	retry, presumed := splitUnconfirmedSubmitNudges(unconfirmed, items)
-	if len(retry) != 1 || retry[0].ID != "fresh" {
-		t.Fatalf("retry = %+v, want only the first-attempt item", retry)
+	if len(retry) != 2 || retry[0].ID != "fresh" || retry[1].ID != "other-failure" {
+		t.Fatalf("retry = %+v, want fresh and unrelated-prior-failure items", retry)
 	}
 	if len(presumed) != 2 || presumed[0].ID != "second" || presumed[1].ID != "later" {
 		t.Fatalf("presumed = %+v, want the items whose submit already reached the runtime", presumed)

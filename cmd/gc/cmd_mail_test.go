@@ -32,6 +32,15 @@ import (
 
 type countOnlyMailProvider struct{}
 
+type readFailMailProvider struct {
+	mail.Provider
+	message mail.Message
+	err     error
+}
+
+func (p readFailMailProvider) Get(string) (mail.Message, error)  { return p.message, nil }
+func (p readFailMailProvider) Read(string) (mail.Message, error) { return mail.Message{}, p.err }
+
 type failingListByLabelStore struct {
 	beads.Store
 	err error
@@ -1824,6 +1833,24 @@ func TestMailReadNotFound(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "message not found") {
 		t.Errorf("stderr = %q, want 'message not found'", stderr.String())
+	}
+}
+
+func TestMailReadRecordsReadFailureTelemetry(t *testing.T) {
+	reader := installManualMetricReader(t)
+	t.Setenv("GC_ALIAS", "worker")
+	provider := readFailMailProvider{
+		message: mail.Message{ID: "gc-1", To: "worker"},
+		err:     errors.New("read backend unavailable"),
+	}
+
+	var stderr bytes.Buffer
+	if code := doMailRead(provider, events.Discard, []string{"gc-1"}, &bytes.Buffer{}, &stderr); code != 1 {
+		t.Fatalf("doMailRead = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	points := collectCounterDataPoints(t, reader, "gc.mail.operations.total")
+	if !hasDataPointWithStringAttrs(points, map[string]string{"operation": "read", "status": "error"}) {
+		t.Fatalf("mail telemetry points = %#v, want read/error", points)
 	}
 }
 

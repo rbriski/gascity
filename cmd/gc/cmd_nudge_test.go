@@ -3477,6 +3477,50 @@ func TestCmdNudgeDrainStampsLastNudgeDeliveredAt(t *testing.T) {
 	}
 }
 
+func TestCmdNudgeDrainRetiresReminderForClosedSubjectBead(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{Title: "Session: worker", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: map[string]string{"session_name": "worker-session", "agent_name": "worker", "template": "worker", "state": string(session.StateActive)}})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	subject, err := store.Create(beads.Bead{Title: "closed work", Type: "task"})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+	if err := store.Close(subject.ID); err != nil {
+		t.Fatalf("close subject: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", "closed work reminder", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: sessionBead.ID, Reference: &nudgeReference{Kind: "bead", ID: subject.ID}})
+	if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
+		t.Fatalf("enqueue nudge: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat([]string{sessionBead.ID}, false, "", &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), item.Message) {
+		t.Fatalf("stdout = %q, must not inject reminder for closed subject", stdout.String())
+	}
+	pending, inFlight, dead, err := listQueuedNudges(cityDir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want closed-subject reminder retired", len(pending), len(inFlight), len(dead))
+	}
+}
+
 func TestDeliverSlingNudgeWaitIdleWrapsInSystemReminder(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

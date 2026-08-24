@@ -2723,6 +2723,8 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 		{"claude busy spinner long turn", []string{"✶ Investigating… (31m 40s · ↓ 108.6k tokens)"}, true},
 		{"claude busy spinner thinking", []string{"✢ Clauding… (56s · ↓ 1.7k tokens · thinking with max effort)"}, true},
 		{"codex busy spinner bullet", []string{"◦ Working (2m 48s • esc to interrupt)"}, true},
+		{"claude spinner wrapped across adjacent lines", []string{"(4m 28s", "· ↓ 11.5k tokens)"}, true},
+		{"spinner fragments separated by scrollback", []string{"idle (4m 28s", "unrelated scrollback", "· unrelated"}, false},
 		// Idle/done markers and status chrome must NOT read as busy — a false
 		// positive makes WaitForIdle never return, so the agent is never nudged.
 		{"claude done marker", []string{"✻ Worked for 1m 49s", "❯ "}, false},

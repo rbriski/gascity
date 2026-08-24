@@ -117,13 +117,13 @@ func renderCommand(w io.Writer, cmd *cobra.Command) error {
 	}
 
 	// Synopsis.
-	if _, err := fmt.Fprintf(w, "```\n%s\n```\n\n", cmd.UseLine()); err != nil {
+	if _, err := fmt.Fprintf(w, "```sh\n%s\n```\n\n", cmd.UseLine()); err != nil {
 		return err
 	}
 
 	// Example.
 	if cmd.Example != "" {
-		if _, err := fmt.Fprintf(w, "**Example:**\n\n```\n%s\n```\n\n", dedentExample(cmd.Example)); err != nil {
+		if _, err := fmt.Fprintf(w, "**Example:**\n\n```sh\n%s\n```\n\n", dedentExample(cmd.Example)); err != nil {
 			return err
 		}
 	}

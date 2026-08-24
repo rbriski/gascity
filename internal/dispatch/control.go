@@ -96,10 +96,18 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 				beadmeta.FailedAttemptMetadataKey: strconv.Itoa(iterationNum),
 			}
 			clearControllerSpawnErrorMetadata(closeMetadata)
+			control, err := store.Get(beadID)
+			if err != nil {
+				return ControlResult{}, fmt.Errorf("%s: loading exhausted control: %w", beadID, err)
+			}
+			skipped, err := SkipBlockedWorkflowDependents(store, control)
+			if err != nil {
+				return ControlResult{}, fmt.Errorf("%s: skipping downstream after exhaustion: %w", beadID, err)
+			}
 			if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", beadID, err)
 			}
-			return ControlResult{Processed: true, Action: "fail"}, nil
+			return ControlResult{Processed: true, Action: "fail", Skipped: skipped}, nil
 		},
 	}
 	return processAttemptControl(store, bead, opts, strategy)
@@ -177,6 +185,10 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
+		skipped, err := SkipBlockedWorkflowDependents(store, bead)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: skipping downstream after hard failure: %w", bead.ID, err)
+		}
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
@@ -184,7 +196,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
-		return ControlResult{Processed: true, Action: "hard-fail", Skipped: scopeResult.Skipped}, nil
+		return ControlResult{Processed: true, Action: "hard-fail", Skipped: skipped + scopeResult.Skipped}, nil
 
 	case attemptContinue:
 		if attemptNum >= maxAttempts {
@@ -386,6 +398,13 @@ func markControllerSpawnError(store beads.Store, beadID string, err error, opts 
 	metadata[beadmeta.ControllerErrorClassMetadataKey] = beadmeta.FailureClassHard
 	metadata[beadmeta.ControllerRetryableMetadataKey] = ""
 	metadata[beadmeta.FinalDispositionMetadataKey] = beadmeta.DispositionControllerError
+	if control, getErr := store.Get(beadID); getErr != nil {
+		opts.tracef("controller-spawn-error bead=%s loading control for downstream skip failed err=%v", beadID, getErr)
+		return false
+	} else if _, skipErr := SkipBlockedWorkflowDependents(store, control); skipErr != nil {
+		opts.tracef("controller-spawn-error bead=%s skipping downstream failed err=%v", beadID, skipErr)
+		return false
+	}
 	if writeErr := store.SetMetadataBatch(beadID, metadata); writeErr != nil {
 		opts.tracef("controller-spawn-error bead=%s recording hard failure metadata failed err=%v", beadID, writeErr)
 	}
@@ -626,10 +645,81 @@ func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, rea
 		beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 	}
 	clearControllerSpawnErrorMetadata(closeMetadata)
+	control, err := store.Get(beadID)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: loading exhausted control: %w", beadID, err)
+	}
+	skipped, err := SkipBlockedWorkflowDependents(store, control)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: skipping downstream after exhaustion: %w", beadID, err)
+	}
 	if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", beadID, err)
 	}
-	return ControlResult{Processed: true, Action: "fail"}, nil
+	return ControlResult{Processed: true, Action: "fail", Skipped: skipped}, nil
+}
+
+// SkipBlockedWorkflowDependents closes every open blocking-dependent reachable
+// from an unscoped terminal control before that control is closed. Keeping the
+// failed control open until this finishes prevents status-only readiness from
+// briefly exposing downstream work. Scoped controls use abortScope instead.
+//
+// The operation is intentionally ordered for stores without atomic Tx support:
+// a partial failure may leave some dependents skipped, but it leaves the
+// control open and therefore cannot release the remainder.
+func SkipBlockedWorkflowDependents(store beads.Store, control beads.Bead) (int, error) {
+	if strings.TrimSpace(control.Metadata[beadmeta.ScopeRefMetadataKey]) != "" {
+		return 0, nil
+	}
+	rootID := strings.TrimSpace(control.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" {
+		return 0, nil
+	}
+
+	seen := map[string]bool{control.ID: true}
+	queue := []string{control.ID}
+	pending := make(map[string]beads.Bead)
+	finalizers := make(map[string]beads.Bead)
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		deps, err := store.DepList(current, "up")
+		if err != nil {
+			return 0, fmt.Errorf("listing dependents of %s: %w", current, err)
+		}
+		for _, dep := range deps {
+			if dep.Type != "blocks" || seen[dep.IssueID] {
+				continue
+			}
+			dependent, err := store.Get(dep.IssueID)
+			if err != nil {
+				return 0, fmt.Errorf("loading dependent %s: %w", dep.IssueID, err)
+			}
+			if dependent.ID == rootID || strings.TrimSpace(dependent.Metadata[beadmeta.RootBeadIDMetadataKey]) != rootID {
+				continue
+			}
+			seen[dependent.ID] = true
+			queue = append(queue, dependent.ID)
+			if dependent.Status != "closed" {
+				if dependent.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
+					finalizers[dependent.ID] = dependent
+				} else {
+					pending[dependent.ID] = dependent
+				}
+			}
+		}
+	}
+
+	// Keep workflow finalizers runnable so they can close the root and clean up
+	// sidecars/artifacts. A direct edge to the failed control lets outcome
+	// aggregation observe the terminal failure after intermediate work is
+	// skipped. DepAdd is idempotent when the finalizer is already a direct sink.
+	for _, finalizerID := range sortedPendingIDs(finalizers) {
+		if err := store.DepAdd(finalizerID, control.ID, "blocks"); err != nil {
+			return 0, fmt.Errorf("linking finalizer %s to failed control %s: %w", finalizerID, control.ID, err)
+		}
+	}
+	return skipScopeMembers(store, sortedPendingIDs(pending))
 }
 
 // spawnNextAttempt deserializes the frozen step spec, builds an attempt recipe,

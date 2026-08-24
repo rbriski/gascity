@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -88,6 +89,7 @@ func (p *Provider) List(filter events.Filter) ([]events.Event, error) {
 	if err != nil {
 		return nil, err
 	}
+	sort.SliceStable(evts, func(i, j int) bool { return evts[i].Seq < evts[j].Seq })
 	return events.ApplyFilter(evts, filter), nil
 }
 

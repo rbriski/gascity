@@ -97,7 +97,7 @@ func oldEffectiveOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 		route = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
 	return `{ ` +
 		`bd list --assignee=` + a.QualifiedName() +
@@ -123,7 +123,7 @@ func oldEffectiveOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 		template = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +

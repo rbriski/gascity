@@ -88,12 +88,23 @@ func poolDemandMigrationFilterJQ(limit int) string {
 	return shellquote.Join([]string{"jq", filter})
 }
 
-func bdQueryEphemeralStatusShell(status string) string {
-	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
+func bdQueryEphemeralInProgressQuietShell() string {
+	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status=in_progress") + ` --limit=0 2>/dev/null`
 }
 
-func bdQueryEphemeralStatusQuietShell(status string) string {
-	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
+// bdQueryEphemeralAssignedStatusQuietShell pushes the assignee selector into
+// bd's query instead of hydrating every wisp with the requested status and
+// discarding other agents' rows in jq. Agent identities must be quoted in the
+// query language because qualified names contain slashes; the escaped quotes
+// become literal query-string quotes after the shell expands shellVar.
+func bdQueryEphemeralAssignedStatusQuietShell(status, shellVar string) string {
+	return `bd query --json "ephemeral=true AND status=` + status + ` AND assignee=\"$` + shellVar + `\"" --limit=0 2>/dev/null`
+}
+
+// bdQueryEphemeralUnassignedStatusShell scopes a pool fallback to rows bd can
+// prove are unassigned before jq applies the metadata routing predicate.
+func bdQueryEphemeralUnassignedStatusShell(status string) string {
+	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status+" AND assignee=none") + ` --limit=0`
 }
 
 func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
@@ -122,9 +133,9 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 		limit,
 		true,
 	)
-	query := bdQueryEphemeralStatusShell("open")
+	query := bdQueryEphemeralUnassignedStatusShell("open")
 	if quiet {
-		query = bdQueryEphemeralStatusQuietShell("open")
+		query += ` 2>/dev/null`
 	}
 	jqStderr := ""
 	if quiet {
@@ -308,7 +319,7 @@ func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) strin
 
 func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
 	_ = includeEphemeralReady
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return `r=$(` + bdQueryEphemeralAssignedStatusQuietShell("in_progress", shellVar) + ` | ` +
 		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
@@ -318,7 +329,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 		return ""
 	}
 	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
+	return `r=$(` + bdQueryEphemeralAssignedStatusQuietShell("open", shellVar) + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
@@ -634,7 +645,7 @@ func buildOnDeath(a *Agent, includeEphemeralInProgress bool) string {
 		route = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
@@ -676,7 +687,7 @@ func buildOnBoot(a *Agent, includeEphemeralInProgress bool) string {
 		template = a.PoolName
 	}
 	_ = includeEphemeralInProgress
-	ephemeralRead := bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
 		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
 	return `template=` + shellquote.Quote(template) + `; ` +
 		`{ ` +

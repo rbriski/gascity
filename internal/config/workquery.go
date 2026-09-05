@@ -70,6 +70,21 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
+// bdQueryEphemeralAssignedStatusQuietShell pushes the assignee selector into
+// bd's query instead of hydrating every wisp with the requested status and
+// discarding other agents' rows in jq. Agent identities must be quoted in the
+// query language because qualified names contain slashes; the escaped quotes
+// become literal query-string quotes after the shell expands shellVar.
+func bdQueryEphemeralAssignedStatusQuietShell(status, shellVar string) string {
+	return `bd query --json "ephemeral=true AND status=` + status + ` AND assignee=\"$` + shellVar + `\"" --limit=0 2>/dev/null`
+}
+
+// bdQueryEphemeralUnassignedStatusShell scopes a pool fallback to rows bd can
+// prove are unassigned before jq applies the metadata routing predicate.
+func bdQueryEphemeralUnassignedStatusShell(status string) string {
+	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status+" AND assignee=none") + ` --limit=0`
+}
+
 func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
 	filter := `[.[] | ` + selector +
 		` | select(((.issue_type // .type // "") != "epic"))` +
@@ -92,9 +107,9 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
 		limit,
 	)
-	query := bdQueryEphemeralStatusShell("open")
+	query := bdQueryEphemeralUnassignedStatusShell("open")
 	if quiet {
-		query = bdQueryEphemeralStatusQuietShell("open")
+		query += ` 2>/dev/null`
 	}
 	jqStderr := ""
 	if quiet {
@@ -218,7 +233,7 @@ func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) strin
 
 func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
 	_ = includeEphemeralReady
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return `r=$(` + bdQueryEphemeralAssignedStatusQuietShell("in_progress", shellVar) + ` | ` +
 		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
@@ -228,7 +243,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 		return ""
 	}
 	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
+	return `r=$(` + bdQueryEphemeralAssignedStatusQuietShell("open", shellVar) + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }

@@ -540,6 +540,26 @@ test_bead_id_branch_resolves_multi_level_subbead_id() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (ga-r3h): release work in another rig used the branch
+# rescue/ep-9wy-waterguru-probe. The guard only recognized ga-* ids, so after
+# its lease was revoked the assignee fallback was empty and the late push was
+# allowed. Branch identity is durable across revocation and must win here.
+test_branch_id_from_any_rig_blocks_revoked_worker() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "rescue/ep-9wy-waterguru-probe")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ep-9wy" "blocked" "" "" "[]"
+    out="$(run_guard "$repo" "$fbd" "revoked-worker" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ep-9wy" <<<"$out" && grep -qi "status" <<<"$out"; then
+        record_pass "block/any-rig-branch-id-revoked-worker (rc=$rc, branch identity resolves ep-9wy after revocation)"
+    else
+        record_fail "block/any-rig-branch-id-revoked-worker" "expected revoked ep-9wy branch to be blocked, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_bead_id_fallback_used_when_branch_no_match() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
@@ -854,6 +874,7 @@ run_all() {
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
+    test_branch_id_from_any_rig_blocks_revoked_worker
     test_bead_id_fallback_used_when_branch_no_match
     test_bead_id_deploy_gate_branch_prefers_live_assignee
     test_bead_id_deploy_gate_branch_allows_when_no_live_assignee

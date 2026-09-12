@@ -96,6 +96,14 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
+// bdQueryEphemeralAssignedStatusQuietShell scopes an ephemeral compatibility
+// probe to its assignee before bd reads history. The identity is escaped for
+// bd's query language so a quoted session name remains data, not a predicate.
+func bdQueryEphemeralAssignedStatusQuietShell(status, shellVar string) string {
+	return `query_assignee=$(printf '%s' "$` + shellVar + `" | sed 's/[\\"]/\\&/g'); ` +
+		`bd query --json "ephemeral=true AND status=` + status + ` AND assignee=\"$query_assignee\"" --limit=0 2>/dev/null`
+}
+
 func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
 	body := selector +
 		` | select(((.issue_type // .type // "") != "epic"))` +
@@ -308,7 +316,7 @@ func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) strin
 
 func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
 	_ = includeEphemeralReady
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return `r=$(` + bdQueryEphemeralAssignedStatusQuietShell("in_progress", shellVar) + ` | ` +
 		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
@@ -318,7 +326,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 		return ""
 	}
 	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
+	return `r=$(` + bdQueryEphemeralAssignedStatusQuietShell("open", shellVar) + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }

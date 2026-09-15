@@ -6,12 +6,90 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func TestHookRecordCurrentBeadUsesCityStoreAfterRigClaim(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	var calls [][]string
+	var capturedDir string
+	var capturedEnv map[string]string
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, env map[string]string) beads.CommandRunner {
+		capturedEnv = env
+		return func(dir, name string, args ...string) ([]byte, error) {
+			if name != "bd" {
+				t.Fatalf("command name = %q, want bd", name)
+			}
+			capturedDir = dir
+			calls = append(calls, append([]string(nil), args...))
+			switch len(calls) {
+			case 1:
+				return []byte(`[{"id":"session-1","issue_type":"session","metadata":{"currently_processing_bead_id":"old-work"}}]`), nil
+			case 2:
+				return []byte(`[{"id":"session-1","issue_type":"session","metadata":{"currently_processing_bead_id":"new-work"}}]`), nil
+			case 3:
+				return []byte(`[{"id":"session-1","issue_type":"session","metadata":{"currently_processing_bead_id":"new-work"}}]`), nil
+			default:
+				t.Fatalf("unexpected bd call %d: %v", len(calls), args)
+				return nil, nil
+			}
+		}
+	}
+
+	err := hookRecordCurrentBeadWithBdStore(context.Background(), rigDir, []string{
+		"GC_CITY_PATH=" + cityDir,
+		"GC_STORE_ROOT=" + rigDir,
+		"GC_STORE_SCOPE=rig",
+		"GC_RIG=demo",
+		"GC_RIG_ROOT=" + rigDir,
+		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
+	}, "worker-1", "session-1", "new-work")
+	if err != nil {
+		t.Fatalf("hookRecordCurrentBeadWithBdStore: %v", err)
+	}
+	if capturedDir != cityDir {
+		t.Fatalf("bd dir = %q, want city dir %q", capturedDir, cityDir)
+	}
+	if capturedEnv["BEADS_DIR"] != filepath.Join(cityDir, ".beads") ||
+		capturedEnv["GC_STORE_SCOPE"] != "city" || capturedEnv["GC_RIG_ROOT"] != "" {
+		t.Fatalf("bd env did not select city scope: %#v", capturedEnv)
+	}
+	if len(calls) != 3 || !reflect.DeepEqual(calls[1][:3], []string{"update", "--json", "session-1"}) {
+		t.Fatalf("bd calls = %#v, want exact read, update, confirming read", calls)
+	}
+}
+
+func TestHookRecordCurrentBeadRejectsPrefixCollisionBeforeMutation(t *testing.T) {
+	cityDir := t.TempDir()
+	originalRunner := hookClaimCommandRunnerWithEnvContext
+	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
+	var calls [][]string
+	hookClaimCommandRunnerWithEnvContext = func(_ context.Context, _ map[string]string) beads.CommandRunner {
+		return func(_ string, _ string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			return []byte(`[{"id":"session-10","issue_type":"session","metadata":{"currently_processing_bead_id":"untouched"}}]`), nil
+		}
+	}
+
+	err := hookRecordCurrentBeadWithBdStore(context.Background(), cityDir, []string{
+		"GC_CITY_PATH=" + cityDir,
+	}, "worker-1", "session-1", "new-work")
+	if err == nil || !errors.Is(err, beads.ErrIDCollision) {
+		t.Fatalf("hookRecordCurrentBeadWithBdStore error = %v, want ErrIDCollision", err)
+	}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], []string{"show", "--json", "session-1"}) {
+		t.Fatalf("bd calls = %#v, want one exact guard read and no mutation", calls)
+	}
+}
 
 func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
 	originalRunner := hookClaimCommandRunnerWithEnvContext

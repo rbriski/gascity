@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -18,6 +17,24 @@ type publishRunMapSpy struct {
 	beadID string
 	keys   []string
 	err    error
+}
+
+type recordCurrentBeadSpy struct {
+	calls         int
+	sessionBeadID string
+	workBeadID    string
+	err           error
+}
+
+func (s *recordCurrentBeadSpy) fn(_ context.Context, _ string, _ []string, _ string, sessionBeadID, workBeadID string) error {
+	s.calls++
+	s.sessionBeadID = sessionBeadID
+	s.workBeadID = workBeadID
+	return s.err
+}
+
+func noopRecordCurrentBead(context.Context, string, []string, string, string, string) error {
+	return nil
 }
 
 func (s *publishRunMapSpy) fn(runID, beadID string, keys ...string) error {
@@ -39,6 +56,7 @@ func claimOpsForRunMap(beadID string, claimedMeta map[string]string, spy *publis
 		ResolveWorkBranch: func(string) string { return "" },
 		StampWorkMeta:     noopStampWorkMeta,
 		PublishRunMap:     spy.fn,
+		RecordCurrentBead: noopRecordCurrentBead,
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -54,47 +72,64 @@ func claimOpsForRunMap(beadID string, claimedMeta map[string]string, spy *publis
 	return ops, opts
 }
 
-// TestDoHookClaimPublishesRunMapWithoutSessionBeadMutation pins the v1.3.5
-// safety boundary. If session-1 disappears after the claim, a fuzzy bd update
-// can otherwise resolve session-10 and corrupt it. Run-map publication retains
-// correlation without issuing any post-claim bd mutation.
-func TestDoHookClaimPublishesRunMapWithoutSessionBeadMutation(t *testing.T) {
-	originalRunner := hookClaimCommandRunnerWithEnvContext
-	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
-	var bdCalls int
-	collisionMetadata := map[string]string{"sentinel": "unchanged"}
-	hookClaimCommandRunnerWithEnvContext = func(context.Context, map[string]string) beads.CommandRunner {
-		return func(_ string, _ string, args ...string) ([]byte, error) {
-			bdCalls++
-			if len(args) >= 3 && args[0] == "update" && args[2] == "session-1" {
-				collisionMetadata["gc.current_run_id"] = "root-safe"
-			}
-			return nil, nil
-		}
-	}
-
+// TestDoHookClaimRefusesReceiptWhenSessionPointerWriteFails pins the coherent
+// receipt boundary. Once a work claim commits, a missing or stale durable
+// session row must withhold the receipt so the worker cannot close a drain step
+// while currently_processing_bead_id still points at prior work.
+func TestDoHookClaimRefusesReceiptWhenSessionPointerWriteFails(t *testing.T) {
 	spy := &publishRunMapSpy{}
 	ops, opts := claimOpsForRunMap("hw-safe", map[string]string{
 		"gc.routed_to":    "worker",
 		"gc.root_bead_id": "root-safe",
 	}, spy)
+	pointerSpy := &recordCurrentBeadSpy{err: errors.New("exact session bead disappeared")}
+	ops.RecordCurrentBead = pointerSpy.fn
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 1 {
+		t.Fatalf("doHookClaim = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if pointerSpy.calls != 1 || pointerSpy.sessionBeadID != "session-1" || pointerSpy.workBeadID != "hw-safe" {
+		t.Fatalf("current-bead write = %+v, want one session-1/hw-safe attempt", pointerSpy)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no exposed work receipt", stdout.String())
+	}
+	if spy.calls != 0 {
+		t.Fatalf("run-map publish calls = %d, want 0 when session pointer cannot be written", spy.calls)
+	}
+	if !strings.Contains(stderr.String(), "session-1") {
+		t.Fatalf("stderr = %q, want failed session-pointer diagnostic", stderr.String())
+	}
+}
+
+// TestDoHookClaimRebindsDurableCurrentBeadBeforeReceipt reproduces a replacement
+// worker claiming a drain step whose work metadata still names the prior
+// session. The receipt is emitted only after the replacement session's durable
+// currently_processing_bead_id has been rebound to that drain step.
+func TestDoHookClaimRebindsDurableCurrentBeadBeforeReceipt(t *testing.T) {
+	runMapSpy := &publishRunMapSpy{}
+	ops, opts := claimOpsForRunMap("ep-drain", map[string]string{
+		"gc.routed_to":    "worker",
+		"gc.session_id":   "old-session",
+		"gc.session_name": "old-worker",
+	}, runMapSpy)
+	pointerSpy := &recordCurrentBeadSpy{}
+	ops.RecordCurrentBead = pointerSpy.fn
 
 	var stdout, stderr bytes.Buffer
 	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
 		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if bdCalls != 0 {
-		t.Fatalf("post-claim bd mutation calls = %d, want 0", bdCalls)
+	if pointerSpy.calls != 1 || pointerSpy.sessionBeadID != "session-1" || pointerSpy.workBeadID != "ep-drain" {
+		t.Fatalf("current-bead write = %+v, want one replacement-session binding to ep-drain", pointerSpy)
 	}
-	if !reflect.DeepEqual(collisionMetadata, map[string]string{"sentinel": "unchanged"}) {
-		t.Fatalf("prefix-colliding session metadata = %v, want sentinel only", collisionMetadata)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
 	}
-	if spy.calls != 1 || spy.runID != "root-safe" || spy.beadID != "hw-safe" {
-		t.Fatalf("run-map publish = %+v, want one root-safe/hw-safe publish", spy)
-	}
-	wantKeys := []string{"worker-1", "session-1", "actor-1"}
-	if !reflect.DeepEqual(spy.keys, wantKeys) {
-		t.Fatalf("run-map keys = %q, want %q", spy.keys, wantKeys)
+	if result.Action != "work" || result.BeadID != "ep-drain" {
+		t.Fatalf("claim result = %+v, want work receipt for ep-drain", result)
 	}
 }
 

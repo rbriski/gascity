@@ -1570,6 +1570,9 @@ name = "worker"
 	script := fmt.Sprintf(`#!/bin/sh
 printf 'actor=%%s args=%%s\n' "${BEADS_ACTOR:-}" "$*" >> %q
 case "$*" in
+  *"show --json session-id-1"*)
+    printf '[{"id":"session-id-1","issue_type":"session","metadata":{"currently_processing_bead_id":"hw-claim"}}]'
+    ;;
   *"update hw-claim --claim --json"*)
     printf '[{"id":"hw-claim","status":"in_progress","assignee":"%%s","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]' "${BEADS_ACTOR:-}"
     ;;
@@ -1928,7 +1931,17 @@ mode = "on_demand"
 	}
 
 	fakeBin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte("#!/bin/sh\nprintf '[]'\n"), 0o755); err != nil {
+	fakeBD := `#!/bin/sh
+case "$*" in
+  *"show --json session-builder"*)
+    printf '[{"id":"session-builder","issue_type":"session","metadata":{"currently_processing_bead_id":"ga-frpt4k"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(fakeBD), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

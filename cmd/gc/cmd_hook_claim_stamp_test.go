@@ -58,6 +58,7 @@ func poolClaimOps(runner string, claimedMeta map[string]string, branch string, s
 		ResolveWorkBranch: func(string) string { return branch },
 		StampWorkMeta:     spy.fn,
 		PublishRunMap:     noopPublishRunMap,
+		RecordCurrentBead: noopRecordCurrentBead,
 	}
 }
 
@@ -124,6 +125,7 @@ func TestDoHookClaimStampsSessionIdentityOnAdoption(t *testing.T) {
 		ResolveWorkBranch: func(string) string { return "" }, // no worktree
 		StampWorkMeta:     spy.fn,
 		PublishRunMap:     noopPublishRunMap,
+		RecordCurrentBead: noopRecordCurrentBead,
 	}
 
 	var stdout, stderr bytes.Buffer

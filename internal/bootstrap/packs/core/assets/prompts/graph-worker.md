@@ -116,7 +116,7 @@ gc hook --claim --drain-ack --json
 When blocked, escalate — do not wait silently:
 
 ```bash
-gc mail send mayor -s "BLOCKED: Brief description" -m "Details of the issue"
+gc mail send mayor -s "BLOCKED: Brief description" -m "Details of the issue" --notify
 ```
 
 ## Context Exhaustion

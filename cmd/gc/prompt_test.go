@@ -956,6 +956,29 @@ func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
 	}
 }
 
+func TestCoreWorkerPromptsNotifyMayorWhenBlocked(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+
+	const notifiedBlocker = `gc mail send mayor -s "BLOCKED: Brief description" -m "Details of the issue" --notify`
+	for _, rel := range []string{
+		"internal/bootstrap/packs/core/assets/prompts/pool-worker.md",
+		"internal/bootstrap/packs/core/assets/prompts/graph-worker.md",
+	} {
+		t.Run(rel, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repoRoot, rel))
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", rel, err)
+			}
+			if !strings.Contains(string(data), notifiedBlocker) {
+				t.Fatalf("%s must notify the Mayor when escalating a blocker", rel)
+			}
+		})
+	}
+}
+
 func TestMergeFragmentLists(t *testing.T) {
 	tests := []struct {
 		name    string
